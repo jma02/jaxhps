@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jaxhps import Domain, DiscretizationNode3D, PDEProblem, build_solver, solve
 from jaxhps._interpolation_methods import vmapped_interp_to_point_3D
 from jaxhps._grid_creation_3D import get_all_uniform_leaves_3D
@@ -10,6 +11,40 @@ import plotly.express as px
 
 # Set logging to INFO
 logging.basicConfig(level=logging.INFO)
+
+def generate_ngsolve_sensors(kappa, r_breast, z_chest, target_n=500):
+    import netgen.csg as csg
+    from ngsolve import Mesh
+
+    lam_water = 2 * np.pi / kappa
+    sensor_radius = r_breast + lam_water
+    sensor_offset = 0.1 * r_breast
+    
+    def rx_tx(rad, offset, hmax):
+        geo = csg.CSGeometry()
+        sphere = csg.Sphere(csg.Pnt(0,0,0), rad)
+        base = csg.Plane(csg.Pnt(0,offset,0), csg.Vec(0,-1,0))
+        cap = sphere * base
+        geo.AddSurface(sphere, cap)
+        return Mesh(geo.GenerateMesh(maxh=hmax))
+    
+    sensor_area = 2 * np.pi * sensor_radius * (sensor_radius - sensor_offset)
+    repl = np.sqrt(sensor_area)
+    h_sensor = repl / np.sqrt(5 * target_n)
+    
+    mesh = rx_tx(sensor_radius, sensor_offset, h_sensor)
+    for _ in range(5):
+        if mesh.nv > 1.2 * target_n:
+            h_sensor *= 1.2
+        elif mesh.nv < 0.9 * target_n:
+            h_sensor *= 0.9
+        else:
+            break
+        mesh = rx_tx(sensor_radius, sensor_offset, h_sensor)
+        
+    pnts = mesh.ngmesh.Points()
+    coords = np.array([[p.p[0], p.p[2], p.p[1] + z_chest] for p in pnts])
+    return jnp.array(coords)
 
 def sigmoid_ramp(dist, width=0.03):
     return 0.5 * (1.0 - jnp.tanh(dist / width))
@@ -99,22 +134,15 @@ def exact_pml_imaging_demo():
     # -------------------------------------------------------------------
     # 4. Multi-Source Definition (Spherical Bowl)
     # -------------------------------------------------------------------
-    n_sources = 1024
-    print(f"Generating {n_sources} transceivers on a spherical bowl...")
+    target_n = 1024
+    print(f"Generating ~{target_n} transceivers on a spherical bowl using NGSolve/Netgen...")
     
-    # Use a Fibonacci lattice to evenly distribute sensors on a hemisphere
-    indices = jnp.arange(0, n_sources, dtype=float)
-    golden_ratio = (1.0 + 5.0**0.5) / 2.0
+    # Generate the exact unstructured sensor mesh used in py-helm
+    sensor_pos = generate_ngsolve_sensors(kappa, r_breast, z_chest, target_n=target_n)
+    n_sources = sensor_pos.shape[0]
     
-    # Bowl is centered at (0, 0, -1.0), pointing up. Radius = 0.9 (just outside breast)
-    # We want points from the base of the breast (z=-1.0) up to the tip (z=-0.1)
-    r_bowl = 0.9
-    z_rel = r_bowl * (1.0 - indices / (n_sources - 1)) # From 0.9 down to 0
-    r_xy = jnp.sqrt(r_bowl**2 - z_rel**2)
-    theta = 2.0 * jnp.pi * indices / golden_ratio
-    
-    sx, sy, sz = r_xy * jnp.cos(theta), r_xy * jnp.sin(theta), z_chest + z_rel
-    sensor_pos = jnp.stack([sx, sy, sz], axis=-1)
+    sx, sy, sz = sensor_pos[:, 0], sensor_pos[:, 1], sensor_pos[:, 2]
+    print(f"Actual generated transceivers: {n_sources}")
     
     def get_source_term(pos):
         r = jnp.sqrt((x-pos[0])**2 + (y-pos[1])**2 + (z-pos[2])**2 + 1e-6)
