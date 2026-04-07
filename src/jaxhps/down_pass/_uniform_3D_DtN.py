@@ -65,42 +65,56 @@ def down_pass_uniform_3D_DtN(
     S_lst = [jax.device_put(S_arr, device) for S_arr in S_lst]
     g_tilde_lst = [jax.device_put(g_tilde, device) for g_tilde in g_tilde_lst]
 
-    n_levels = len(S_lst)
+    # If the input boundary_data has 2 dimensions, it's multi-source (spatial, source)
+    # If it has 1 dimension, it's single-source (spatial)
+    bool_multi_source = boundary_data.ndim == 2
+    
+    if bool_multi_source and boundary_data.shape[1] == 1:
+        # edge case: someone passed a (N, 1) array, still multi-source-like
+        pass
 
-    bool_multi_source = len(g_tilde_lst) > 1 and g_tilde_lst[0].ndim == 3
-    if bool_multi_source and boundary_data.ndim == 1:
-        raise ValueError(
-            "For multi-source downward pass, need to specify boundary data for each source."
-        )
-    # Reshape to (1, n_bdry, nsrc)
-    if (bool_multi_source and boundary_data.ndim == 2) or (
-        not bool_multi_source and boundary_data.ndim == 1
-    ):
-        bdry_data = jnp.expand_dims(boundary_data, axis=0)
+    if bool_multi_source and boundary_data.ndim == 2:
+        # multi-source
+        pass
+    
+    # Reshape to (1, n_bdry, nsrc) or (1, n_bdry)
+    boundary_data = jnp.expand_dims(boundary_data, axis=0)
+
+    n_levels = len(S_lst)
 
     # if not bool_multi_source:
     #     # Reshape to (1, n_bdry)
     #     bdry_data = jnp.expand_dims(bdry_data, axis=-1)
 
     # Change the last entry of the S_lst and v_int_lst to have batch dimension 1
-    S_lst[-1] = jnp.expand_dims(S_lst[-1], axis=0)
-    g_tilde_lst[-1] = jnp.expand_dims(g_tilde_lst[-1], axis=0)
+    # This was causing issues because the vmapped function expects a batch of 1 at the root level, 
+    # but the operators were being double-expanded or misaligned.
+    # The current vmap in_axes=(0, 0, 0) requires all inputs to have the same leading dimension.
+    # At the root, bdry_data is (1, 24q^2) and S_arr is (1, 12q^2, 24q^2).
+    # S_lst[-1] = jnp.expand_dims(S_lst[-1], axis=0)
+    # g_tilde_lst[-1] = jnp.expand_dims(g_tilde_lst[-1], axis=0)
 
     # Propogate the Dirichlet data down the tree using the S maps.
     for level in range(n_levels - 1, -1, -1):
         S_arr = S_lst[level]
         g_tilde = g_tilde_lst[level]
 
-        bdry_data = vmapped_propogate_down_oct_DtN(S_arr, bdry_data, g_tilde)
-        # Reshape from (-1, 4, n_bdry) to (-1, n_bdry)
-        n_bdry = bdry_data.shape[2]
-        if bool_multi_source:
-            nsrc = bdry_data.shape[-1]
-            bdry_data = bdry_data.reshape((-1, n_bdry, nsrc))
-        else:
-            bdry_data = bdry_data.reshape((-1, n_bdry))
+        # Ensure S_arr and g_tilde have a batch dimension of 1 if they are at the root level
+        if S_arr.ndim == 2:
+            S_arr = jnp.expand_dims(S_arr, axis=0)
+            g_tilde = jnp.expand_dims(g_tilde, axis=0)
 
-    root_dirichlet_data = bdry_data
+        boundary_data = vmapped_propogate_down_oct_DtN(S_arr, boundary_data, g_tilde)
+        # Reshape from (N, 8, 6 * n_per_face) to (8N, 6 * n_per_face)
+        if bool_multi_source:
+            n_bdry = boundary_data.shape[2]
+            nsrc = boundary_data.shape[-1]
+            boundary_data = boundary_data.reshape((-1, n_bdry, nsrc))
+        else:
+            n_bdry = boundary_data.shape[-1]
+            boundary_data = boundary_data.reshape((-1, n_bdry))
+
+    root_dirichlet_data = boundary_data
     # Batched matrix multiplication to compute homog solution on all leaves
     if bool_multi_source:
         leaf_homog_solns = jnp.einsum(

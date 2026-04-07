@@ -215,7 +215,13 @@ def interp_from_hps_3D(
         f_for_vmap,
         p,
     )
-    vals = vals.reshape(n_x, n_y, n_z)
+    
+    # Correctly handle multi-source data during reshape
+    if f_evals.ndim == 3:
+        n_sources = f_evals.shape[-1]
+        vals = vals.reshape(n_x, n_y, n_z, n_sources)
+    else:
+        vals = vals.reshape(n_x, n_y, n_z)
     return vals, target_pts
 
 

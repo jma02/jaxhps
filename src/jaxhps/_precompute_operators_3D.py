@@ -81,7 +81,7 @@ def precompute_P_3D_DtN(p: int, q: int) -> jnp.ndarray:
         gauss_pts, gauss_pts, cheby_pts, cheby_pts
     )
 
-    I_P = jnp.zeros((n_cheby_bdry_pts, 6 * q**2), dtype=jnp.float64)
+    I_P = jnp.zeros((n_cheby_bdry_pts, 6 * q**2))
 
     # First face
     idxes = get_face_1_idxes(p)
@@ -169,7 +169,7 @@ def precompute_Q_3D_DtN(
     # Chebyshev points to the outward normal derivative of the solution on the boundary Chebyshev points.
     # Note this operator is double-counting
     # grid points on the edges.
-    N = jnp.full((6 * p**2, p**3), jnp.nan, dtype=jnp.float64)
+    N = jnp.full((6 * p**2, p**3), jnp.nan)
     # Grab the rows of the appropriate derivative operator and put them into N.
     face_1_idxes = get_face_1_idxes(p)
     N = N.at[: p**2].set(-1 * du_dx[face_1_idxes])

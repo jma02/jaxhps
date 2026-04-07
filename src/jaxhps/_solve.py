@@ -71,8 +71,9 @@ def solve(
 
     if isinstance(boundary_data, list):
         # If the boundary data is a list, we need to concatenate it
-        # into a single array.
-        boundary_data = jnp.concatenate(boundary_data)
+        # into a single array. Concatenate along the first axis to 
+        # correctly handle multi-source problems (which have sources on the last axis).
+        boundary_data = jnp.concatenate(boundary_data, axis=0)
 
     if pde_problem.use_ItI:
         down_pass_fn = down_pass_uniform_2D_ItI

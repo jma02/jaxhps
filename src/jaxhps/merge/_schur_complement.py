@@ -564,7 +564,7 @@ def _oct_merge_from_submatrices(
 
     # B is a block matrix with an array of (8x12) blocks.
 
-    B = jnp.zeros((n_ext_pts, n_int_pts), dtype=jnp.float64)
+    B = jnp.zeros((n_ext_pts, n_int_pts), dtype=T_a_1_9.dtype)
 
     # First row
     # print("_oct_merge_from_submatrice: B.devices()", B.devices())
@@ -602,7 +602,7 @@ def _oct_merge_from_submatrices(
     B = B.at[idx_7:idx_8, idx_19:idx_20].set(T_h_8_20)
 
     # C is a block matrix with an array of (12x8) blocks.
-    C = jnp.zeros((n_int_pts, n_ext_pts), dtype=jnp.float64)
+    C = jnp.zeros((n_int_pts, n_ext_pts), dtype=T_a_1_9.dtype)
     # First row
     C = C.at[:idx_9, :idx_1].set(T_a_9_1)
     C = C.at[:idx_9, idx_1:idx_2].set(T_b_9_2)
@@ -641,7 +641,7 @@ def _oct_merge_from_submatrices(
     C = C.at[idx_19:, idx_7:idx_8].set(T_h_20_8)
 
     # D is a block matrix with an array of (12x12) blocks.
-    D = jnp.zeros((n_int_pts, n_int_pts), dtype=jnp.float64)
+    D = jnp.zeros((n_int_pts, n_int_pts), dtype=T_a_1_9.dtype)
     # First row
     D = D.at[:idx_9, :idx_9].set(T_a_9_9 + T_b_9_9)
     D = D.at[:idx_9, idx_9:idx_10].set(T_b_9_10)
