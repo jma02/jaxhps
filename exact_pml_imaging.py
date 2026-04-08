@@ -87,15 +87,24 @@ def interp_point_cloud(domain, samples, pts):
 
 
 def exact_pml_imaging_demo():
-    print("=== Exact 3D PML: Multi-Source Imaging on a Spherical Bowl ===")
+    print("=== Exact 3D PML: Multi-Source Imaging ===")
     
     # -------------------------------------------------------------------
-    # 1. Configuration
+    # 1. Configuration (Matching py-helm exactly)
     # -------------------------------------------------------------------
-    kappa = 12.0
-    L = 1.0
-    L_total = 2.0 
-    delta_pml = L_total - L
+    kappa = 16.0             # Increased wavenumber per paper
+    r_breast = 1.0           # Physical breast radius
+    lam_water = 2.0 * jnp.pi / kappa
+    
+    # In py-helm: pmlmin = b_radius + 2*lam_water = 1.0 + 0.785 = 1.785
+    # So we set our physical domain L to 1.8 to contain everything.
+    L = 1.8
+    L_total = 2.0            # PML outer boundary
+    delta_pml = L_total - L  # 0.2
+    
+    # Since the domain is larger and kappa is higher, we need adequate resolution
+    # L_tree=2 means leaves are size 1.0. With kappa=16, lambda is ~0.39.
+    # We need p >= 12 for good spectral accuracy.
     p, q = 12, 10
     
     root = DiscretizationNode3D(xmin=-L_total, xmax=L_total, ymin=-L_total, ymax=L_total, zmin=-L_total, zmax=L_total)
@@ -104,20 +113,36 @@ def exact_pml_imaging_demo():
     x, y, z = pts[..., 0], pts[..., 1], pts[..., 2]
     
     # -------------------------------------------------------------------
-    # 2. Refractive Index n(x) (Breast Geometry)
+    # 2. Refractive Index n(x) (Breast Geometry from py-helm)
     # -------------------------------------------------------------------
-    # Breast centered at z=-1.0 (Chest Wall), radius 0.8, pointing up into z > -1.0
-    r_breast = 0.8
     z_chest = -1.0
-    dist_breast = jnp.sqrt(x**2 + y**2 + (z - z_chest)**2) - r_breast
-    mask_breast = sigmoid_ramp(dist_breast) * sigmoid_ramp(z_chest - z)
+    dist_from_center = jnp.sqrt(x**2 + y**2 + (z - z_chest)**2)
     
-    # Inclusion (Tumor) offset from center
-    r_tumor = 0.15
-    dist_tumor = jnp.sqrt((x-0.2)**2 + (y-0.1)**2 + (z+0.5)**2) - r_tumor
-    mask_tumor = sigmoid_ramp(dist_tumor, width=0.02)
+    # py-helm properties
+    n_water = 1.0
+    n_tissue = (1524.0 / 1485.0)**2  # ~1.053
+    n_skin = (1524.0 / 1610.0)**2    # ~0.896
+    n_tumor = 1.2                    # ~ (1524/1500)^2 * random_factor
     
-    n_field = 1.0 + (0.2 + 0.02j) * mask_breast + (0.3 + 0.08j) * mask_tumor
+    delta_skin = r_breast / 30.0     # ~0.033
+    
+    # Masks
+    mask_outer = sigmoid_ramp(dist_from_center - r_breast) * sigmoid_ramp(z_chest - z)
+    mask_inner = sigmoid_ramp(dist_from_center - (r_breast - delta_skin)) * sigmoid_ramp(z_chest - z)
+    mask_skin = mask_outer - mask_inner
+    
+    # 3 Tumors as defined in test_params.py
+    # cen[:,0]=(0, b_radius/2, -b_radius/4), rad=0.1
+    # cen[:,1]=(0, b_radius/2, 0), rad=0.1
+    # cen[:,2]=(0, b_radius/2, b_radius/4), rad=0.05
+    # (Mapping y->z, z->y to match our orientation)
+    mask_t1 = sigmoid_ramp(jnp.sqrt(x**2 + (y + 0.25)**2 + (z - (-0.5))**2) - 0.1, width=0.02)
+    mask_t2 = sigmoid_ramp(jnp.sqrt(x**2 + y**2 + (z - (-0.5))**2) - 0.1, width=0.02)
+    mask_t3 = sigmoid_ramp(jnp.sqrt(x**2 + (y - 0.25)**2 + (z - (-0.5))**2) - 0.05, width=0.02)
+    
+    mask_tumors = jnp.maximum(jnp.maximum(mask_t1, mask_t2), mask_t3)
+    
+    n_field = n_water + (n_skin - n_water)*mask_skin + (n_tissue - n_water)*mask_inner + (n_tumor - n_tissue)*mask_tumors
     
     # -------------------------------------------------------------------
     # 3. PML Coefficients
@@ -132,16 +157,12 @@ def exact_pml_imaging_demo():
     I_coeffs = kappa**2 * n_field * (d1 * d2 * d3)
 
     # -------------------------------------------------------------------
-    # 4. Multi-Source Definition (Spherical Bowl)
+    # 4. Multi-Source Definition (Spherical Bowl matching py-helm)
     # -------------------------------------------------------------------
-    target_n = 1024
+    target_n = 500 # Slightly reduced from 1024 for speed, but matches their exact default
     print(f"Generating ~{target_n} transceivers on a spherical bowl using NGSolve/Netgen...")
-    
-    # Generate the exact unstructured sensor mesh used in py-helm
     sensor_pos = generate_ngsolve_sensors(kappa, r_breast, z_chest, target_n=target_n)
     n_sources = sensor_pos.shape[0]
-    
-    sx, sy, sz = sensor_pos[:, 0], sensor_pos[:, 1], sensor_pos[:, 2]
     print(f"Actual generated transceivers: {n_sources}")
     
     def get_source_term(pos):
@@ -177,7 +198,7 @@ def exact_pml_imaging_demo():
     # -------------------------------------------------------------------
     print(f"Interpolating to {n_sources} receiver locations on the bowl...")
     M = interp_point_cloud(domain, u_scat_all, sensor_pos)
-    M = jnp.squeeze(M)  # Ensure it is exactly (1024, 1024)
+    M = jnp.squeeze(M)
     
     reciprocity_error = jnp.linalg.norm(M - M.T) / jnp.linalg.norm(M)
     print(f"   Reciprocity Error ||M - M^T|| / ||M||: {reciprocity_error:.6e}")
@@ -186,17 +207,18 @@ def exact_pml_imaging_demo():
     # 7. Visualization: Coefficients & Sensors
     # -------------------------------------------------------------------
     print("Generating Coefficient and Data visualizations...")
-    n_vis = 50
+    n_vis = 60
     lin = jnp.linspace(-L_total, L_total, n_vis)
     X, Y, Z = jnp.meshgrid(lin, lin, lin, indexing='ij')
     n_vol, _ = domain.interp_from_interior_points(n_field, lin, lin, lin)
     
-    # Plot Breast, Chest Wall, and the Sensor Point Cloud
+    sx, sy, sz = sensor_pos[:, 0], sensor_pos[:, 1], sensor_pos[:, 2]
+    
     fig_n = go.Figure(data=[
         go.Volume(
             x=X.flatten(), y=Y.flatten(), z=Z.flatten(),
-            value=jnp.real(n_vol).flatten(), isomin=1.05, isomax=1.4,
-            opacity=0.3, surface_count=15, colorscale='Viridis',
+            value=jnp.real(n_vol).flatten(), isomin=0.8, isomax=1.25,
+            opacity=0.3, surface_count=20, colorscale='Viridis',
             name="Tissue Index"
         ),
         go.Surface(
@@ -209,17 +231,14 @@ def exact_pml_imaging_demo():
             marker=dict(size=3, color='red'), name='Transceivers'
         )
     ])
-    fig_n.update_layout(title="Breast Geometry & Spherical Sensor Array")
+    fig_n.update_layout(title=f"Breast Anatomy (n) & Sensor Array (kappa={kappa})")
     fig_n.write_html("coef_index_n.html")
     
-    # Plot Measurement Matrix
-    fig_m = px.imshow(jnp.abs(M), title="1024-Pair Measurement Matrix |M| (Spherical Array)",
+    fig_m = px.imshow(jnp.abs(M), title=f"{n_sources}-Pair Measurement Matrix |M|",
                       labels=dict(x="Source", y="Receiver"), color_continuous_scale='Inferno')
     fig_m.write_html("imaging_measurement_matrix.html")
     
-    print("Done! Check files:")
-    print("- coef_index_n.html (Shows the spherical bowl of sensors)")
-    print("- imaging_measurement_matrix.html")
+    print("Done!")
 
 if __name__ == "__main__":
     exact_pml_imaging_demo()
