@@ -17,6 +17,7 @@ from .local_solve import (
     local_solve_stage_uniform_2D_DtN,
     local_solve_stage_uniform_2D_ItI,
     local_solve_stage_uniform_3D_DtN,
+    local_solve_stage_uniform_3D_ItI,
     nosource_local_solve_stage_uniform_2D_ItI,
     nosource_local_solve_stage_uniform_2D_DtN,
 )
@@ -27,6 +28,7 @@ from .merge import (
     merge_stage_uniform_2D_DtN,
     merge_stage_uniform_2D_ItI,
     merge_stage_uniform_3D_DtN,
+    merge_stage_uniform_3D_ItI,
     nosource_merge_stage_uniform_2D_ItI,
     nosource_merge_stage_uniform_2D_DtN,
 )
@@ -99,11 +101,14 @@ def build_solver(
             compute_device=compute_device,
             host_device=host_device,
         )
-    if pde_problem.use_ItI:
+    if pde_problem.use_ItI and pde_problem.domain.bool_2D:
         local_solve_fn = local_solve_stage_uniform_2D_ItI
         merge_fn = merge_stage_uniform_2D_ItI
         chunksize_fn = local_solve_chunksize_2D
-
+    elif pde_problem.use_ItI and not pde_problem.domain.bool_2D:
+        local_solve_fn = local_solve_stage_uniform_3D_ItI
+        merge_fn = merge_stage_uniform_3D_ItI
+        chunksize_fn = local_solve_chunksize_3D
     elif pde_problem.domain.bool_uniform and pde_problem.domain.bool_2D:
         local_solve_fn = local_solve_stage_uniform_2D_DtN
         merge_fn = merge_stage_uniform_2D_DtN

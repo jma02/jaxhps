@@ -8,6 +8,7 @@ from .down_pass import (
     down_pass_uniform_2D_ItI,
     down_pass_uniform_2D_DtN,
     down_pass_uniform_3D_DtN,
+    down_pass_uniform_3D_ItI,
     down_pass_adaptive_2D_DtN,
     down_pass_adaptive_3D_DtN,
 )
@@ -75,9 +76,10 @@ def solve(
         # correctly handle multi-source problems (which have sources on the last axis).
         boundary_data = jnp.concatenate(boundary_data, axis=0)
 
-    if pde_problem.use_ItI:
+    if pde_problem.use_ItI and pde_problem.domain.bool_2D:
         down_pass_fn = down_pass_uniform_2D_ItI
-
+    elif pde_problem.use_ItI and not pde_problem.domain.bool_2D:
+        down_pass_fn = down_pass_uniform_3D_ItI
     elif pde_problem.domain.bool_2D:
         down_pass_fn = down_pass_uniform_2D_DtN
     else:
