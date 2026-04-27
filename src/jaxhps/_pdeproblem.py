@@ -18,6 +18,11 @@ from ._precompute_operators_3D import (
     precompute_P_3D_DtN,
     precompute_Q_3D_DtN,
     precompute_projection_ops_3D,
+    precompute_P_3D_ItI,
+    precompute_N_matrix_3D,
+    precompute_N_tilde_matrix_3D,
+    precompute_G_3D_ItI,
+    precompute_QH_3D_ItI,
 )
 from typing import List, Tuple
 
@@ -48,10 +53,14 @@ class PDEProblem:
         if isinstance(domain.root, DiscretizationNode3D):
             bool_2D = False
 
-            # 3D code doesn't support ItI merges
-            if use_ItI:
+            # 3D ItI merges are only supported on uniform octrees in this WIP
+            # implementation. The local solve stage and ItI precomputed operators
+            # are wired up in :mod:`jaxhps.local_solve._uniform_3D_ItI` and
+            # :mod:`jaxhps._precompute_operators_3D`. Adaptive 3D ItI is not yet
+            # implemented.
+            if use_ItI and not domain.bool_uniform:
                 raise NotImplementedError(
-                    "ItI merges are not supported for 3D problems."
+                    "3D ItI merges are only supported for uniform octrees."
                 )
         else:
             bool_2D = True
@@ -68,10 +77,10 @@ class PDEProblem:
         if use_ItI and eta is None:
             raise ValueError("eta must be specified when using ItI merges.")
 
-        # If ItI is being used, it must be a uniform 2D problem
+        # If ItI is being used, it must be a uniform problem
         if use_ItI and not domain.bool_uniform:
             raise ValueError(
-                "ItI merges are only supported for uniform 2D problems."
+                "ItI merges are only supported for uniform problems."
             )
 
         # If it's not a uniform 2D problem, the source must be specified
@@ -207,10 +216,25 @@ class PDEProblem:
             ) = precompute_diff_operators_3D(
                 p=domain.p, half_side_len=half_side_len
             )
-            self.P = precompute_P_3D_DtN(domain.p, domain.q)
-            self.Q = precompute_Q_3D_DtN(
-                domain.p, domain.q, self.D_x, self.D_y, self.D_z
-            )
+            if not use_ItI:
+                self.P = precompute_P_3D_DtN(domain.p, domain.q)
+                self.Q = precompute_Q_3D_DtN(
+                    domain.p, domain.q, self.D_x, self.D_y, self.D_z
+                )
+            else:
+                # Interpolation / Differentiation matrices for 3D ItI merges.
+                # Same naming convention as the 2D case (P, G, QH).
+                self.P = precompute_P_3D_ItI(domain.p, domain.q)
+                N_tilde = precompute_N_tilde_matrix_3D(
+                    self.D_x, self.D_y, self.D_z, domain.p
+                )
+                self.G = precompute_G_3D_ItI(N_tilde, self.eta)
+                N = precompute_N_matrix_3D(
+                    self.D_x, self.D_y, self.D_z, domain.p
+                )
+                self.QH = precompute_QH_3D_ItI(
+                    N, domain.p, domain.q, self.eta
+                )
 
             # For adaptive case, we need to precompute projection ops
             if not domain.bool_uniform:
