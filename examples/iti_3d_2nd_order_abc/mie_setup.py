@@ -24,8 +24,8 @@ SPHERE_RADIUS = 0.5
 EPS_SPHERE = 2.0   # = n^2 (so refractive index = sqrt(2) ~ 1.414)
 SPHERE_CENTER = np.array([0.0, 0.0, 0.0])
 
-# Smoothing width for FEM-friendly tanh ramp.
-# Keep small (4% of R) so Mie hard-sphere is a good reference.
+# Smoothing width for the tanh ramp (keeps the coefficient field C^infty).
+# Keep small (4% of R) so the Mie hard-sphere series remains a good reference.
 W_RAMP = 0.02
 
 # Sensors

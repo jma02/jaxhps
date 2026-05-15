@@ -1,8 +1,8 @@
 """jaxhps 3D ItI driver for the strong-scattering sphere problem.
 
-Uses the impedance-to-impedance merge path (devin/1777254507-iti-3d branch).
-First-order Sommerfeld ABC on outer cube faces (eta=-kappa, g_in=0).
-No PML, no Dirichlet outer wall.
+Uses the 3D impedance-to-impedance (ItI) merge path with a 1st-order
+Sommerfeld absorbing boundary on the outer cube faces (eta=-kappa, g_in=0).
+This is the baseline that ``run_iti_2nd_order_abc.py`` compares against.
 """
 import os, sys, time
 sys.path.insert(0, os.path.dirname(__file__))

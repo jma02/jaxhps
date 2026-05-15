@@ -14,9 +14,11 @@ in homogeneous water:
 where r_tx = |x_tx - c|, r_y = |y - c|, cos gamma = (x_tx-c).(y-c)/(r_tx r_y).
 The scattering coefficients s_l come from matching u and du/dr at r = R.
 
-Note: our FEM/HPS/VIE drivers use a SMOOTH sphere (tanh ramp w=0.02). The
-hard-sphere Mie series is therefore approximate for them at order O(w/R).
-With w=0.02 and R=0.5 we expect ~4% Mie-vs-truth error (acceptable).
+Note: the HPS solver uses a SMOOTH sphere (tanh ramp w=0.02) to keep the
+coefficient field C^infty. The hard-sphere Mie series is therefore an
+approximate reference for the smoothed solve at order O(w/R). With
+w=0.02 and R=0.5 the resulting Mie-vs-truth gap is small relative to the
+ABC-induced error we are studying here.
 """
 import os, sys, time
 import numpy as np
