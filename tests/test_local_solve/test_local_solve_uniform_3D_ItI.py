@@ -6,6 +6,7 @@ Verifies:
   impedance-to-interior-solution (Y) maps against a manufactured plane-wave
   Helmholtz solution.
 """
+
 import numpy as np
 import jax.numpy as jnp
 import jax

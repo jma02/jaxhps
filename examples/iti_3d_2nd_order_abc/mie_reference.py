@@ -20,13 +20,15 @@ approximate reference for the smoothed solve at order O(w/R). With
 w=0.02 and R=0.5 the resulting Mie-vs-truth gap is small relative to the
 ABC-induced error we are studying here.
 """
-import os, sys, time
+
+import os
+import sys
+import time
 import numpy as np
 from scipy.special import spherical_jn, spherical_yn, eval_legendre
 
 sys.path.insert(0, os.path.dirname(__file__))
-from mie_setup import (KAPPA, SPHERE_CENTER, SPHERE_RADIUS, EPS_SPHERE,
-                       N_TX, get_tx)
+from mie_setup import KAPPA, SPHERE_CENTER, SPHERE_RADIUS, EPS_SPHERE, get_tx
 
 
 def hankel1(l, x):
@@ -34,8 +36,9 @@ def hankel1(l, x):
 
 
 def hankel1_prime(l, x):
-    return (spherical_jn(l, x, derivative=True)
-            + 1j * spherical_yn(l, x, derivative=True))
+    return spherical_jn(l, x, derivative=True) + 1j * spherical_yn(
+        l, x, derivative=True
+    )
 
 
 def mie_s_l(l, k, R, eps):
@@ -59,14 +62,23 @@ def mie_s_l(l, k, R, eps):
 
 def mie_M(tx_coords, rx_coords, kappa, c, R, eps, lmax):
     """Build M[irx, itx] = u^s at rx_coords[irx] with source at tx_coords[itx]."""
-    Ntx = len(tx_coords); Nrx = len(rx_coords)
+    Ntx = len(tx_coords)
+    Nrx = len(rx_coords)
     s = np.array([mie_s_l(l, kappa, R, eps) for l in range(lmax + 1)])
     r_tx = np.linalg.norm(tx_coords - c, axis=1)
     r_rx = np.linalg.norm(rx_coords - c, axis=1)
-    hl_tx = np.array([[hankel1(l, kappa * r_tx[i]) for l in range(lmax + 1)]
-                      for i in range(Ntx)])
-    hl_rx = np.array([[hankel1(l, kappa * r_rx[i]) for l in range(lmax + 1)]
-                      for i in range(Nrx)])
+    hl_tx = np.array(
+        [
+            [hankel1(l, kappa * r_tx[i]) for l in range(lmax + 1)]
+            for i in range(Ntx)
+        ]
+    )
+    hl_rx = np.array(
+        [
+            [hankel1(l, kappa * r_rx[i]) for l in range(lmax + 1)]
+            for i in range(Nrx)
+        ]
+    )
     ls = np.arange(lmax + 1)
     M = np.zeros((Nrx, Ntx), dtype=complex)
     for irx in range(Nrx):
@@ -84,13 +96,21 @@ def main():
     tx = get_tx()
     rx = tx
     c = np.asarray(SPHERE_CENTER)
-    print(f"Mie reference: kappa={KAPPA} R={SPHERE_RADIUS} eps={EPS_SPHERE} kR={KAPPA*SPHERE_RADIUS:.2f}")
-    print(f"  Born ratio chi*(kR)^2 = {(EPS_SPHERE - 1) * (KAPPA*SPHERE_RADIUS)**2:.2f}")
-    print(f"  N_TX = {len(tx)} on sphere of radius {np.linalg.norm(tx[0]):.2f}")
+    print(
+        f"Mie reference: kappa={KAPPA} R={SPHERE_RADIUS} eps={EPS_SPHERE} kR={KAPPA * SPHERE_RADIUS:.2f}"
+    )
+    print(
+        f"  Born ratio chi*(kR)^2 = {(EPS_SPHERE - 1) * (KAPPA * SPHERE_RADIUS) ** 2:.2f}"
+    )
+    print(
+        f"  N_TX = {len(tx)} on sphere of radius {np.linalg.norm(tx[0]):.2f}"
+    )
 
     # Truncation: lmax >> kR_in to capture interior modes
-    lmax = max(int(np.ceil(KAPPA * np.sqrt(EPS_SPHERE) * SPHERE_RADIUS + 30)),
-               int(np.ceil(KAPPA * SPHERE_RADIUS + 30)))
+    lmax = max(
+        int(np.ceil(KAPPA * np.sqrt(EPS_SPHERE) * SPHERE_RADIUS + 30)),
+        int(np.ceil(KAPPA * SPHERE_RADIUS + 30)),
+    )
     print(f"  lmax = {lmax}")
 
     t0 = time.perf_counter()
@@ -98,7 +118,9 @@ def main():
     print(f"  built in {time.perf_counter() - t0:.2f}s")
 
     # Truncation convergence
-    M_lo = mie_M(tx[:2], tx[:2], KAPPA, c, SPHERE_RADIUS, EPS_SPHERE, lmax - 10)
+    M_lo = mie_M(
+        tx[:2], tx[:2], KAPPA, c, SPHERE_RADIUS, EPS_SPHERE, lmax - 10
+    )
     err_trunc = np.linalg.norm(M_lo - M[:2, :2]) / np.linalg.norm(M[:2, :2])
     print(f"  truncation rel err (lmax vs lmax-10) = {err_trunc:.2e}")
 
@@ -108,11 +130,18 @@ def main():
 
     print(f"  ||M||_F = {np.linalg.norm(M):.4e}")
 
-    out = os.path.join(os.path.dirname(__file__), 'mie.npz')
-    np.savez(out, umeas=M, tx=tx, kappa=KAPPA,
-             sphere_center=c, sphere_radius=SPHERE_RADIUS, eps_sphere=EPS_SPHERE)
+    out = os.path.join(os.path.dirname(__file__), "mie.npz")
+    np.savez(
+        out,
+        umeas=M,
+        tx=tx,
+        kappa=KAPPA,
+        sphere_center=c,
+        sphere_radius=SPHERE_RADIUS,
+        eps_sphere=EPS_SPHERE,
+    )
     print(f"  saved -> {out}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

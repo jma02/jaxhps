@@ -11,6 +11,7 @@ the impedance trace of the analytical plane-wave solution
 that the recovered interior solution matches the analytical one to
 spectral precision.
 """
+
 import logging
 
 import numpy as np
@@ -24,7 +25,9 @@ from jaxhps._build_solver import build_solver
 from jaxhps._solve import solve
 
 
-def _outward_normals_for_boundary(boundary_points: np.ndarray, root) -> np.ndarray:
+def _outward_normals_for_boundary(
+    boundary_points: np.ndarray, root
+) -> np.ndarray:
     n = np.zeros_like(boundary_points)
     eps = 1e-9
     n[np.abs(boundary_points[:, 0] - root.xmin) < eps] = [-1, 0, 0]
@@ -47,15 +50,18 @@ class TestPipelineUniform3DItIPlanewave:
         results = []
         for p, q in [(8, 6), (12, 8), (16, 10)]:
             root = DiscretizationNode3D(
-                xmin=-0.5, xmax=0.5,
-                ymin=-0.5, ymax=0.5,
-                zmin=-0.5, zmax=0.5,
+                xmin=-0.5,
+                xmax=0.5,
+                ymin=-0.5,
+                ymax=0.5,
+                zmin=-0.5,
+                zmax=0.5,
             )
-            n_leaves = 8 ** L
+            n_leaves = 8**L
             domain = Domain(p=p, q=q, root=root, L=L)
 
             ones = np.ones((n_leaves, p**3))
-            I_coeffs = (kappa ** 2) * ones
+            I_coeffs = (kappa**2) * ones
             src = np.zeros((n_leaves, p**3))
 
             pde_problem = PDEProblem(
@@ -95,16 +101,23 @@ class TestPipelineUniform3DItIPlanewave:
             u_exact = np.exp(1j * (interior_pts @ k_vec))
             u_solver = np.asarray(solns)
 
-            err_int = np.max(np.abs(u_solver - u_exact)) / np.max(np.abs(u_exact))
+            err_int = np.max(np.abs(u_solver - u_exact)) / np.max(
+                np.abs(u_exact)
+            )
             results.append((p, q, float(err_top), float(err_int)))
             logging.info(
                 "p=%d q=%d  T-err=%.3e  interior-err=%.3e",
-                p, q, err_top, err_int,
+                p,
+                q,
+                err_top,
+                err_int,
             )
             jax.clear_caches()
 
         # The finest grid should be near spectral precision and convergent.
-        assert results[-1][3] < 1e-3, f"Pipeline planewave test failed: {results}"
+        assert results[-1][3] < 1e-3, (
+            f"Pipeline planewave test failed: {results}"
+        )
         assert results[-1][3] < results[0][3], (
             f"Convergence not observed: {results}"
         )
@@ -120,15 +133,18 @@ class TestPipelineUniform3DItIPlanewave:
         p, q = 8, 6
 
         root = DiscretizationNode3D(
-            xmin=-0.5, xmax=0.5,
-            ymin=-0.5, ymax=0.5,
-            zmin=-0.5, zmax=0.5,
+            xmin=-0.5,
+            xmax=0.5,
+            ymin=-0.5,
+            ymax=0.5,
+            zmin=-0.5,
+            zmax=0.5,
         )
-        n_leaves = 8 ** L
+        n_leaves = 8**L
         domain = Domain(p=p, q=q, root=root, L=L)
 
         ones = np.ones((n_leaves, p**3))
-        I_coeffs = (kappa ** 2) * ones
+        I_coeffs = (kappa**2) * ones
         src = np.zeros((n_leaves, p**3))
 
         pde_problem = PDEProblem(
@@ -163,7 +179,10 @@ class TestPipelineUniform3DItIPlanewave:
         err_int = np.max(np.abs(u_solver - u_exact)) / np.max(np.abs(u_exact))
         logging.info(
             "L=2 p=%d q=%d  T-err=%.3e  interior-err=%.3e",
-            p, q, err_top, err_int,
+            p,
+            q,
+            err_top,
+            err_int,
         )
         assert err_int < 1e-3, f"L=2 pipeline test failed: err={err_int}"
 
@@ -181,31 +200,48 @@ class TestPipelineUniform3DItIPlanewave:
         eta = kappa  # any non-zero eta works for this test (it is not an absorbing BC test)
         p, q, L = 12, 10, 1
         root = DiscretizationNode3D(
-            xmin=-0.4, xmax=0.4, ymin=-0.4, ymax=0.4, zmin=-0.4, zmax=0.4,
+            xmin=-0.4,
+            xmax=0.4,
+            ymin=-0.4,
+            ymax=0.4,
+            zmin=-0.4,
+            zmax=0.4,
         )
         domain = Domain(p=p, q=q, root=root, L=L)
         pts = np.asarray(domain.interior_points)
         xg, yg, zg = pts[..., 0], pts[..., 1], pts[..., 2]
         u_int = np.sin(xg) * np.cos(yg) * np.sin(zg)
-        I_var = (kappa ** 2 + 2.0 + np.sin(xg) * np.cos(yg) * np.cos(zg) * xg)
+        I_var = kappa**2 + 2.0 + np.sin(xg) * np.cos(yg) * np.cos(zg) * xg
         src = (-3.0 * u_int + I_var * u_int).astype(np.complex128)
 
         n_leaves = pts.shape[0]
         ones = np.ones((n_leaves, p**3))
         problem = PDEProblem(
             domain=domain,
-            D_xx_coefficients=ones, D_yy_coefficients=ones, D_zz_coefficients=ones,
-            I_coefficients=I_var.astype(np.complex128), source=src,
-            use_ItI=True, eta=eta,
+            D_xx_coefficients=ones,
+            D_yy_coefficients=ones,
+            D_zz_coefficients=ones,
+            I_coefficients=I_var.astype(np.complex128),
+            source=src,
+            use_ItI=True,
+            eta=eta,
         )
         build_solver(problem)
 
         bp = np.asarray(domain.boundary_points).reshape(-1, 3)
         nrm = _outward_normals_for_boundary(bp, root)
         u_b = np.sin(bp[:, 0]) * np.cos(bp[:, 1]) * np.sin(bp[:, 2])
-        gn = (np.cos(bp[:, 0]) * np.cos(bp[:, 1]) * np.sin(bp[:, 2]) * nrm[:, 0]
-              - np.sin(bp[:, 0]) * np.sin(bp[:, 1]) * np.sin(bp[:, 2]) * nrm[:, 1]
-              + np.sin(bp[:, 0]) * np.cos(bp[:, 1]) * np.cos(bp[:, 2]) * nrm[:, 2])
+        gn = (
+            np.cos(bp[:, 0]) * np.cos(bp[:, 1]) * np.sin(bp[:, 2]) * nrm[:, 0]
+            - np.sin(bp[:, 0])
+            * np.sin(bp[:, 1])
+            * np.sin(bp[:, 2])
+            * nrm[:, 1]
+            + np.sin(bp[:, 0])
+            * np.cos(bp[:, 1])
+            * np.cos(bp[:, 2])
+            * nrm[:, 2]
+        )
         g_in = (gn + 1j * eta * u_b).astype(np.complex128)
         solns = np.asarray(solve(problem, jnp.asarray(g_in)))
         err = np.max(np.abs(solns - u_int)) / np.max(np.abs(u_int))

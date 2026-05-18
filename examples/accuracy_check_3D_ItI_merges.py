@@ -54,11 +54,17 @@ def setup_args() -> argparse.Namespace:
     parser.add_argument("--problem_1", action="store_true")
     parser.add_argument("--problem_2", action="store_true")
     parser.add_argument(
-        "--p_vals", type=int, nargs="+", default=[4, 6, 8],
+        "--p_vals",
+        type=int,
+        nargs="+",
+        default=[4, 6, 8],
         help="Chebyshev polynomial orders to sweep.",
     )
     parser.add_argument(
-        "--l_vals", type=int, nargs="+", default=[1, 2],
+        "--l_vals",
+        type=int,
+        nargs="+",
+        default=[1, 2],
         help="Octree refinement levels to sweep.",
     )
     parser.add_argument("--debug", action="store_true")
@@ -150,9 +156,12 @@ class Problem3DItI(ABC):
                     "Running %s with l=%i, p=%i", type(self).__name__, l, p
                 )
                 root = DiscretizationNode3D(
-                    xmin=XMIN, xmax=XMAX,
-                    ymin=YMIN, ymax=YMAX,
-                    zmin=ZMIN, zmax=ZMAX,
+                    xmin=XMIN,
+                    xmax=XMAX,
+                    ymin=YMIN,
+                    ymax=YMAX,
+                    zmin=ZMIN,
+                    zmax=ZMAX,
                 )
                 domain = Domain(p=p, q=p - 2, root=root, L=l)
                 pts = domain.interior_points
@@ -177,13 +186,21 @@ class Problem3DItI(ABC):
                 expected_soln = self.soln(pts)
 
                 err = float(
-                    np.max(np.abs(np.asarray(computed_soln) - np.asarray(expected_soln)))
+                    np.max(
+                        np.abs(
+                            np.asarray(computed_soln)
+                            - np.asarray(expected_soln)
+                        )
+                    )
                 )
                 nrm = float(np.max(np.abs(np.asarray(expected_soln))))
                 errors[i, j] = err / nrm
                 logging.info(
                     "%s: l=%i, p=%i, err=%.3e",
-                    type(self).__name__, l, p, errors[i, j],
+                    type(self).__name__,
+                    l,
+                    p,
+                    errors[i, j],
                 )
                 jax.clear_caches()
         return errors
@@ -192,6 +209,7 @@ class Problem3DItI(ABC):
 # ---------------------------------------------------------------------------
 # Problem 1 — polynomial coefficients, polynomial solution.
 # ---------------------------------------------------------------------------
+
 
 class Problem1(Problem3DItI):
     """Operator: ``Delta u + x * u_x + 3 z^2 * u_z = f``.
@@ -222,9 +240,9 @@ class Problem1(Problem3DItI):
     def source(self, pts):
         x, y, z = pts[..., 0], pts[..., 1], pts[..., 2]
         # Laplacian: u_xx + u_yy + u_zz
-        term1 = 24 * x * y**4 * z         # u_xx of 4 x^3 y^4 z
-        term2 = 48 * x**3 * y**2 * z      # u_yy of 4 x^3 y^4 z
-        term3 = -2                         # u_zz of -z^2
+        term1 = 24 * x * y**4 * z  # u_xx of 4 x^3 y^4 z
+        term2 = 48 * x**3 * y**2 * z  # u_yy of 4 x^3 y^4 z
+        term3 = -2  # u_zz of -z^2
         # x * u_x
         term4 = 12 * x**3 * y**4 * z
         # 3 z^2 * u_z
@@ -242,6 +260,7 @@ class Problem1(Problem3DItI):
 # ---------------------------------------------------------------------------
 # Problem 2 — Gravity Helmholtz; solution is a plane wave.
 # ---------------------------------------------------------------------------
+
 
 class Problem2(Problem3DItI):
     """``Delta u + (1 - z) * eta^2 * u = -z * eta^2 * u``, plane-wave solution.
@@ -280,6 +299,7 @@ class Problem2(Problem3DItI):
 # Output
 # ---------------------------------------------------------------------------
 
+
 def save_results(
     errors: np.ndarray,
     l_vals: list[int],
@@ -290,7 +310,9 @@ def save_results(
     """Save the error grid to ``<plots_dir>/<name>.npz`` (creates dir)."""
     os.makedirs(plots_dir, exist_ok=True)
     out = os.path.join(plots_dir, f"{name}.npz")
-    np.savez(out, errors=errors, l_vals=np.array(l_vals), p_vals=np.array(p_vals))
+    np.savez(
+        out, errors=errors, l_vals=np.array(l_vals), p_vals=np.array(p_vals)
+    )
     logging.info("Wrote %s", out)
 
 
@@ -339,10 +361,14 @@ def main() -> None:
     if args.problem_1:
         e = Problem1().run(args.l_vals, args.p_vals)
         print("\nProblem1 errors (rows=L, cols=p):")
-        print(np.array2string(e, formatter={"float_kind": lambda x: f"{x:.3e}"}))
+        print(
+            np.array2string(e, formatter={"float_kind": lambda x: f"{x:.3e}"})
+        )
         save_results(e, args.l_vals, args.p_vals, "problem_1", args.plots_dir)
         maybe_plot(
-            e, args.l_vals, args.p_vals,
+            e,
+            args.l_vals,
+            args.p_vals,
             "Problem 1: variable-coefficient polynomial",
             os.path.join(args.plots_dir, "problem_1.png"),
         )
@@ -350,10 +376,14 @@ def main() -> None:
     if args.problem_2:
         e = Problem2().run(args.l_vals, args.p_vals)
         print("\nProblem2 errors (rows=L, cols=p):")
-        print(np.array2string(e, formatter={"float_kind": lambda x: f"{x:.3e}"}))
+        print(
+            np.array2string(e, formatter={"float_kind": lambda x: f"{x:.3e}"})
+        )
         save_results(e, args.l_vals, args.p_vals, "problem_2", args.plots_dir)
         maybe_plot(
-            e, args.l_vals, args.p_vals,
+            e,
+            args.l_vals,
+            args.p_vals,
             "Problem 2: gravity Helmholtz plane wave",
             os.path.join(args.plots_dir, "problem_2.png"),
         )

@@ -135,7 +135,9 @@ class Test_merge_planewave_correctness:
     """
 
     @staticmethod
-    def _outward_normals_for_boundary(boundary_points: np.ndarray, root) -> np.ndarray:
+    def _outward_normals_for_boundary(
+        boundary_points: np.ndarray, root
+    ) -> np.ndarray:
         """Return unit outward normal at each boundary Gauss point."""
         n = np.zeros_like(boundary_points)
         eps = 1e-9
@@ -157,9 +159,12 @@ class Test_merge_planewave_correctness:
         for p, q in [(8, 6), (12, 8), (16, 10)]:
             l = 1
             root = DiscretizationNode3D(
-                xmin=-0.5, xmax=0.5,
-                ymin=-0.5, ymax=0.5,
-                zmin=-0.5, zmax=0.5,
+                xmin=-0.5,
+                xmax=0.5,
+                ymin=-0.5,
+                ymax=0.5,
+                zmin=-0.5,
+                zmax=0.5,
                 depth=0,
             )
             n_leaves = 8**l
@@ -182,7 +187,10 @@ class Test_merge_planewave_correctness:
 
             _, T_arr, _, h_arr = local_solve_stage_uniform_3D_ItI(problem)
             S_lst, g_tilde_lst, T_top = merge_stage_uniform_3D_ItI(
-                T_arr=T_arr, h_arr=h_arr, l=l, return_T=True,
+                T_arr=T_arr,
+                h_arr=h_arr,
+                l=l,
+                return_T=True,
             )
 
             bp = np.asarray(domain.boundary_points).reshape(-1, 3)
@@ -219,15 +227,13 @@ class Test__uniform_oct_merge_ItI:
         rng = np.random.default_rng(0)
 
         def rand_T():
-            return (
-                rng.normal(size=(n_gauss_bdry, n_gauss_bdry))
-                + 1j * rng.normal(size=(n_gauss_bdry, n_gauss_bdry))
-            )
+            return rng.normal(
+                size=(n_gauss_bdry, n_gauss_bdry)
+            ) + 1j * rng.normal(size=(n_gauss_bdry, n_gauss_bdry))
 
         def rand_h():
-            return (
-                rng.normal(size=(n_gauss_bdry,))
-                + 1j * rng.normal(size=(n_gauss_bdry,))
+            return rng.normal(size=(n_gauss_bdry,)) + 1j * rng.normal(
+                size=(n_gauss_bdry,)
             )
 
         T_a, T_b, T_c, T_d = rand_T(), rand_T(), rand_T(), rand_T()

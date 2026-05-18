@@ -232,9 +232,7 @@ class PDEProblem:
                 N = precompute_N_matrix_3D(
                     self.D_x, self.D_y, self.D_z, domain.p
                 )
-                self.QH = precompute_QH_3D_ItI(
-                    N, domain.p, domain.q, self.eta
-                )
+                self.QH = precompute_QH_3D_ItI(N, domain.p, domain.q, self.eta)
 
             # For adaptive case, we need to precompute projection ops
             if not domain.bool_uniform:

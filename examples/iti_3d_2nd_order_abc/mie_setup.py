@@ -17,11 +17,12 @@ Dimensionless numbers:
 
 Sensors at r = 1.0 (well outside sphere, well inside computational cube).
 """
+
 import numpy as np
 
 KAPPA = 4.0
 SPHERE_RADIUS = 0.5
-EPS_SPHERE = 2.0   # = n^2 (so refractive index = sqrt(2) ~ 1.414)
+EPS_SPHERE = 2.0  # = n^2 (so refractive index = sqrt(2) ~ 1.414)
 SPHERE_CENTER = np.array([0.0, 0.0, 0.0])
 
 # Smoothing width for the tanh ramp (keeps the coefficient field C^infty).
@@ -36,7 +37,7 @@ SENSOR_RADIUS = 1.0
 def fibonacci_sphere(N, R=1.0):
     idx = np.arange(N) + 0.5
     z = 1.0 - 2.0 * idx / N
-    phi = np.pi * (1 + 5 ** 0.5) * idx
+    phi = np.pi * (1 + 5**0.5) * idx
     x = np.sqrt(np.maximum(0.0, 1.0 - z * z)) * np.cos(phi)
     y = np.sqrt(np.maximum(0.0, 1.0 - z * z)) * np.sin(phi)
     pts = np.stack([x, y, z], axis=-1) * R
@@ -50,6 +51,11 @@ def get_tx():
 def epsilon_field(xg, yg, zg):
     """Smoothed epsilon = n^2 field. Returns 1 outside, EPS_SPHERE inside."""
     import jax.numpy as jnp
-    r = jnp.sqrt((xg - SPHERE_CENTER[0])**2 + (yg - SPHERE_CENTER[1])**2 + (zg - SPHERE_CENTER[2])**2)
+
+    r = jnp.sqrt(
+        (xg - SPHERE_CENTER[0]) ** 2
+        + (yg - SPHERE_CENTER[1]) ** 2
+        + (zg - SPHERE_CENTER[2]) ** 2
+    )
     mask = 0.5 * (1 - jnp.tanh((r - SPHERE_RADIUS) / W_RAMP))
     return 1.0 + (EPS_SPHERE - 1.0) * mask
