@@ -30,14 +30,35 @@ nb  interface            shared between
 20  vertical back-left     d <-> h
 ==  ===================  ====================
 
-For ItI merges we follow the 2D pattern: split the 24 interior unknowns
-(each interface contributes one trace per side) into two groups by
-"checkerboard" parity of the owning leaf.  Each interface joins one
-even-parity leaf to one odd-parity leaf, so each interface contributes
-exactly one entry to each group.
+For ItI merges we follow the 2D ItI pattern (``merge/_uniform_2D_ItI.py``):
+split the 24 interior unknowns (each interface contributes one g_in trace
+per side) into two groups by "checkerboard" parity of the **receiving**
+leaf at each interface.  Each interface joins one even-parity leaf to one
+odd-parity leaf, so each interface contributes exactly one entry to each
+group.
 
-*  Group 1 ("odd" owners):   b, d, e, g  -> 12 unknowns
-*  Group 2 ("even" owners):  a, c, f, h  -> 12 unknowns
+*  Group 1 (even-parity receivers):  ``a, c, f, h``  -> 12 unknowns
+*  Group 2 (odd-parity receivers):   ``b, d, e, g``  -> 12 unknowns
+
+Naming convention (same as 2D ItI -- in ``down_pass/_uniform_2D_ItI.py``,
+``t_a_5`` stores ``g_in_a(5)``):
+
+*  An interior-trace label ``X_f`` refers to the g_int slot that stores
+   ``g_in_X(f)`` -- leaf ``X`` is the **receiver** at interface ``f``.
+*  An ``h_int`` slot at the corresponding position holds the **other**
+   leaf's outgoing particular data ``h_Y_f`` -- leaf ``Y`` is the
+   **source** whose T-matrices appear in that row of ``D``.
+
+For example, ``g1(0)`` stores ``g_in_a(9)`` (label ``a_9``); the paired
+``h_int`` slot stores ``h_b_9`` (leaf b's outgoing impedance at the
+a-b interface).  The identity coefficient on this row of ``D = I + ...``
+comes from the impedance compatibility ``u^(b)_9 + g_in_a(9) = 0``.
+
+Within each group, slots are ordered by source-leaf groups (b/d/e/g for
+Group 1, a/c/f/h for Group 2) rather than by receiver.  This is a minor
+ordering detail that does not affect correctness; the merge math is the
+same and the planewave test in ``tests/test_merge`` verifies it at
+spectral precision.
 
 The interior block ``D`` of the merge linear system has the structure
 ``D = I + [[0, D_12], [D_21, 0]]`` with ``D_12: group 2 -> group 1`` and
@@ -477,21 +498,23 @@ def _oct_merge_from_submatrices_ItI(
 
     n_ext_pts = n_1 + n_2 + n_3 + n_4 + n_5 + n_6 + n_7 + n_8
 
-    # Group 1 (odd-leaf owners): b_9, b_10, b_18, d_11, d_12, d_20,
-    #                            e_13, e_16, e_17, g_14, g_15, g_19
+    # Group 1 (even-parity receivers).  Slots store, in order:
+    #   a_9, c_10, f_18, c_11, a_12, h_20, f_13, h_16, a_17, f_14, h_15, c_19
+    # i.e. for each odd-source leaf (b, d, e, g), the g_in traces at the
+    # three even neighbours across that source's three interior faces.
     g1_sizes = [
         n_9,
         n_10,
-        n_18,  # b
+        n_18,  # b-source: a_9, c_10, f_18
         n_11,
         n_12,
-        n_20,  # d
+        n_20,  # d-source: c_11, a_12, h_20
         n_13,
         n_16,
-        n_17,  # e
+        n_17,  # e-source: f_13, h_16, a_17
         n_14,
         n_15,
-        n_19,  # g
+        n_19,  # g-source: f_14, h_15, c_19
     ]
     # Use Python int arithmetic so offsets are static (shapes are known
     # at trace time inside @jax.jit).
@@ -500,21 +523,23 @@ def _oct_merge_from_submatrices_ItI(
         g1_offsets.append(g1_offsets[-1] + sz)
     n_g1 = g1_offsets[-1]
 
-    # Group 2 (even-leaf owners): a_9, a_12, a_17, c_10, c_11, c_19,
-    #                             f_13, f_14, f_18, h_15, h_16, h_20
+    # Group 2 (odd-parity receivers).  Slots store, in order:
+    #   b_9, d_12, e_17, b_10, d_11, g_19, e_13, g_14, b_18, g_15, e_16, d_20
+    # i.e. for each even-source leaf (a, c, f, h), the g_in traces at the
+    # three odd neighbours across that source's three interior faces.
     g2_sizes = [
         n_9,
         n_12,
-        n_17,  # a
+        n_17,  # a-source: b_9, d_12, e_17
         n_10,
         n_11,
-        n_19,  # c
+        n_19,  # c-source: b_10, d_11, g_19
         n_13,
         n_14,
-        n_18,  # f
+        n_18,  # f-source: e_13, g_14, b_18
         n_15,
         n_16,
-        n_20,  # h
+        n_20,  # h-source: g_15, e_16, d_20
     ]
     g2_offsets = [0]
     for sz in g2_sizes:
@@ -540,103 +565,127 @@ def _oct_merge_from_submatrices_ItI(
     # ------------------------------------------------------------------
     # Build B (n_ext_pts x (n_g1 + n_g2)).  For each leaf alpha, alpha's
     # exterior block has nonzero entries at the columns corresponding to
-    # alpha's three interior face variables.  Even-leaf interior vars live
-    # in Group 2; odd-leaf interior vars in Group 1.
+    # alpha's three incoming-impedance interior traces (g_in_alpha at
+    # alpha's three interior faces).  Even leaves' g_in slots live in
+    # Group 1; odd leaves' g_in slots live in Group 2.
     # ------------------------------------------------------------------
     B = jnp.zeros((n_ext_pts, n_g1 + n_g2), dtype=dtype)
 
-    # B[alpha_outer, beta_neighbor_face] = T_alpha[outer, interior_face]
-    # because g_in_alpha(g) = t_int(beta_at_g, g), where beta is in the
-    # OPPOSITE parity group from alpha.
+    # B[alpha_outer, alpha_g_in_slot] = T_alpha[outer, interior_face]
+    # The g_int slot storing g_in_alpha(f) is in the OPPOSITE parity
+    # group from alpha (even leaves' g_in_* slots are in Group 1, odd
+    # leaves' g_in_* slots are in Group 2).
 
-    # Leaf a (even) -> neighbors b, d, e (Group 1).
-    # a's interior faces: 9 (b), 12 (d), 17 (e).
+    # Leaf a (even) -> a's g_in slots live in Group 1.
+    # a's interior faces and the slot that stores g_in_a(f):
+    #   face 9  (a<->b): g1(0) = a_9
+    #   face 12 (a<->d): g1(4) = a_12
+    #   face 17 (a<->e): g1(8) = a_17
     s, e = ext(0)
-    s1, e1 = g1(0)  # b_9
+    s1, e1 = g1(0)  # a_9
     B = B.at[s:e, s1:e1].set(T_a_1_9)
-    s1, e1 = g1(4)  # d_12
+    s1, e1 = g1(4)  # a_12
     B = B.at[s:e, s1:e1].set(T_a_1_12)
-    s1, e1 = g1(8)  # e_17
+    s1, e1 = g1(8)  # a_17
     B = B.at[s:e, s1:e1].set(T_a_1_17)
 
-    # Leaf b (odd) -> neighbors a, c, f (Group 2).
-    # b's interior faces: 9 (a), 10 (c), 18 (f).
+    # Leaf b (odd) -> b's g_in slots live in Group 2.
+    # b's interior faces and the slot that stores g_in_b(f):
+    #   face 9  (b<->a): g2(0) = b_9
+    #   face 10 (b<->c): g2(3) = b_10
+    #   face 18 (b<->f): g2(8) = b_18
     s, e = ext(1)
-    s2, e2 = g2(0)  # a_9
+    s2, e2 = g2(0)  # b_9
     B = B.at[s:e, n_g1 + s2 : n_g1 + e2].set(T_b_2_9)
-    s2, e2 = g2(3)  # c_10
+    s2, e2 = g2(3)  # b_10
     B = B.at[s:e, n_g1 + s2 : n_g1 + e2].set(T_b_2_10)
-    s2, e2 = g2(8)  # f_18
+    s2, e2 = g2(8)  # b_18
     B = B.at[s:e, n_g1 + s2 : n_g1 + e2].set(T_b_2_18)
 
-    # Leaf c (even) -> neighbors b, d, g (Group 1).
-    # c's interior faces: 10 (b), 11 (d), 19 (g).
+    # Leaf c (even) -> c's g_in slots live in Group 1.
+    #   face 10 (c<->b): g1(1) = c_10
+    #   face 11 (c<->d): g1(3) = c_11
+    #   face 19 (c<->g): g1(11) = c_19
     s, e = ext(2)
-    s1, e1 = g1(1)  # b_10
+    s1, e1 = g1(1)  # c_10
     B = B.at[s:e, s1:e1].set(T_c_3_10)
-    s1, e1 = g1(3)  # d_11
+    s1, e1 = g1(3)  # c_11
     B = B.at[s:e, s1:e1].set(T_c_3_11)
-    s1, e1 = g1(11)  # g_19
+    s1, e1 = g1(11)  # c_19
     B = B.at[s:e, s1:e1].set(T_c_3_19)
 
-    # Leaf d (odd) -> neighbors c, a, h (Group 2).
-    # d's interior faces: 11 (c), 12 (a), 20 (h).
+    # Leaf d (odd) -> d's g_in slots live in Group 2.
+    #   face 11 (d<->c): g2(4) = d_11
+    #   face 12 (d<->a): g2(1) = d_12
+    #   face 20 (d<->h): g2(11) = d_20
     s, e = ext(3)
-    s2, e2 = g2(4)  # c_11
+    s2, e2 = g2(4)  # d_11
     B = B.at[s:e, n_g1 + s2 : n_g1 + e2].set(T_d_4_11)
-    s2, e2 = g2(1)  # a_12
+    s2, e2 = g2(1)  # d_12
     B = B.at[s:e, n_g1 + s2 : n_g1 + e2].set(T_d_4_12)
-    s2, e2 = g2(11)  # h_20
+    s2, e2 = g2(11)  # d_20
     B = B.at[s:e, n_g1 + s2 : n_g1 + e2].set(T_d_4_20)
 
-    # Leaf e (odd) -> neighbors f, h, a (Group 2).
-    # e's interior faces: 13 (f), 16 (h), 17 (a).
+    # Leaf e (odd) -> e's g_in slots live in Group 2.
+    #   face 13 (e<->f): g2(6) = e_13
+    #   face 16 (e<->h): g2(10) = e_16
+    #   face 17 (e<->a): g2(2) = e_17
     s, e = ext(4)
-    s2, e2 = g2(6)  # f_13
+    s2, e2 = g2(6)  # e_13
     B = B.at[s:e, n_g1 + s2 : n_g1 + e2].set(T_e_5_13)
-    s2, e2 = g2(10)  # h_16
+    s2, e2 = g2(10)  # e_16
     B = B.at[s:e, n_g1 + s2 : n_g1 + e2].set(T_e_5_16)
-    s2, e2 = g2(2)  # a_17
+    s2, e2 = g2(2)  # e_17
     B = B.at[s:e, n_g1 + s2 : n_g1 + e2].set(T_e_5_17)
 
-    # Leaf f (even) -> neighbors e, g, b (Group 1).
-    # f's interior faces: 13 (e), 14 (g), 18 (b).
+    # Leaf f (even) -> f's g_in slots live in Group 1.
+    #   face 13 (f<->e): g1(6) = f_13
+    #   face 14 (f<->g): g1(9) = f_14
+    #   face 18 (f<->b): g1(2) = f_18
     s, e = ext(5)
-    s1, e1 = g1(6)  # e_13
+    s1, e1 = g1(6)  # f_13
     B = B.at[s:e, s1:e1].set(T_f_6_13)
-    s1, e1 = g1(9)  # g_14
+    s1, e1 = g1(9)  # f_14
     B = B.at[s:e, s1:e1].set(T_f_6_14)
-    s1, e1 = g1(2)  # b_18
+    s1, e1 = g1(2)  # f_18
     B = B.at[s:e, s1:e1].set(T_f_6_18)
 
-    # Leaf g (odd) -> neighbors f, h, c (Group 2).
-    # g's interior faces: 14 (f), 15 (h), 19 (c).
+    # Leaf g (odd) -> g's g_in slots live in Group 2.
+    #   face 14 (g<->f): g2(7) = g_14
+    #   face 15 (g<->h): g2(9) = g_15
+    #   face 19 (g<->c): g2(5) = g_19
     s, e = ext(6)
-    s2, e2 = g2(7)  # f_14
+    s2, e2 = g2(7)  # g_14
     B = B.at[s:e, n_g1 + s2 : n_g1 + e2].set(T_g_7_14)
-    s2, e2 = g2(9)  # h_15
+    s2, e2 = g2(9)  # g_15
     B = B.at[s:e, n_g1 + s2 : n_g1 + e2].set(T_g_7_15)
-    s2, e2 = g2(5)  # c_19
+    s2, e2 = g2(5)  # g_19
     B = B.at[s:e, n_g1 + s2 : n_g1 + e2].set(T_g_7_19)
 
-    # Leaf h (even) -> neighbors g, e, d (Group 1).
-    # h's interior faces: 15 (g), 16 (e), 20 (d).
+    # Leaf h (even) -> h's g_in slots live in Group 1.
+    #   face 15 (h<->g): g1(10) = h_15
+    #   face 16 (h<->e): g1(7) = h_16
+    #   face 20 (h<->d): g1(5) = h_20
     s, e = ext(7)
-    s1, e1 = g1(10)  # g_15
+    s1, e1 = g1(10)  # h_15
     B = B.at[s:e, s1:e1].set(T_h_8_15)
-    s1, e1 = g1(7)  # e_16
+    s1, e1 = g1(7)  # h_16
     B = B.at[s:e, s1:e1].set(T_h_8_16)
-    s1, e1 = g1(5)  # d_20
+    s1, e1 = g1(5)  # h_20
     B = B.at[s:e, s1:e1].set(T_h_8_20)
 
     # ------------------------------------------------------------------
-    # Build C ((n_g1 + n_g2) x n_ext_pts).  For each interior unknown
-    # "leaf alpha at interface k", C entry at exterior column ext_alpha
-    # is R_alpha[int_k, ext_alpha].
+    # Build C ((n_g1 + n_g2) x n_ext_pts).  Each row corresponds to the
+    # ItI constraint coming from the SOURCE side of an interior interface
+    # (the side whose h-piece sits in h_int at this row).  The constraint
+    # h_X_f = T_X[interior_f, ext_X] u_ext^(X) + ...  contributes T-blocks
+    # at the columns of the source leaf X's exterior.
     # ------------------------------------------------------------------
     C = jnp.zeros((n_g1 + n_g2, n_ext_pts), dtype=dtype)
 
-    # Group 1 rows.
+    # Group 1 rows: sources are b, d, e, g (odd leaves).  Row labels are
+    # the receiver names since this is the row of D corresponding to that
+    # g_int slot, but the T-blocks come from the opposite (source) leaf.
     s1, e1 = g1(0)
     s, e = ext(1)
     C = C.at[s1:e1, s:e].set(T_b_9_2)
@@ -713,16 +762,18 @@ def _oct_merge_from_submatrices_ItI(
     C = C.at[n_g1 + s2 : n_g1 + e2, s:e].set(T_h_20_8)
 
     # ------------------------------------------------------------------
-    # Build D_12 (n_g1 x n_g2).  For each row "owner beta at interface k"
-    # in Group 1, the nonzero columns are the Group 2 entries
-    # corresponding to the OTHER side of each of beta's three interior
-    # faces, with values R_beta[face_k, face_j] for j in beta's interior
-    # face set.
+    # Build D_12 (n_g1 x n_g2).  Each row of D_12 corresponds to a Group 1
+    # g_int slot (g_in_alpha(f) for even receiver alpha at interface f);
+    # the T-blocks in that row come from the OPPOSITE (odd) source-leaf
+    # at the same interface.  The Group 2 columns hold the source-leaf's
+    # own three g_in slots, so the row is filled with three T_source[f,j]
+    # blocks.
     # ------------------------------------------------------------------
     D_12 = jnp.zeros((n_g1, n_g2), dtype=dtype)
 
-    # Row b_9 (g1 idx 0): b's interior faces (9, 10, 18) -> opposite owners
-    # (a, c, f).  Group 2 col positions: a_9 = g2(0), c_10 = g2(3), f_18 = g2(8).
+    # Row a_9 (g1 idx 0): source leaf b at iface 9.  b's interior faces
+    # (9, 10, 18) -> b's own g_in slots in Group 2:
+    #   b_9 = g2(0), b_10 = g2(3), b_18 = g2(8).
     s1, e1 = g1(0)
     s2, e2 = g2(0)
     D_12 = D_12.at[s1:e1, s2:e2].set(T_b_9_9)
@@ -731,7 +782,7 @@ def _oct_merge_from_submatrices_ItI(
     s2, e2 = g2(8)
     D_12 = D_12.at[s1:e1, s2:e2].set(T_b_9_18)
 
-    # Row b_10 (g1 idx 1)
+    # Row c_10 (g1 idx 1): source leaf b at iface 10.
     s1, e1 = g1(1)
     s2, e2 = g2(0)
     D_12 = D_12.at[s1:e1, s2:e2].set(T_b_10_9)
@@ -740,7 +791,7 @@ def _oct_merge_from_submatrices_ItI(
     s2, e2 = g2(8)
     D_12 = D_12.at[s1:e1, s2:e2].set(T_b_10_18)
 
-    # Row b_18 (g1 idx 2)
+    # Row f_18 (g1 idx 2): source leaf b at iface 18.
     s1, e1 = g1(2)
     s2, e2 = g2(0)
     D_12 = D_12.at[s1:e1, s2:e2].set(T_b_18_9)
@@ -749,8 +800,9 @@ def _oct_merge_from_submatrices_ItI(
     s2, e2 = g2(8)
     D_12 = D_12.at[s1:e1, s2:e2].set(T_b_18_18)
 
-    # Row d_11 (g1 idx 3): d's faces (11, 12, 20) -> owners (c, a, h).
-    # Group 2 cols: c_11 = g2(4), a_12 = g2(1), h_20 = g2(11).
+    # Row c_11 (g1 idx 3): source leaf d at iface 11.  d's interior faces
+    # (11, 12, 20) -> d's own g_in slots in Group 2:
+    #   d_11 = g2(4), d_12 = g2(1), d_20 = g2(11).
     s1, e1 = g1(3)
     s2, e2 = g2(4)
     D_12 = D_12.at[s1:e1, s2:e2].set(T_d_11_11)
@@ -759,7 +811,7 @@ def _oct_merge_from_submatrices_ItI(
     s2, e2 = g2(11)
     D_12 = D_12.at[s1:e1, s2:e2].set(T_d_11_20)
 
-    # Row d_12 (g1 idx 4)
+    # Row a_12 (g1 idx 4): source leaf d at iface 12.
     s1, e1 = g1(4)
     s2, e2 = g2(4)
     D_12 = D_12.at[s1:e1, s2:e2].set(T_d_12_11)
@@ -768,7 +820,7 @@ def _oct_merge_from_submatrices_ItI(
     s2, e2 = g2(11)
     D_12 = D_12.at[s1:e1, s2:e2].set(T_d_12_20)
 
-    # Row d_20 (g1 idx 5)
+    # Row h_20 (g1 idx 5): source leaf d at iface 20.
     s1, e1 = g1(5)
     s2, e2 = g2(4)
     D_12 = D_12.at[s1:e1, s2:e2].set(T_d_20_11)
@@ -777,8 +829,9 @@ def _oct_merge_from_submatrices_ItI(
     s2, e2 = g2(11)
     D_12 = D_12.at[s1:e1, s2:e2].set(T_d_20_20)
 
-    # Row e_13 (g1 idx 6): e's faces (13, 16, 17) -> owners (f, h, a).
-    # Group 2 cols: f_13 = g2(6), h_16 = g2(10), a_17 = g2(2).
+    # Row f_13 (g1 idx 6): source leaf e at iface 13.  e's interior faces
+    # (13, 16, 17) -> e's own g_in slots in Group 2:
+    #   e_13 = g2(6), e_16 = g2(10), e_17 = g2(2).
     s1, e1 = g1(6)
     s2, e2 = g2(6)
     D_12 = D_12.at[s1:e1, s2:e2].set(T_e_13_13)
@@ -787,7 +840,7 @@ def _oct_merge_from_submatrices_ItI(
     s2, e2 = g2(2)
     D_12 = D_12.at[s1:e1, s2:e2].set(T_e_13_17)
 
-    # Row e_16 (g1 idx 7)
+    # Row h_16 (g1 idx 7): source leaf e at iface 16.
     s1, e1 = g1(7)
     s2, e2 = g2(6)
     D_12 = D_12.at[s1:e1, s2:e2].set(T_e_16_13)
@@ -796,7 +849,7 @@ def _oct_merge_from_submatrices_ItI(
     s2, e2 = g2(2)
     D_12 = D_12.at[s1:e1, s2:e2].set(T_e_16_17)
 
-    # Row e_17 (g1 idx 8)
+    # Row a_17 (g1 idx 8): source leaf e at iface 17.
     s1, e1 = g1(8)
     s2, e2 = g2(6)
     D_12 = D_12.at[s1:e1, s2:e2].set(T_e_17_13)
@@ -805,8 +858,9 @@ def _oct_merge_from_submatrices_ItI(
     s2, e2 = g2(2)
     D_12 = D_12.at[s1:e1, s2:e2].set(T_e_17_17)
 
-    # Row g_14 (g1 idx 9): g's faces (14, 15, 19) -> owners (f, h, c).
-    # Group 2 cols: f_14 = g2(7), h_15 = g2(9), c_19 = g2(5).
+    # Row f_14 (g1 idx 9): source leaf g at iface 14.  g's interior faces
+    # (14, 15, 19) -> g's own g_in slots in Group 2:
+    #   g_14 = g2(7), g_15 = g2(9), g_19 = g2(5).
     s1, e1 = g1(9)
     s2, e2 = g2(7)
     D_12 = D_12.at[s1:e1, s2:e2].set(T_g_14_14)
@@ -815,7 +869,7 @@ def _oct_merge_from_submatrices_ItI(
     s2, e2 = g2(5)
     D_12 = D_12.at[s1:e1, s2:e2].set(T_g_14_19)
 
-    # Row g_15 (g1 idx 10)
+    # Row h_15 (g1 idx 10): source leaf g at iface 15.
     s1, e1 = g1(10)
     s2, e2 = g2(7)
     D_12 = D_12.at[s1:e1, s2:e2].set(T_g_15_14)
@@ -824,7 +878,7 @@ def _oct_merge_from_submatrices_ItI(
     s2, e2 = g2(5)
     D_12 = D_12.at[s1:e1, s2:e2].set(T_g_15_19)
 
-    # Row g_19 (g1 idx 11)
+    # Row c_19 (g1 idx 11): source leaf g at iface 19.
     s1, e1 = g1(11)
     s2, e2 = g2(7)
     D_12 = D_12.at[s1:e1, s2:e2].set(T_g_19_14)
@@ -834,12 +888,17 @@ def _oct_merge_from_submatrices_ItI(
     D_12 = D_12.at[s1:e1, s2:e2].set(T_g_19_19)
 
     # ------------------------------------------------------------------
-    # Build D_21 (n_g2 x n_g1).  Symmetric structure to D_12.
+    # Build D_21 (n_g2 x n_g1).  Symmetric structure to D_12: each row is
+    # a Group 2 g_int slot (g_in_alpha(f) for odd receiver alpha at face f);
+    # the T-blocks come from the OPPOSITE (even) source-leaf at the same
+    # interface, with columns indexed by the source-leaf's own three g_in
+    # slots in Group 1.
     # ------------------------------------------------------------------
     D_21 = jnp.zeros((n_g2, n_g1), dtype=dtype)
 
-    # Row a_9 (g2 idx 0): a's faces (9, 12, 17) -> owners (b, d, e).
-    # Group 1 cols: b_9 = g1(0), d_12 = g1(4), e_17 = g1(8).
+    # Row b_9 (g2 idx 0): source leaf a at iface 9.  a's interior faces
+    # (9, 12, 17) -> a's own g_in slots in Group 1:
+    #   a_9 = g1(0), a_12 = g1(4), a_17 = g1(8).
     s2, e2 = g2(0)
     s1, e1 = g1(0)
     D_21 = D_21.at[s2:e2, s1:e1].set(T_a_9_9)
@@ -848,7 +907,7 @@ def _oct_merge_from_submatrices_ItI(
     s1, e1 = g1(8)
     D_21 = D_21.at[s2:e2, s1:e1].set(T_a_9_17)
 
-    # Row a_12 (g2 idx 1)
+    # Row d_12 (g2 idx 1): source leaf a at iface 12.
     s2, e2 = g2(1)
     s1, e1 = g1(0)
     D_21 = D_21.at[s2:e2, s1:e1].set(T_a_12_9)
@@ -857,7 +916,7 @@ def _oct_merge_from_submatrices_ItI(
     s1, e1 = g1(8)
     D_21 = D_21.at[s2:e2, s1:e1].set(T_a_12_17)
 
-    # Row a_17 (g2 idx 2)
+    # Row e_17 (g2 idx 2): source leaf a at iface 17.
     s2, e2 = g2(2)
     s1, e1 = g1(0)
     D_21 = D_21.at[s2:e2, s1:e1].set(T_a_17_9)
@@ -866,8 +925,9 @@ def _oct_merge_from_submatrices_ItI(
     s1, e1 = g1(8)
     D_21 = D_21.at[s2:e2, s1:e1].set(T_a_17_17)
 
-    # Row c_10 (g2 idx 3): c's faces (10, 11, 19) -> owners (b, d, g).
-    # Group 1 cols: b_10 = g1(1), d_11 = g1(3), g_19 = g1(11).
+    # Row b_10 (g2 idx 3): source leaf c at iface 10.  c's interior faces
+    # (10, 11, 19) -> c's own g_in slots in Group 1:
+    #   c_10 = g1(1), c_11 = g1(3), c_19 = g1(11).
     s2, e2 = g2(3)
     s1, e1 = g1(1)
     D_21 = D_21.at[s2:e2, s1:e1].set(T_c_10_10)
@@ -876,7 +936,7 @@ def _oct_merge_from_submatrices_ItI(
     s1, e1 = g1(11)
     D_21 = D_21.at[s2:e2, s1:e1].set(T_c_10_19)
 
-    # Row c_11 (g2 idx 4)
+    # Row d_11 (g2 idx 4): source leaf c at iface 11.
     s2, e2 = g2(4)
     s1, e1 = g1(1)
     D_21 = D_21.at[s2:e2, s1:e1].set(T_c_11_10)
@@ -885,7 +945,7 @@ def _oct_merge_from_submatrices_ItI(
     s1, e1 = g1(11)
     D_21 = D_21.at[s2:e2, s1:e1].set(T_c_11_19)
 
-    # Row c_19 (g2 idx 5)
+    # Row g_19 (g2 idx 5): source leaf c at iface 19.
     s2, e2 = g2(5)
     s1, e1 = g1(1)
     D_21 = D_21.at[s2:e2, s1:e1].set(T_c_19_10)
@@ -894,8 +954,9 @@ def _oct_merge_from_submatrices_ItI(
     s1, e1 = g1(11)
     D_21 = D_21.at[s2:e2, s1:e1].set(T_c_19_19)
 
-    # Row f_13 (g2 idx 6): f's faces (13, 14, 18) -> owners (e, g, b).
-    # Group 1 cols: e_13 = g1(6), g_14 = g1(9), b_18 = g1(2).
+    # Row e_13 (g2 idx 6): source leaf f at iface 13.  f's interior faces
+    # (13, 14, 18) -> f's own g_in slots in Group 1:
+    #   f_13 = g1(6), f_14 = g1(9), f_18 = g1(2).
     s2, e2 = g2(6)
     s1, e1 = g1(6)
     D_21 = D_21.at[s2:e2, s1:e1].set(T_f_13_13)
@@ -904,7 +965,7 @@ def _oct_merge_from_submatrices_ItI(
     s1, e1 = g1(2)
     D_21 = D_21.at[s2:e2, s1:e1].set(T_f_13_18)
 
-    # Row f_14 (g2 idx 7)
+    # Row g_14 (g2 idx 7): source leaf f at iface 14.
     s2, e2 = g2(7)
     s1, e1 = g1(6)
     D_21 = D_21.at[s2:e2, s1:e1].set(T_f_14_13)
@@ -913,7 +974,7 @@ def _oct_merge_from_submatrices_ItI(
     s1, e1 = g1(2)
     D_21 = D_21.at[s2:e2, s1:e1].set(T_f_14_18)
 
-    # Row f_18 (g2 idx 8)
+    # Row b_18 (g2 idx 8): source leaf f at iface 18.
     s2, e2 = g2(8)
     s1, e1 = g1(6)
     D_21 = D_21.at[s2:e2, s1:e1].set(T_f_18_13)
@@ -922,8 +983,9 @@ def _oct_merge_from_submatrices_ItI(
     s1, e1 = g1(2)
     D_21 = D_21.at[s2:e2, s1:e1].set(T_f_18_18)
 
-    # Row h_15 (g2 idx 9): h's faces (15, 16, 20) -> owners (g, e, d).
-    # Group 1 cols: g_15 = g1(10), e_16 = g1(7), d_20 = g1(5).
+    # Row g_15 (g2 idx 9): source leaf h at iface 15.  h's interior faces
+    # (15, 16, 20) -> h's own g_in slots in Group 1:
+    #   h_15 = g1(10), h_16 = g1(7), h_20 = g1(5).
     s2, e2 = g2(9)
     s1, e1 = g1(10)
     D_21 = D_21.at[s2:e2, s1:e1].set(T_h_15_15)
@@ -932,7 +994,7 @@ def _oct_merge_from_submatrices_ItI(
     s1, e1 = g1(5)
     D_21 = D_21.at[s2:e2, s1:e1].set(T_h_15_20)
 
-    # Row h_16 (g2 idx 10)
+    # Row e_16 (g2 idx 10): source leaf h at iface 16.
     s2, e2 = g2(10)
     s1, e1 = g1(10)
     D_21 = D_21.at[s2:e2, s1:e1].set(T_h_16_15)
@@ -941,7 +1003,7 @@ def _oct_merge_from_submatrices_ItI(
     s1, e1 = g1(5)
     D_21 = D_21.at[s2:e2, s1:e1].set(T_h_16_20)
 
-    # Row h_20 (g2 idx 11)
+    # Row d_20 (g2 idx 11): source leaf h at iface 20.
     s2, e2 = g2(11)
     s1, e1 = g1(10)
     D_21 = D_21.at[s2:e2, s1:e1].set(T_h_20_15)
@@ -951,12 +1013,16 @@ def _oct_merge_from_submatrices_ItI(
     D_21 = D_21.at[s2:e2, s1:e1].set(T_h_20_20)
 
     # ------------------------------------------------------------------
-    # Assemble h_int and h_ext.  h_int is concat of (Group 1 owners' int
-    # h-pieces) followed by (Group 2 owners' int h-pieces).
+    # Assemble h_int and h_ext.  h_int is the source-side outgoing data
+    # paired with each row of D: Group 1 rows use odd source-leaf h-pieces
+    # (b, d, e, g), Group 2 rows use even source-leaf h-pieces (a, c, f, h).
+    # The g_int slot at the same row stores g_in for the OPPOSITE leaf.
     # ------------------------------------------------------------------
     h_int = jnp.concatenate(
         [
-            # Group 1
+            # Group 1 rows: receivers a_9, c_10, f_18, c_11, a_12, h_20,
+            #               f_13, h_16, a_17, f_14, h_15, c_19
+            # Sources (h-pieces): b/d/e/g grouped by source leaf.
             h_b_9,
             h_b_10,
             h_b_18,
@@ -969,7 +1035,9 @@ def _oct_merge_from_submatrices_ItI(
             h_g_14,
             h_g_15,
             h_g_19,
-            # Group 2
+            # Group 2 rows: receivers b_9, d_12, e_17, b_10, d_11, g_19,
+            #               e_13, g_14, b_18, g_15, e_16, d_20
+            # Sources (h-pieces): a/c/f/h grouped by source leaf.
             h_a_9,
             h_a_12,
             h_a_17,
