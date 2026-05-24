@@ -10,10 +10,9 @@ fixed-point iteration.
 
 A penetrable sphere of radius `R = 0.5` with relative permittivity
 `eps = 2.0` (refractive index `n = sqrt(2)`) embedded in a unit-permittivity
-background. Wavenumber `kappa = 4`, so `kR = 2.0` and the Born scaling
-`chi * (kR)^2 = 4` puts the problem firmly in the strong-scattering regime
-(Born–1 fails). The sphere is regularized with a `tanh` ramp of width
-`W = 0.02` to keep the HPS coefficient field `C^∞`.
+background. Wavenumber `kappa = 4`, so `kR = 2.0`. The sphere is regularized
+with a `tanh` ramp of width `W = 0.02` to keep the HPS coefficient field
+`C^∞`.
 
 Sources are point sources at 24 Fibonacci points on `r = 1.0`. The
 measurement matrix `M[irx, itx]` records the scattered field at each receiver.

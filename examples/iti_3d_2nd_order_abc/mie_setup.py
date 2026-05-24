@@ -1,8 +1,7 @@
 """Strong-scattering single-sphere setup.
 
 A homogeneous penetrable sphere (smoothed via tanh) at the origin.
-Designed so that the Born series fails to converge, but Mie series
-gives an exact analytic reference.
+The Mie series gives an exact analytic reference.
 
 CONVENTION: ``EPS_SPHERE`` is the relative permittivity epsilon = n^2.
 The Helmholtz equation we solve is Delta u + kappa^2 epsilon(x) u = 0.
@@ -11,7 +10,6 @@ Inside sphere epsilon = EPS_SPHERE, outside epsilon = 1.
 Dimensionless numbers:
   size parameter  k * R = 4.0 * 0.5 = 2.0
   contrast        chi = epsilon - 1 = 1.0
-  Born scaling    chi * (kR)^2 = 4 (strong; Born-1 fails)
   interior wavelength = 2 pi / (kappa sqrt(epsilon)) = 1.11
   exterior wavelength = pi / 2 ~ 1.57
 

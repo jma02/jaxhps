@@ -100,9 +100,6 @@ def main():
         f"Mie reference: kappa={KAPPA} R={SPHERE_RADIUS} eps={EPS_SPHERE} kR={KAPPA * SPHERE_RADIUS:.2f}"
     )
     print(
-        f"  Born ratio chi*(kR)^2 = {(EPS_SPHERE - 1) * (KAPPA * SPHERE_RADIUS) ** 2:.2f}"
-    )
-    print(
         f"  N_TX = {len(tx)} on sphere of radius {np.linalg.norm(tx[0]):.2f}"
     )
 
