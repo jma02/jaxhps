@@ -30,9 +30,20 @@ as its incoming impedance on face 9, the a-b interface.  By impedance
 compatibility ``u^(b)_9 + g_in_a(9) = 0`` along that interface, this is
 the same as ``-u^(b)_9``.
 
-Both sides of an interior face use the same intra-face 2D ordering
-(unlike 2D ItI, where the natural CCW orientation of an edge flips
-between the two leaves), so no per-face flip is required.
+Both sides of an interior face use the same intra-face 2D ordering, so
+no per-face flip is required.  Contrast this with the 2D ItI down-pass,
+which applies ``jnp.flipud`` to every other slice of ``t_int`` (see
+``_uniform_2D_ItI.py``).  In 2D, each interior edge has a CCW
+orientation that disagrees between the two leaves that share it: leaf
+``a``'s East edge runs bottom-to-top in ``a``'s CCW order, but the same
+edge is leaf ``b``'s West edge and runs top-to-bottom in ``b``'s CCW
+order, so the values stored as ``t_a_5`` and the values needed as
+``t_b_5`` are reversed along the edge.  In 3D, the ``q``-by-``q``
+Gauss-point grid on a shared cube face is laid out with the same
+(tangential-1, tangential-2) ordering for both incident leaves (the
+precompute uses the cube's global (x, y, z) frame, not a per-leaf
+CCW orientation), so each interior-face slice can be read straight out
+of ``t_int`` and fed to the receiving leaf's input unchanged.
 """
 
 from typing import List

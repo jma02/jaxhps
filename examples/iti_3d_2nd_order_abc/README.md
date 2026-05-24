@@ -12,7 +12,7 @@ A penetrable sphere of radius `R = 0.5` with relative permittivity
 `eps = 2.0` (refractive index `n = sqrt(2)`) embedded in a unit-permittivity
 background. Wavenumber `kappa = 4`, so `kR = 2.0`. The sphere is regularized
 with a `tanh` ramp of width `W = 0.02` to keep the HPS coefficient field
-`C^∞`.
+$C^\infty$.
 
 Sources are point sources at 24 Fibonacci points on `r = 1.0`. The
 measurement matrix `M[irx, itx]` records the scattered field at each receiver.
@@ -23,34 +23,34 @@ The reference is the exact Mie series for the hard sphere
 
 The standard 1st-order Sommerfeld outflow trace on a cube face is
 
-    ∂u/∂n − iκ u = 0
+$$\frac{\partial u}{\partial n} - i\kappa u = 0$$
 
-which in jaxhps's ItI machinery corresponds to `eta = −κ` and incoming
-impedance data `g_in ≡ 0` (`bdry_data = 0`).
+which in jaxhps's ItI machinery corresponds to $\eta = -\kappa$ and incoming
+impedance data $g_\text{in} \equiv 0$ (`bdry_data = 0`).
 
 The 2nd-order Engquist–Majda ABC adds a tangential surface Laplacian term:
 
-    ∂u/∂n − iκ u − (i / (2κ)) · Δ_τ u = 0
+$$\frac{\partial u}{\partial n} - i\kappa u - \frac{i}{2\kappa} \Delta_\tau u = 0$$
 
-This reduces the angular reflection coefficient from `O(θ²)` to `O(θ⁴)`,
-which materially cuts the absorbing-boundary error at the corners and
-grazing angles of a cubic computational domain.
+This reduces the angular reflection coefficient from $O(\theta^2)$ to
+$O(\theta^4)$, which materially cuts the absorbing-boundary error at the
+corners and grazing angles of a cubic computational domain.
 
 We do **not** bake the new ABC into the precomputed local solve operators.
 Instead we solve the 1st-order Sommerfeld problem with a non-zero
 `bdry_data` and iterate:
 
-    bdry_data ← (i / (2κ)) · Δ_τ u_outer
+$$\texttt{bdry\_data} \leftarrow \frac{i}{2\kappa} \Delta_\tau u_\text{outer}$$
 
-`Δ_τ u_outer` is computed leaf-by-leaf on the outer faces using the
-precomputed 3D Chebyshev differentiation operators
-(`Δ_τ = D_yy + D_zz` on x-normal faces, etc.), interpolated from Cheby to
-Gauss points to match the boundary data layout, and damped (`DAMP = 0.7`)
-between iterations for stability.
+$\Delta_\tau u_\text{outer}$ is computed leaf-by-leaf on the outer faces
+using the precomputed 3D Chebyshev differentiation operators
+($\Delta_\tau = D_{yy} + D_{zz}$ on $x$-normal faces, etc.), interpolated
+from Cheby to Gauss points to match the boundary data layout, and damped
+(`DAMP = 0.7`) between iterations for stability.
 
-Typically 5–8 iterations are enough; high-tangential modes (`k_τ²/(2κ) > 1`
-at the Nyquist limit) eventually amplify, so the driver tracks the best
-iterate against Mie rather than the last one.
+Typically 5–8 iterations are enough; high-tangential modes
+($k_\tau^2 / (2\kappa) > 1$ at the Nyquist limit) eventually amplify, so
+the driver tracks the best iterate against Mie rather than the last one.
 
 ## Results
 
@@ -89,8 +89,8 @@ P=16 L=2 ITI_L_PHYS=2.0 N_ITER=8 DAMP=0.6 python run_iti_2nd_order_abc.py
 Environment knobs:
 - `P`     — Chebyshev order in each cell (per axis). 12 is fast, 16 is accurate.
 - `Q`     — Gauss order on boundary (defaults to 10).
-- `L`     — octree depth (number of refinement levels). `L=2` ⇒ 64 leaves.
-- `ITI_L_PHYS` — half-side of the cubic domain (cube spans `[-L_PHYS, L_PHYS]^3`).
+- `L`     — octree depth (number of refinement levels). `L=2` $\Rightarrow$ 64 leaves.
+- `ITI_L_PHYS` — half-side of the cubic domain (cube spans $[-L_\text{PHYS}, L_\text{PHYS}]^3$).
 - `N_ITER` — ABC fixed-point iterations.
 - `DAMP`  — Picard damping coefficient.
 

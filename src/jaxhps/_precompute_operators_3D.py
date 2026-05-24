@@ -556,7 +556,7 @@ def indexing_for_refinement_operator(p: int) -> jnp.array:
 # Conventions (mirroring the 2D ItI implementation in _precompute_operators_2D.py):
 #  - The Cheby boundary nodes are single-counted: shape (p**3 - (p-2)**3,).
 #  - At edges shared by 2 faces and corners shared by 3 faces, all face
-#    contributions are AVERAGED (similar to the DtN P_3D averaging scheme).
+#    contributions are averaged (similar to the DtN P_3D averaging scheme).
 #  - Outgoing impedance traces live on the 6q**2 Gauss boundary nodes; the QH
 #    operator first builds a double-counted (6 p**2 row) impedance map on the
 #    Cheby boundary and then interpolates Cheby -> Gauss face-wise via
