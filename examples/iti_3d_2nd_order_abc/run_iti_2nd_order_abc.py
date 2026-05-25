@@ -231,7 +231,7 @@ mapping_cf = np.array([m[0] for m in mapping])
 mapping_li = np.array([m[1] for m in mapping])
 mapping_st = np.array([m[2] for m in mapping])
 
-# Sanity check: print one example
+# Print one mapping entry per cube face to verify the centroid match.
 for face_idx_check in [0, 1, 2]:
     sel = np.where(mapping_cf == face_idx_check)[0][:3]
     for s in sel:

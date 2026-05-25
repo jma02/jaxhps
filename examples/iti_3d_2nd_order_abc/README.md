@@ -1,10 +1,13 @@
-# 3D ItI + 2nd-order Engquist–Majda ABC (driver-side iteration)
+# 3D ItI + 2nd-order Engquist–Majda ABC
 
 This example exercises the 3D Impedance-to-Impedance (ItI) merge path on a
 strong-scattering single-sphere problem. It compares a fixed 1st-order
-Sommerfeld outer boundary condition against a driver-side **2nd-order
-Engquist–Majda absorbing boundary condition (ABC)** layered on top via
-fixed-point iteration.
+Sommerfeld outer boundary condition against a **2nd-order Engquist–Majda
+absorbing boundary condition (ABC)** applied as a fixed-point iteration
+on top of the 1st-order solver: each iteration re-solves the same
+precomputed 1st-order ItI problem with an updated incoming-impedance
+trace, so the higher-order BC is realized purely in the driver and the
+HPS precompute stage is untouched.
 
 ## Problem
 

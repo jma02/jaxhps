@@ -124,14 +124,14 @@ class Test_merge_stage_uniform_3D_ItI:
 
 
 class Test_merge_planewave_correctness:
-    """Verify the merged T maps the global impedance trace correctly for a
-    manufactured plane-wave solution u = exp(i k . x) on the 8-leaf cube.
+    r"""Verify the merged T maps the global impedance trace correctly for a
+    manufactured plane-wave solution u = \exp(i k \cdot x) on the 8-leaf cube.
 
-    With (Δ + κ²)u = 0 satisfied identically, ∂u/∂n = i (k . n) u.
-    The ItI traces are
-        g_in  = (∂u/∂n) + i η u  = i (k.n + η) u
-        g_out = (∂u/∂n) - i η u  = i (k.n - η) u
-    so we expect T_merged @ g_in ≈ g_out at spectral precision.
+    With (\Delta + \kappa^2) u = 0 satisfied identically,
+    \partial u / \partial n = i (k \cdot n) u.  The ItI traces are
+        g_in  = (\partial u / \partial n) + i \eta u = i (k \cdot n + \eta) u
+        g_out = (\partial u / \partial n) - i \eta u = i (k \cdot n - \eta) u
+    so we expect T_merged @ g_in \approx g_out at spectral precision.
     """
 
     @staticmethod

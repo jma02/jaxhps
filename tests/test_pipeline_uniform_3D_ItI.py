@@ -1,15 +1,15 @@
-"""End-to-end pipeline test for the uniform 3D ItI solver path.
+r"""End-to-end pipeline test for the uniform 3D ItI solver path.
 
 Builds the full solver (local solve + 3D oct merge) for the homogeneous
 constant-coefficient Helmholtz equation
 
-    Δu + κ² u = 0
+    \Delta u + \kappa^2 u = 0
 
 on the cube [-0.5, 0.5]^3 (one oct merge, L=1, 8 leaves), drives it with
 the impedance trace of the analytical plane-wave solution
-``u(x) = exp(i k . x)`` with ``|k|=κ``, runs the down-pass, and checks
-that the recovered interior solution matches the analytical one to
-spectral precision.
+``u(x) = \exp(i k \cdot x)`` with ``|k| = \kappa``, runs the down-pass,
+and checks that the recovered interior solution matches the analytical
+one to spectral precision.
 """
 
 import logging
@@ -44,7 +44,7 @@ class TestPipelineUniform3DItIPlanewave:
         caplog.set_level(logging.DEBUG)
         kappa = 4.0
         eta = kappa
-        # k_vec direction (1,2,2)/3 -> |k|=κ
+        # k_vec direction (1,2,2)/3 -> |k| = kappa
         k_vec = kappa * np.array([1.0, 2.0, 2.0]) / 3.0
         L = 1
         results = []
