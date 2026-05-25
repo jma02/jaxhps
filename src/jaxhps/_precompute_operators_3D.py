@@ -556,27 +556,16 @@ def indexing_for_refinement_operator(p: int) -> jnp.array:
 # Conventions (mirroring the 2D ItI implementation in _precompute_operators_2D.py):
 #  - The Cheby boundary nodes are single-counted: shape (p**3 - (p-2)**3,).
 #  - At edges shared by 2 faces and corners shared by 3 faces, all face
-#    contributions are averaged (similar to the DtN P_3D averaging scheme).
+#    contributions are averaged.  This averaging is purely geometric, so the
+#    Gauss -> Cheby boundary interpolation `P` is the same as in the DtN case
+#    -- the ItI local solve calls :func:`precompute_P_3D_DtN` directly
+#    (unlike 2D, where the ItI variant drops the duplicated Cheby corner row
+#    instead of averaging).
 #  - Outgoing impedance traces live on the 6q**2 Gauss boundary nodes; the QH
 #    operator first builds a double-counted (6 p**2 row) impedance map on the
 #    Cheby boundary and then interpolates Cheby -> Gauss face-wise via
 #    Q_I = kron(I_6, Q_2D).
 ############################################
-
-
-@partial(jax.jit, static_argnums=(0, 1))
-def precompute_P_3D_ItI(p: int, q: int) -> jnp.ndarray:
-    """Maps boundary impedance data on the 6 q**2 Gauss boundary nodes to the
-    p**3 - (p-2)**3 Cheby boundary nodes (single-counted).
-
-    Implementation: identical block-and-average construction as
-    :func:`precompute_P_3D_DtN`. The averaging at shared edges/corners is
-    consistent with the averaging convention used by the 3D ItI G and N_tilde
-    operators below, so the local solve's incoming-impedance residual is
-    well-defined at shared boundary points when the merged Gauss inputs are
-    consistent across adjacent faces.
-    """
-    return precompute_P_3D_DtN(p, q)
 
 
 @partial(jax.jit, static_argnums=(3,))

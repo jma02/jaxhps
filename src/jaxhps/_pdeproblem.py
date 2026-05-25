@@ -18,7 +18,6 @@ from ._precompute_operators_3D import (
     precompute_P_3D_DtN,
     precompute_Q_3D_DtN,
     precompute_projection_ops_3D,
-    precompute_P_3D_ItI,
     precompute_N_matrix_3D,
     precompute_N_tilde_matrix_3D,
     precompute_G_3D_ItI,
@@ -223,8 +222,11 @@ class PDEProblem:
                 )
             else:
                 # Interpolation / Differentiation matrices for 3D ItI merges.
-                # Same naming convention as the 2D case (P, G, QH).
-                self.P = precompute_P_3D_ItI(domain.p, domain.q)
+                # Same naming convention as the 2D case (P, G, QH).  In 3D the
+                # Gauss -> Cheby boundary interpolation `P` is the same for
+                # DtN and ItI (purely geometric averaging at shared
+                # edges/corners), so we reuse the DtN constructor here.
+                self.P = precompute_P_3D_DtN(domain.p, domain.q)
                 N_tilde = precompute_N_tilde_matrix_3D(
                     self.D_x, self.D_y, self.D_z, domain.p
                 )
