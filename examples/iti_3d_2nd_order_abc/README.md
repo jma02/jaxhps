@@ -6,8 +6,10 @@ Sommerfeld outer boundary condition against a **2nd-order Engquist–Majda
 absorbing boundary condition (ABC)** applied as a fixed-point iteration
 on top of the 1st-order solver: each iteration re-solves the same
 precomputed 1st-order ItI problem with an updated incoming-impedance
-trace, so the higher-order BC is realized purely in the driver and the
-HPS precompute stage is untouched.
+trace, so the higher-order BC is realized purely in the user-level
+driver script (here `run_iti_2nd_order_abc.py`, which calls jaxhps's
+`build_solver` / `solve` and orchestrates the iteration around them)
+and the HPS precompute stage is untouched.
 
 ## Problem
 
