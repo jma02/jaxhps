@@ -39,6 +39,19 @@ def _outward_normals_for_boundary(
     return n
 
 
+def _exterior_point_source_solution(
+    points: np.ndarray, source_point: np.ndarray, kappa: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return u and grad u for exp(i k r) / r with source outside the box."""
+    rel = points - source_point
+    r = np.linalg.norm(rel, axis=-1)
+    u = np.exp(1j * kappa * r) / r
+    grad = (
+        u[..., None] * (1j * kappa - 1.0 / r)[..., None] * rel / r[..., None]
+    )
+    return u, grad
+
+
 class TestPipelineUniform3DItIPlanewave:
     def test_planewave_pipeline(self, caplog) -> None:
         caplog.set_level(logging.DEBUG)
@@ -186,6 +199,78 @@ class TestPipelineUniform3DItIPlanewave:
         )
         assert err_int < 1e-3, f"L=2 pipeline test failed: err={err_int}"
 
+    def test_exterior_point_source_impedance_trace(self, caplog) -> None:
+        r"""Curved outgoing Helmholtz field with exact impedance traces.
+
+        A point source outside the cube gives
+        ``u(x) = \exp(i \kappa |x-x_0|) / |x-x_0|``, which satisfies
+        ``\Delta u + \kappa^2 u = 0`` everywhere inside the cube.  Passing
+        its exact incoming impedance trace checks the same first-order
+        boundary convention as the plane-wave test, but with nonconstant
+        amplitude and curved phase on every face.
+        """
+        caplog.set_level(logging.DEBUG)
+        kappa = 4.0
+        eta = kappa
+        p, q, L = 12, 8, 1
+        source_point = np.array([1.35, -0.2, 0.8])
+        root = DiscretizationNode3D(
+            xmin=-0.5,
+            xmax=0.5,
+            ymin=-0.5,
+            ymax=0.5,
+            zmin=-0.5,
+            zmax=0.5,
+        )
+        n_leaves = 8**L
+        domain = Domain(p=p, q=q, root=root, L=L)
+
+        ones = np.ones((n_leaves, p**3))
+        problem = PDEProblem(
+            domain=domain,
+            D_xx_coefficients=ones,
+            D_yy_coefficients=ones,
+            D_zz_coefficients=ones,
+            I_coefficients=(kappa**2) * ones,
+            source=np.zeros((n_leaves, p**3)),
+            use_ItI=True,
+            eta=eta,
+        )
+
+        T_top = build_solver(problem, return_top_T=True)
+
+        bp = np.asarray(domain.boundary_points).reshape(-1, 3)
+        nrm = _outward_normals_for_boundary(bp, root)
+        u_b, grad_b = _exterior_point_source_solution(bp, source_point, kappa)
+        dn_u = np.einsum("ij,ij->i", grad_b, nrm)
+        g_in = dn_u + 1j * eta * u_b
+        g_out = dn_u - 1j * eta * u_b
+
+        pred_out = np.asarray(T_top) @ g_in
+        err_top = np.max(np.abs(pred_out - g_out)) / np.max(np.abs(g_out))
+
+        solns = np.asarray(solve(problem, jnp.asarray(g_in)))
+        interior_pts = np.asarray(domain.interior_points).reshape(
+            n_leaves, p**3, 3
+        )
+        u_exact, _ = _exterior_point_source_solution(
+            interior_pts, source_point, kappa
+        )
+        err_int = np.max(np.abs(solns - u_exact)) / np.max(np.abs(u_exact))
+
+        logging.info(
+            "exterior source p=%d q=%d T-err=%.3e interior-err=%.3e",
+            p,
+            q,
+            err_top,
+            err_int,
+        )
+        assert err_top < 1e-6, f"Exterior-source top T test failed: {err_top}"
+        assert err_int < 1e-6, (
+            f"Exterior-source pipeline test failed: {err_int}"
+        )
+        jax.clear_caches()
+
     def test_manufactured_source_variable_coefficients(self, caplog) -> None:
         """Manufactured solution with variable I coefficient and non-zero
         source.  Verifies the source path of the pipeline (not exercised
@@ -197,7 +282,8 @@ class TestPipelineUniform3DItIPlanewave:
         """
         caplog.set_level(logging.DEBUG)
         kappa = 4.0
-        eta = kappa  # any non-zero eta works for this test (it is not an absorbing BC test)
+        # Any non-zero eta works here; this is not an absorbing BC test.
+        eta = kappa
         p, q, L = 12, 10, 1
         root = DiscretizationNode3D(
             xmin=-0.4,
