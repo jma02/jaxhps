@@ -1,8 +1,15 @@
-"""jaxhps 3D ItI driver for the strong-scattering sphere problem.
+"""jaxhps 3D ItI driver: 1st-order Sommerfeld with analytic plane-wave trace.
 
-Uses the 3D impedance-to-impedance (ItI) merge path with a 1st-order
-Sommerfeld absorbing boundary on the outer cube faces (eta=-kappa, g_in=0).
-This is the baseline that ``run_iti_2nd_order_abc.py`` compares against.
+Solves the homogeneous constant-coefficient Helmholtz equation
+
+    (Delta + kappa^2) u = 0   on   [-L_PHYS, L_PHYS]^3
+
+with boundary data set to the exact 1st-order Sommerfeld trace of the
+plane wave u*(x) = exp(i k . x), |k| = kappa. With the analytic trace
+prescribed, the 3D ItI solver should recover u* to machine precision.
+
+This is the clean validation companion to ``run_iti_2nd_order_abc.py``:
+constant coefficients, analytic reference, no smoothing, no scatterer.
 """
 
 # ruff: noqa: E402
@@ -12,7 +19,6 @@ import time
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import config as jcfg
@@ -26,21 +32,26 @@ from jaxhps import (
     build_solver,
     solve,
 )
-from jaxhps._grid_creation_3D import get_all_uniform_leaves_3D
-from jaxhps._interpolation_methods import vmapped_interp_to_point_3D
-from mie_setup import EPS_SPHERE, KAPPA, SPHERE_RADIUS, W_RAMP, get_tx
+from planewave_setup import (
+    K_HAT,
+    KAPPA,
+    g1_sommerfeld_trace,
+    u_exact,
+)
 
-# ItI uses Robin ABC on outer faces; keep a buffer between r=1 sensors and cube boundary
-L_PHYS = float(os.environ.get("ITI_L_PHYS", "2.0"))
+# --------------- params ---------------
+L_PHYS = float(os.environ.get("ITI_L_PHYS", "1.0"))
 P = int(os.environ.get("P", "12"))
 Q = int(os.environ.get("Q", "10"))
 L = int(os.environ.get("L", "2"))
-print(f"jaxhps-ItI: L_PHYS={L_PHYS} p={P} q={Q} L={L} eta=-{KAPPA}")
 
-tx = jnp.array(get_tx())
-N_TX = tx.shape[0]
-print(f"N_TX = {N_TX}")
+print(
+    f"jaxhps-ItI 1st-order plane-wave: L_PHYS={L_PHYS} p={P} q={Q} L={L} "
+    f"kappa={KAPPA}"
+)
+print(f"  k_hat = {K_HAT}")
 
+# --------------- domain & PDE ---------------
 root = DiscretizationNode3D(
     xmin=-L_PHYS,
     xmax=L_PHYS,
@@ -55,25 +66,11 @@ xg = pts[..., 0]
 yg = pts[..., 1]
 zg = pts[..., 2]
 
-# Smoothed sphere
-r = jnp.sqrt(xg * xg + yg * yg + zg * zg)
-mask = 0.5 * (1 - jnp.tanh((r - SPHERE_RADIUS) / W_RAMP))
-n_field = 1.0 + (EPS_SPHERE - 1.0) * mask  # = epsilon
-
 ones = jnp.ones_like(xg)
-I_coeffs = (KAPPA**2) * n_field
+I_coeffs = (KAPPA**2) * ones  # constant epsilon = 1 => I_coeff = kappa^2
 
-
-def source_for_tx(t):
-    rr = jnp.sqrt(
-        (xg - t[0]) ** 2 + (yg - t[1]) ** 2 + (zg - t[2]) ** 2 + 1e-8
-    )
-    ui = jnp.exp(1j * KAPPA * rr) / (4 * jnp.pi * rr)
-    return (KAPPA**2) * (1.0 - n_field) * ui
-
-
-sources = jax.vmap(source_for_tx, in_axes=0, out_axes=-1)(tx)
-print(f"sources shape: {sources.shape}")
+# Homogeneous PDE (no scatterer, no incident-field source).
+sources = jnp.zeros((*xg.shape, 1), dtype=jnp.complex128)
 
 problem = PDEProblem(
     domain=domain,
@@ -87,54 +84,32 @@ problem = PDEProblem(
 )
 
 t0 = time.perf_counter()
-print("build ...")
+print("build_solver ...")
 build_solver(problem)
 print(f"  built in {time.perf_counter() - t0:.1f}s")
 
-n_bdry = domain.boundary_points.shape[0]
-bdry = jnp.zeros((n_bdry, N_TX), dtype=jnp.complex128)
+# --------------- analytic 1st-order Sommerfeld trace ---------------
+bp = np.asarray(domain.boundary_points)  # (n_bdry, 3)
+g1 = g1_sommerfeld_trace(bp, L_PHYS).astype(np.complex128)
+bdry = jnp.array(g1.reshape(-1, 1))
+print(f"  bdry n = {bp.shape[0]}, ||g1||_2 = {np.linalg.norm(g1):.3e}")
 
-print("solve ...")
+# --------------- solve ---------------
 t0 = time.perf_counter()
-u_scat = solve(problem, bdry)
-u_scat.block_until_ready()
-print(f"  {N_TX} RHS solved in {time.perf_counter() - t0:.1f}s")
+print("solving ...")
+u_comp = solve(problem, bdry)
+u_comp.block_until_ready()
+print(f"  solved in {time.perf_counter() - t0:.1f}s")
 
+# --------------- compare to analytic ---------------
+u_ref = u_exact(np.asarray(xg), np.asarray(yg), np.asarray(zg))[..., None]
+u_c = np.asarray(u_comp)
 
-def interp_point_cloud(domain, samples, pts):
-    leaves = get_all_uniform_leaves_3D(domain.root, domain.L)
-    corners = jnp.stack(
-        [
-            jnp.array([[n.xmin, n.ymin, n.zmin], [n.xmax, n.ymax, n.zmax]])
-            for n in leaves
-        ]
-    )
-    b = (
-        (pts[:, 0, None] >= corners[None, :, 0, 0])
-        & (pts[:, 0, None] <= corners[None, :, 1, 0])
-        & (pts[:, 1, None] >= corners[None, :, 0, 1])
-        & (pts[:, 1, None] <= corners[None, :, 1, 1])
-        & (pts[:, 2, None] >= corners[None, :, 0, 2])
-        & (pts[:, 2, None] <= corners[None, :, 1, 2])
-    )
-    patch = jnp.argmax(b, axis=1)
-    corn = corners[patch]
-    M = []
-    for i in range(samples.shape[-1]):
-        f = samples[patch, :, i]
-        vals = vmapped_interp_to_point_3D(
-            pts[:, 0], pts[:, 1], pts[:, 2], corn, f, domain.p
-        )
-        M.append(vals)
-    return jnp.stack(M, axis=-1)
+err_rel = np.linalg.norm(u_c - u_ref) / np.linalg.norm(u_ref)
+err_max = np.max(np.abs(u_c - u_ref)) / np.max(np.abs(u_ref))
+print(f"\n  rel L2 err   = {err_rel:.3e}")
+print(f"  rel Linf err = {err_max:.3e}")
 
-
-M = jnp.squeeze(interp_point_cloud(domain, u_scat, tx))
-M_np = np.asarray(M)
-print(f"||M||_F = {np.linalg.norm(M_np):.4e}")
-print(
-    f"reciprocity ||M-M^T||/||M|| = {np.linalg.norm(M_np - M_np.T) / np.linalg.norm(M_np):.3e}"
-)
-out = os.path.join(os.path.dirname(__file__), "jaxhps_iti.npz")
-np.savez(out, umeas=M_np, tx=np.asarray(tx))
-print(f"saved -> {out}")
+out = os.path.join(os.path.dirname(__file__), "jaxhps_iti_1st.npz")
+np.savez(out, u_computed=u_c, u_exact=u_ref, points=np.asarray(pts))
+print(f"  saved -> {out}")
