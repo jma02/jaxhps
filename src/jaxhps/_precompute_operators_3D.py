@@ -548,3 +548,186 @@ def indexing_for_refinement_operator(p: int) -> jnp.array:
     )
 
     return row_idxes, col_idxes
+
+
+############################################
+# 3D ItI precomputed operators.
+#
+# Conventions (mirroring the 2D ItI implementation in _precompute_operators_2D.py):
+#  - The Cheby boundary nodes are single-counted: shape (p**3 - (p-2)**3,).
+#  - At edges shared by 2 faces and corners shared by 3 faces, all face
+#    contributions are averaged.  This averaging is purely geometric, so the
+#    Gauss -> Cheby boundary interpolation `P` is the same as in the DtN case
+#    -- the ItI local solve calls :func:`precompute_P_3D_DtN` directly
+#    (unlike 2D, where the ItI variant drops the duplicated Cheby corner row
+#    instead of averaging).
+#  - Outgoing impedance traces live on the 6q**2 Gauss boundary nodes; the QH
+#    operator first builds a double-counted (6 p**2 row) impedance map on the
+#    Cheby boundary and then interpolates Cheby -> Gauss face-wise via
+#    Q_I = kron(I_6, Q_2D).
+############################################
+
+
+@partial(jax.jit, static_argnums=(3,))
+def precompute_N_matrix_3D(
+    du_dx: jnp.ndarray, du_dy: jnp.ndarray, du_dz: jnp.ndarray, p: int
+) -> jnp.ndarray:
+    """Outward-normal-derivative operator on the **double-counted** 6 p**2 Cheby
+    boundary nodes. Returns a matrix of shape (6 p**2, p**3) which maps a
+    function on all p**3 Chebyshev points to its outward normal derivative on
+    each of the 6 faces, taking the values at edges/corners independently per
+    face (so each shared point appears once per face that contains it).
+
+    This matches the inner construction of :func:`precompute_Q_3D_DtN`.
+    """
+    N = jnp.zeros((6 * p**2, p**3), dtype=du_dx.dtype)
+    f1 = get_face_1_idxes(p)
+    f2 = get_face_2_idxes(p)
+    f3 = get_face_3_idxes(p)
+    f4 = get_face_4_idxes(p)
+    f5 = get_face_5_idxes(p)
+    f6 = get_face_6_idxes(p)
+    N = N.at[: p**2].set(-1 * du_dx[f1])
+    N = N.at[p**2 : 2 * p**2].set(du_dx[f2])
+    N = N.at[2 * p**2 : 3 * p**2].set(-1 * du_dy[f3])
+    N = N.at[3 * p**2 : 4 * p**2].set(du_dy[f4])
+    N = N.at[4 * p**2 : 5 * p**2].set(-1 * du_dz[f5])
+    N = N.at[5 * p**2 :].set(du_dz[f6])
+    return N
+
+
+@partial(jax.jit, static_argnums=(3,))
+def precompute_N_tilde_matrix_3D(
+    du_dx: jnp.ndarray, du_dy: jnp.ndarray, du_dz: jnp.ndarray, p: int
+) -> jnp.ndarray:
+    """Outward-normal-derivative operator on the **single-counted** boundary
+    Cheby nodes, with averaging at shared edges and corners.
+
+    Returns a matrix of shape (p**3 - (p-2)**3, p**3).
+
+    For each face f, the rows of N_tilde indexed by ``get_face_X_idxes(p)`` are
+    incremented by the outward-normal contribution from that face. After all
+    six faces have contributed, the rows corresponding to the 8 cube corners
+    are divided by 3 (each corner is touched by 3 faces) and the rows
+    corresponding to the 12 cube edges (each of length p-2) are divided by 2.
+    Interior face rows already have a single contribution.
+    """
+    n_bdry = p**3 - (p - 2) ** 3
+    N_tilde = jnp.zeros((n_bdry, p**3), dtype=du_dx.dtype)
+
+    f1 = get_face_1_idxes(p)
+    f2 = get_face_2_idxes(p)
+    f3 = get_face_3_idxes(p)
+    f4 = get_face_4_idxes(p)
+    f5 = get_face_5_idxes(p)
+    f6 = get_face_6_idxes(p)
+
+    # The columns of du_d* are the rearranged-Cheby-ordering Cheby points;
+    # rows of du_d* are the same ordering. ``get_face_*_idxes`` produces
+    # boundary-Cheby indices in this rearranged ordering.
+    N_tilde = N_tilde.at[f1].add(-1 * du_dx[f1])
+    N_tilde = N_tilde.at[f2].add(du_dx[f2])
+    N_tilde = N_tilde.at[f3].add(-1 * du_dy[f3])
+    N_tilde = N_tilde.at[f4].add(du_dy[f4])
+    N_tilde = N_tilde.at[f5].add(-1 * du_dz[f5])
+    N_tilde = N_tilde.at[f6].add(du_dz[f6])
+
+    # 8 corners (each shared by 3 faces) -> divide by 3.
+    corner_idxes = jnp.array(
+        [
+            0,
+            p - 1,
+            p**2 - p,
+            p**2 - 1,
+            p**2,
+            p**2 + p - 1,
+            2 * p**2 - p,
+            2 * p**2 - 1,
+        ]
+    )
+    N_tilde = N_tilde.at[corner_idxes, :].set(N_tilde[corner_idxes, :] / 3)
+
+    # 12 edges (each shared by 2 faces, length p-2 after corners removed).
+    edge_idxes = jnp.concatenate(
+        [
+            jnp.arange(1, p - 1),
+            jnp.arange(p**2 + 1, p**2 + p - 1),
+            jnp.arange(p**2 - p + 1, p**2 - 1),
+            jnp.arange(2 * p**2 - p + 1, 2 * p**2 - 1),
+            jnp.arange(1, p - 1) * p,
+            jnp.arange(p, p**2 - p, p) + p**2,
+            jnp.arange(2 * p**2, 3 * p**2 - 2 * p, p),
+            jnp.arange(3 * p**2 - 2 * p, 4 * p**2 - 4 * p, p),
+            jnp.arange(2 * p - 1, p**2 - p, p),
+            jnp.arange(p**2 + 2 * p - 1, 2 * p**2 - p, p),
+            jnp.arange(2 * p**2 + p - 1, 3 * p**2 - 2 * p, p),
+            jnp.arange(3 * p**2 - 2 * p + p - 1, 4 * p**2 - 4 * p, p),
+        ]
+    )
+    N_tilde = N_tilde.at[edge_idxes, :].set(N_tilde[edge_idxes, :] / 2)
+
+    return N_tilde
+
+
+@jax.jit
+def precompute_G_3D_ItI(N_tilde: jnp.ndarray, eta: float) -> jnp.ndarray:
+    """Incoming-impedance operator on the single-counted Cheby boundary.
+
+    G = N_tilde + i*eta * I[:n_bdry]   (added to the first n_bdry columns).
+
+    Returns shape (n_bdry, p**3) where n_bdry = p**3 - (p-2)**3. Acts on a
+    solution u on the rearranged Chebyshev grid (boundary first, then interior)
+    and returns the incoming impedance trace ``u_n + i*eta*u`` at each
+    single-counted boundary Cheby node.
+    """
+    shape_0 = N_tilde.shape[0]
+    F = N_tilde.astype(jnp.complex128)
+    F = F.at[:shape_0, :shape_0].set(
+        F[:shape_0, :shape_0] + 1j * eta * jnp.eye(shape_0)
+    )
+    return F
+
+
+@partial(jax.jit, static_argnums=(1, 2))
+def precompute_QH_3D_ItI(
+    N: jnp.ndarray, p: int, q: int, eta: float
+) -> jnp.ndarray:
+    """Outgoing-impedance operator at the 6 q**2 Gauss boundary nodes.
+
+    Builds the double-counted impedance map H = N - i*eta * I_face on the 6 p**2
+    Cheby boundary (i.e. for each face block, subtract i*eta along the diagonal
+    consisting of the columns indexed by that face's Cheby boundary indices).
+    Then interpolates Cheby -> Gauss face-wise using Q_I = kron(I_6, Q_2D).
+
+    Args:
+        N: Output of :func:`precompute_N_matrix_3D`. Shape (6 p**2, p**3).
+        p, q: Shape parameters.
+        eta: Real impedance coefficient.
+
+    Returns:
+        QH: shape (6 q**2, p**3).
+    """
+    H = N.astype(jnp.complex128)
+
+    f1 = get_face_1_idxes(p)
+    f2 = get_face_2_idxes(p)
+    f3 = get_face_3_idxes(p)
+    f4 = get_face_4_idxes(p)
+    f5 = get_face_5_idxes(p)
+    f6 = get_face_6_idxes(p)
+
+    rows = jnp.arange(p**2)
+    H = H.at[rows, f1].add(-1j * eta)
+    H = H.at[rows + p**2, f2].add(-1j * eta)
+    H = H.at[rows + 2 * p**2, f3].add(-1j * eta)
+    H = H.at[rows + 3 * p**2, f4].add(-1j * eta)
+    H = H.at[rows + 4 * p**2, f5].add(-1j * eta)
+    H = H.at[rows + 5 * p**2, f6].add(-1j * eta)
+
+    cheby_pts = chebyshev_points(p)
+    gauss_pts = gauss_points(q)
+    Q = barycentric_lagrange_interpolation_matrix_2D(
+        cheby_pts, cheby_pts, gauss_pts, gauss_pts
+    )
+    Q_I = jnp.kron(jnp.eye(6), Q)
+    return Q_I @ H
