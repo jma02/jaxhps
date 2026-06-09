@@ -71,8 +71,8 @@ echo ">>> building fmm3dbie Python wrapper"
     "${ENV_DIR}/bin/python" setup.py install
 )
 
-# 6. Smoke test.
-echo ">>> smoke test"
+# 6. Verify the wrapper imports and exposes the routines we need.
+echo ">>> verifying build"
 LD_LIBRARY_PATH="${ENV_DIR}/lib" "${ENV_DIR}/bin/python" - <<'PY'
 import fmm3dbie, fmm3dpy
 print("fmm3dpy", getattr(fmm3dpy, "__version__", "?"))

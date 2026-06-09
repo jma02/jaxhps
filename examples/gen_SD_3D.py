@@ -1,7 +1,7 @@
 """Generate 3D Helmholtz single- and double-layer matrices on a cube boundary.
 
 This is the 3D analog of ``examples/driver_gen_SD_matrices.m`` (which uses
-chunkIE in 2D).  It uses fmm3dbie to assemble the on-boundary single- and
+chunkIE in 2D).  We use fmm3dbie to assemble the on-boundary single- and
 double-layer matrices ``S`` and ``D`` for the 3D Helmholtz kernel
 
     G(x, y) = exp(i kappa |x - y|) / (4 pi |x - y|)
@@ -14,8 +14,8 @@ side (analogous to how ``load_SD_matrices`` reads the 2D ``.mat`` files
 shipped via Zenodo).
 
 This script must be run inside an env that has ``fmm3dbie`` built (see
-``scripts/build_fmm3dbie.sh`` for the build recipe).  It does not depend on
-the rest of jaxhps and never imports JAX.
+``scripts/build_fmm3dbie.sh`` for the build recipe).  This script does not
+depend on the rest of jaxhps and never imports JAX.
 
 Usage
 -----
@@ -289,7 +289,7 @@ def main() -> None:
     print(
         f"  D: {D.shape}, ||D||_F = {np.linalg.norm(D):.3e}, time = {info['time_D']:.1f}s"
     )
-    # surface area sanity (sum of weights ~ 6*(2a)^2 for cube)
+    # Check the surface area: sum of weights should equal 6*(2a)^2 for the cube.
     area = float(wts.sum())
     area_exact = 6.0 * (2.0 * args.a) ** 2
     print(

@@ -1,4 +1,4 @@
-"""Smoke test: load SD matrices and verify Green's identity on a HPS Domain.
+"""Load SD matrices and verify Green's identity on a HPS Domain.
 
 Builds a ``Domain`` matching the (a, q, L) the .npz was generated for, permutes
 the loaded matrices to the Domain's boundary-point ordering via
@@ -66,7 +66,7 @@ def main() -> None:
     # Outward normal from the HPS box, identified by face.
     nrm = outward_normals_for_cube_boundary(bp_domain, root)
 
-    # Sanity: permuted normals from the npz should agree with HPS-derived ones.
+    # Permuted normals from the npz should agree with HPS-derived ones.
     if not np.allclose(sdp["normals"], nrm):
         bad = np.linalg.norm(sdp["normals"] - nrm, axis=-1).max()
         raise RuntimeError(

@@ -298,7 +298,7 @@ class Problem2(Problem3DItI):
 
 
 # ---------------------------------------------------------------------------
-# Problem 3 — paper-style Gaussian bump potential, plane-wave MMS.
+# Problem 3 — Gaussian bump potential, plane-wave MMS.
 # ---------------------------------------------------------------------------
 
 
@@ -353,7 +353,7 @@ class Problem3(Problem3DItI):
 
 
 # ---------------------------------------------------------------------------
-# Problem 4 — paper-style "lens" potential, plane-wave MMS.
+# Problem 4 — "lens" potential, plane-wave MMS.
 # ---------------------------------------------------------------------------
 
 
