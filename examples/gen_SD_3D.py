@@ -249,9 +249,7 @@ def parse_args() -> argparse.Namespace:
         "--L",
         type=int,
         default=1,
-        help="Refinement level: 2^L x 2^L sub-patches per face. Must be"
-        " >= 1 to be usable with the HPS solver, which rejects single-leaf"
-        " (L=0) domains.",
+        help="Refinement level: 2^L x 2^L sub-patches per face.",
     )
     p.add_argument(
         "--kappa", type=float, default=4.0, help="Helmholtz wavenumber."
