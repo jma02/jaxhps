@@ -59,6 +59,16 @@ def merge_stage_uniform_3D_DtN(
         The top-level DtN matrix, which is only returned if ``return_T=True``. Has shape (4q, 4q).
 
     """
+    if l == 0:
+        # JAX clamps the out-of-bounds indexing in the oct-merge below, so a
+        # single-leaf input would silently produce a wrong-shape top-level T
+        # instead of crashing. Reject it here.
+        raise ValueError(
+            "merge_stage_uniform_3D_DtN requires a tree with at least one"
+            " level of refinement (l >= 1); got l=0, which is a single leaf"
+            " with nothing to merge."
+        )
+
     # Move the data to the compute device if necessary
     T_arr = jax.device_put(T_arr, device)
     h_arr = jax.device_put(h_arr, device)

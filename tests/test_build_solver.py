@@ -1,6 +1,7 @@
 import logging
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from jaxhps._build_solver import build_solver
 from jaxhps._domain import Domain
 from jaxhps._discretization_tree import (
@@ -401,3 +402,36 @@ class Test_build_solver:
 
         # g_tilde has shape n_bdry in the ItI case.
         assert pde_problem.S_lst[-1].shape == (1, n_bdry // 2, n_bdry)
+
+    def test_9(self) -> None:
+        """Uniform 3D DtN with a single leaf (L=0) must be rejected.
+
+        There is nothing to merge, and JAX's clamped out-of-bounds indexing
+        would otherwise let the merge stage silently return a wrong-shape
+        top-level T.
+        """
+        p = 8
+        q = 6
+        L = 0
+
+        root = DiscretizationNode3D(
+            xmin=-0.5,
+            xmax=0.5,
+            ymin=-0.5,
+            ymax=0.5,
+            zmin=-0.5,
+            zmax=0.5,
+        )
+        domain = Domain(p=p, q=q, root=root, L=L)
+
+        ones = jnp.ones_like(domain.interior_points[..., 0])
+        pde_problem = PDEProblem(
+            domain=domain,
+            D_xx_coefficients=ones,
+            D_yy_coefficients=ones,
+            D_zz_coefficients=ones,
+            source=jnp.zeros_like(ones),
+        )
+
+        with pytest.raises(ValueError, match="l >= 1"):
+            build_solver(pde_problem, return_top_T=True)

@@ -17,6 +17,7 @@ import logging
 import numpy as np
 import jax
 import jax.numpy as jnp
+import pytest
 
 from jaxhps._discretization_tree import DiscretizationNode3D
 from jaxhps._domain import Domain
@@ -134,6 +135,39 @@ class TestPipelineUniform3DItIPlanewave:
         assert results[-1][3] < results[0][3], (
             f"Convergence not observed: {results}"
         )
+
+    def test_planewave_pipeline_L0_raises(self) -> None:
+        """A single-leaf (L=0) domain has nothing to merge.  JAX's clamped
+        out-of-bounds indexing would otherwise let the merge stage silently
+        return a wrong-shape top-level T, so ``build_solver`` must reject
+        L=0 with a clear error instead."""
+        kappa = 4.0
+        p, q, L = 8, 6, 0
+
+        root = DiscretizationNode3D(
+            xmin=-0.5,
+            xmax=0.5,
+            ymin=-0.5,
+            ymax=0.5,
+            zmin=-0.5,
+            zmax=0.5,
+        )
+        domain = Domain(p=p, q=q, root=root, L=L)
+
+        ones = np.ones((1, p**3))
+        pde_problem = PDEProblem(
+            domain=domain,
+            D_xx_coefficients=ones,
+            D_yy_coefficients=ones,
+            D_zz_coefficients=ones,
+            I_coefficients=(kappa**2) * ones,
+            source=np.zeros((1, p**3), dtype=np.complex128),
+            use_ItI=True,
+            eta=kappa,
+        )
+
+        with pytest.raises(ValueError, match="l >= 1"):
+            build_solver(pde_problem, return_top_T=True)
 
     def test_planewave_pipeline_L2(self, caplog) -> None:
         """Same plane-wave test but on a 64-leaf (L=2) octree.  This

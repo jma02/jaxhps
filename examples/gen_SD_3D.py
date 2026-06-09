@@ -19,8 +19,8 @@ depend on the rest of jaxhps and never imports JAX.
 
 Usage
 -----
-    python examples/gen_SD_3D.py --q 8 --L 0 --kappa 4.0 --a 0.5 \
-        --out data/examples/SD_3D/SD_k4_q8_L0_a0.5.npz
+    python examples/gen_SD_3D.py --q 8 --L 1 --kappa 4.0 --a 0.5 \
+        --out data/examples/SD_3D/SD_k4_q8_L1_a0.5.npz
 """
 
 import argparse
@@ -248,8 +248,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--L",
         type=int,
-        default=0,
-        help="Refinement level: 2^L x 2^L sub-patches per face.",
+        default=1,
+        help="Refinement level: 2^L x 2^L sub-patches per face. Must be"
+        " >= 1 to be usable with the HPS solver, which rejects single-leaf"
+        " (L=0) domains.",
     )
     p.add_argument(
         "--kappa", type=float, default=4.0, help="Helmholtz wavenumber."
