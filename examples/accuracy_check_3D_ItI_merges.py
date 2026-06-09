@@ -380,7 +380,9 @@ class Problem4(Problem3DItI):
     def _b(self, pts):
         r = jnp.linalg.norm(pts, axis=-1)
         z = pts[..., 2]
-        return 4.0 * (z - 0.2) * (1.0 - jax.scipy.special.erf(25.0 * (r - 0.3)))
+        return (
+            4.0 * (z - 0.2) * (1.0 - jax.scipy.special.erf(25.0 * (r - 0.3)))
+        )
 
     def soln(self, pts):
         return jnp.exp(1j * self.kappa * pts @ self.source_dir)
@@ -464,7 +466,9 @@ def main() -> None:
         args.problem_1 or args.problem_2 or args.problem_3 or args.problem_4
     ):
         # Default: run all.
-        args.problem_1 = args.problem_2 = args.problem_3 = args.problem_4 = True
+        args.problem_1 = args.problem_2 = args.problem_3 = args.problem_4 = (
+            True
+        )
 
     if args.problem_1:
         e = Problem1().run(args.l_vals, args.p_vals)
