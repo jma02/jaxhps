@@ -18,7 +18,14 @@ matching 3D positions, so callers can work entirely in the domain's ordering.
 import numpy as np
 import jax
 import jax.numpy as jnp
-from typing import Tuple
+from typing import Callable, Tuple
+
+from jaxhps import (
+    DiscretizationNode3D,
+    Domain,
+    PDEProblem,
+    build_solver,
+)
 
 
 def load_SD_matrices_3D(
@@ -99,12 +106,23 @@ def permute_to_domain(
     return P, permuted
 
 
-def as_jax(sd_data: dict) -> dict:
-    """Convert numerical arrays in the dict to ``jax.numpy`` arrays in place-of-copy."""
-    out = dict(sd_data)
-    for k in ("S", "D", "wts", "boundary_points", "normals", "face_idx"):
-        out[k] = jnp.asarray(sd_data[k])
-    return out
+def outward_normals_for_cube_boundary(
+    boundary_points: np.ndarray, root
+) -> np.ndarray:
+    """Outward unit normals at the cube's boundary nodes, identified by face.
+
+    ``root`` is any object with ``xmin .. zmax`` attributes (e.g. a
+    ``DiscretizationNode3D``).
+    """
+    n = np.zeros_like(boundary_points)
+    eps = 1e-9
+    n[np.abs(boundary_points[:, 0] - root.xmin) < eps] = [-1, 0, 0]
+    n[np.abs(boundary_points[:, 0] - root.xmax) < eps] = [1, 0, 0]
+    n[np.abs(boundary_points[:, 1] - root.ymin) < eps] = [0, -1, 0]
+    n[np.abs(boundary_points[:, 1] - root.ymax) < eps] = [0, 1, 0]
+    n[np.abs(boundary_points[:, 2] - root.zmin) < eps] = [0, 0, -1]
+    n[np.abs(boundary_points[:, 2] - root.zmax) < eps] = [0, 0, 1]
+    return n
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +280,105 @@ def eval_uscat_offsurface_3D(
 
     w_G = G * src_weights[None, :]
     w_dG = dG_dny * src_weights[None, :]
-    if uscat_b.ndim == 1:
-        return w_dG @ uscat_b - w_G @ uscat_dn_b
     return w_dG @ uscat_b - w_G @ uscat_dn_b
+
+
+def solve_scattering_bie_3D(
+    sd: dict,
+    b_radial: Callable[[np.ndarray], np.ndarray],
+    source_dirs: np.ndarray,
+    eta: float = None,
+    p: int = None,
+) -> dict:
+    """Set up the interior problem and solve the coupled exterior BIE.
+
+    Performs the full HPS+BIE coupling up to (but not including) the interior
+    down-pass:
+
+    1. Builds a ``Domain``/``PDEProblem`` matching the ``(a, q, L, kappa)``
+       metadata in ``sd``.  The scattered field satisfies
+       ``Lap u^s + kappa^2 (1 - b) u^s = kappa^2 b u^inc``, so the source is
+       evaluated per incident direction.
+    2. Permutes the (S, D) matrices to the Domain's boundary ordering and
+       cross-checks the stored normals against face-identified ones.
+    3. Builds the HPS solver, Cayley-transforms the top-level ItI map to DtN.
+    4. Solves the exterior BIE for the scattered traces and impedance.
+
+    Args:
+        sd:           dict from :func:`load_SD_matrices_3D`.
+        b_radial:     radial scattering potential; called as ``b_radial(r)``
+                      on arrays of radii.
+        source_dirs:  ``(n_src, 3)`` incident unit directions.
+        eta:          ItI impedance parameter; defaults to ``kappa``.
+        p:            interior Chebyshev order; defaults to ``q + 2``.
+
+    Returns a dict with:
+        ``problem``           the PDEProblem (solver built; pass ``imp`` to
+                              ``jaxhps.solve`` for the interior field),
+        ``boundary_points``   ``(n_bdry, 3)`` in the Domain's ordering,
+        ``normals``           ``(n_bdry, 3)`` outward normals,
+        ``sdp``               the permuted SD dict (for quadrature weights),
+        ``imp``               ``(n_bdry, n_src)`` scattered incoming impedance,
+        ``uscat_b``           ``(n_bdry, n_src)`` scattered Dirichlet trace,
+        ``uscat_dn_b``        ``(n_bdry, n_src)`` scattered Neumann trace.
+    """
+    a, q, L, kappa = sd["a"], sd["q"], sd["L"], sd["kappa"]
+    eta = float(kappa if eta is None else eta)
+    p = q + 2 if p is None else p
+    source_dirs = np.asarray(source_dirs, dtype=np.float64)
+
+    root = DiscretizationNode3D(
+        xmin=-a, xmax=a, ymin=-a, ymax=a, zmin=-a, zmax=a
+    )
+    domain = Domain(p=p, q=q, root=root, L=L)
+
+    int_pts = np.asarray(domain.interior_points)  # (n_leaves, p^3, 3)
+    b_int = b_radial(np.linalg.norm(int_pts, axis=-1))
+    I_coeffs = (kappa**2 * (1.0 - b_int)).astype(np.complex128)
+    phases = np.einsum("lpd,sd->lps", int_pts, source_dirs)
+    uin_int = np.exp(1j * kappa * phases)  # (n_leaves, p^3, n_src)
+    src = (kappa**2 * b_int[..., None] * uin_int).astype(np.complex128)
+
+    ones = np.ones_like(I_coeffs)
+    problem = PDEProblem(
+        domain=domain,
+        D_xx_coefficients=ones,
+        D_yy_coefficients=ones,
+        D_zz_coefficients=ones,
+        I_coefficients=I_coeffs,
+        source=src,
+        use_ItI=True,
+        eta=eta,
+    )
+
+    bp = np.asarray(domain.boundary_points).reshape(-1, 3)
+    _, sdp = permute_to_domain(sd, bp)
+    nrm = outward_normals_for_cube_boundary(bp, root)
+    if not np.allclose(sdp["normals"], nrm):
+        bad = float(np.linalg.norm(sdp["normals"] - nrm, axis=-1).max())
+        raise RuntimeError(
+            f"normals don't agree after permutation: max diff {bad:.2e}"
+        )
+
+    T_ItI = build_solver(problem, return_top_T=True)
+    T_DtN = get_DtN_from_ItI_3D(jnp.asarray(T_ItI), eta)
+
+    imp, uscat_b, uscat_dn_b = get_scattering_uscat_impedance_3D(
+        S=jnp.asarray(sdp["S"]),
+        D=jnp.asarray(sdp["D"]),
+        T_DtN=T_DtN,
+        bdry_pts=jnp.asarray(bp),
+        normals=jnp.asarray(nrm),
+        k=float(kappa),
+        eta=eta,
+        source_dirs=jnp.asarray(source_dirs),
+    )
+    return dict(
+        problem=problem,
+        boundary_points=bp,
+        normals=nrm,
+        sdp=sdp,
+        imp=imp,
+        uscat_b=np.asarray(uscat_b),
+        uscat_dn_b=np.asarray(uscat_dn_b),
+    )

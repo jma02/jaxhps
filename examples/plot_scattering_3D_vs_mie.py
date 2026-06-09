@@ -17,36 +17,18 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle, Circle
 
-from jaxhps._build_solver import build_solver
-from jaxhps._discretization_tree import DiscretizationNode3D
-from jaxhps._domain import Domain
-from jaxhps._pdeproblem import PDEProblem
-from jaxhps._solve import solve
+from jaxhps import solve
 
 sys.path.insert(0, os.path.dirname(__file__))
 from wave_scattering_utils_3D import (  # noqa: E402
     eval_uscat_offsurface_3D,
-    get_DtN_from_ItI_3D,
-    get_scattering_uscat_impedance_3D,
     load_SD_matrices_3D,
-    permute_to_domain,
+    solve_scattering_bie_3D,
 )
 from mie_3d import (  # noqa: E402
     mie_scattered_field,
     mie_scattered_field_interior,
 )
-
-
-def outward_normals(bp, root):
-    n = np.zeros_like(bp)
-    eps = 1e-9
-    n[np.abs(bp[:, 0] - root.xmin) < eps] = [-1, 0, 0]
-    n[np.abs(bp[:, 0] - root.xmax) < eps] = [1, 0, 0]
-    n[np.abs(bp[:, 1] - root.ymin) < eps] = [0, -1, 0]
-    n[np.abs(bp[:, 1] - root.ymax) < eps] = [0, 1, 0]
-    n[np.abs(bp[:, 2] - root.zmin) < eps] = [0, 0, -1]
-    n[np.abs(bp[:, 2] - root.zmax) < eps] = [0, 0, 1]
-    return n
 
 
 def main():
@@ -61,7 +43,7 @@ def main():
     args = p.parse_args()
 
     sd = load_SD_matrices_3D(args.npz)
-    a, q, L, kappa = sd["a"], sd["q"], sd["L"], sd["kappa"]
+    a, kappa = sd["a"], sd["kappa"]
     R_bump, A_bump = args.R_bump, args.A_bump
 
     def b_radial(r):
@@ -70,58 +52,19 @@ def main():
 
     source_dir = np.array([[1.0, 0.0, 0.0]], dtype=np.float64)
 
-    # Build interior PDE problem.
-    root = DiscretizationNode3D(
-        xmin=-a, xmax=a, ymin=-a, ymax=a, zmin=-a, zmax=a
-    )
-    domain = Domain(p=q + 2, q=q, root=root, L=L)
-    int_pts = np.asarray(domain.interior_points)
-    r_int = np.linalg.norm(int_pts, axis=-1)
-    b_int = b_radial(r_int)
-    I_coeffs = (kappa**2 * (1.0 - b_int)).astype(np.complex128)
-    phases = np.einsum("lpd,sd->lps", int_pts, source_dir)
-    uin_int = np.exp(1j * kappa * phases)
-    src = (kappa**2 * b_int[..., None] * uin_int).astype(np.complex128)
-    ones = np.ones_like(I_coeffs)
-    problem = PDEProblem(
-        domain=domain,
-        D_xx_coefficients=ones,
-        D_yy_coefficients=ones,
-        D_zz_coefficients=ones,
-        I_coefficients=I_coeffs,
-        source=src,
-        use_ItI=True,
-        eta=float(kappa),
-    )
-
-    # HPS solve -> top ItI -> DtN.
-    T_ItI = build_solver(problem, return_top_T=True)
-    T_DtN = get_DtN_from_ItI_3D(jnp.asarray(T_ItI), float(kappa))
-
-    # Permute SD to domain ordering.
-    bp_dom = np.asarray(domain.boundary_points).reshape(-1, 3)
-    _, sdp = permute_to_domain(sd, bp_dom)
-    nrm = outward_normals(bp_dom, root)
-
-    # BIE solve.
-    imp, uscat_b, uscat_dn_b = get_scattering_uscat_impedance_3D(
-        S=jnp.asarray(sdp["S"]),
-        D=jnp.asarray(sdp["D"]),
-        T_DtN=T_DtN,
-        bdry_pts=jnp.asarray(bp_dom),
-        normals=jnp.asarray(nrm),
-        k=float(kappa),
-        eta=float(kappa),
-        source_dirs=jnp.asarray(source_dir),
-    )
-    uscat_b = np.asarray(uscat_b)[:, 0]
-    uscat_dn_b = np.asarray(uscat_dn_b)[:, 0]
+    # HPS build + ItI->DtN Cayley + exterior BIE solve, all in one call.
+    out = solve_scattering_bie_3D(sd, b_radial, source_dir)
+    problem = out["problem"]
+    domain = problem.domain
+    bp_dom = out["boundary_points"]
+    nrm = out["normals"]
+    sdp = out["sdp"]
+    uscat_b = out["uscat_b"][:, 0]
+    uscat_dn_b = out["uscat_dn_b"][:, 0]
 
     # HPS down-pass with the scattered-field incoming impedance -> u^s on the
-    # interior Chebyshev grid.  Keep the n_src dim and slice it off after.
-    us_interior_full = np.asarray(solve(problem, imp))
-    # solve returns (n_leaves, p^3, n_src); take the single source we have.
-    us_interior = us_interior_full[..., 0]
+    # interior Chebyshev grid; solve returns (n_leaves, p^3, n_src).
+    us_interior = np.asarray(solve(problem, out["imp"]))[..., 0]
 
     # Slice grid in y = 0 plane.
     L_plot = 1.5
@@ -176,7 +119,6 @@ def main():
 
     # Mie reference: exterior via outgoing-Hankel sum, interior via the
     # numerically-integrated radial ODE.
-    valid_mie = np.ones(targets.shape[0], dtype=bool)
     u_mie = np.full(targets.shape[0], np.nan, dtype=np.complex128)
     out_supp = rr > R_bump
     u_mie[out_supp] = mie_scattered_field(
@@ -199,12 +141,7 @@ def main():
 
     re_bie = np.real(u_bie).reshape(args.n, args.n)
     re_mie = np.real(u_mie).reshape(args.n, args.n)
-    err = np.full_like(re_bie, np.nan)
-    # Compare everywhere both are defined.
-    overlap = valid_mie
-    err.ravel()[overlap] = np.abs(
-        u_bie.ravel()[overlap] - u_mie.ravel()[overlap]
-    )
+    err = np.abs(u_bie - u_mie).reshape(args.n, args.n)
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 5), constrained_layout=True)
     extent = [-L_plot, L_plot, -L_plot, L_plot]

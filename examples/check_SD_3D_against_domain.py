@@ -22,7 +22,11 @@ import numpy as np
 from jaxhps._discretization_tree import DiscretizationNode3D
 from jaxhps._domain import Domain
 
-from wave_scattering_utils_3D import load_SD_matrices_3D, permute_to_domain
+from wave_scattering_utils_3D import (
+    load_SD_matrices_3D,
+    outward_normals_for_cube_boundary,
+    permute_to_domain,
+)
 
 
 def main() -> None:
@@ -59,16 +63,8 @@ def main() -> None:
     P, sdp = permute_to_domain(sd, bp_domain)
     print(f"permutation matched all {len(P)} nodes")
 
-    # Outward normal from the HPS box: we reconstruct it the same way as in
-    # tests/test_pipeline_uniform_3D_ItI.py.
-    nrm = np.zeros_like(bp_domain)
-    eps = 1e-9
-    nrm[np.abs(bp_domain[:, 0] - root.xmin) < eps] = [-1, 0, 0]
-    nrm[np.abs(bp_domain[:, 0] - root.xmax) < eps] = [1, 0, 0]
-    nrm[np.abs(bp_domain[:, 1] - root.ymin) < eps] = [0, -1, 0]
-    nrm[np.abs(bp_domain[:, 1] - root.ymax) < eps] = [0, 1, 0]
-    nrm[np.abs(bp_domain[:, 2] - root.zmin) < eps] = [0, 0, -1]
-    nrm[np.abs(bp_domain[:, 2] - root.zmax) < eps] = [0, 0, 1]
+    # Outward normal from the HPS box, identified by face.
+    nrm = outward_normals_for_cube_boundary(bp_domain, root)
 
     # Sanity: permuted normals from the npz should agree with HPS-derived ones.
     if not np.allclose(sdp["normals"], nrm):
