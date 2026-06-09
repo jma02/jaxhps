@@ -334,3 +334,127 @@ class TestPipelineUniform3DItIPlanewave:
         logging.info("manufactured-source variable-coeff err: %.3e", err)
         assert err < 1e-9, f"manufactured-source test failed: err={err}"
         jax.clear_caches()
+
+    def test_bump_potential_planewave_mms(self, caplog) -> None:
+        r"""3D analog of the section-5.1 Gaussian bump from arXiv:1308.5998.
+
+        Uses the paper's radial scattering potential
+
+            ``b(x) = -1.5 * exp(-c * |x|^2)``
+
+        on the cube ``[-0.5, 0.5]^3`` and a plane-wave manufactured solution
+        ``u = exp(i kappa w . x)`` with ``w = (1,1,1)/sqrt(3)``.  Since
+        ``Lap u = -kappa^2 u``, the PDE ``Lap u + kappa^2 (1 - b) u = f``
+        is satisfied by ``f = -kappa^2 b(x) u(x)``.  We use a softer
+        ``c = 40`` (vs the paper's ``c = 160``) and a modest ``kappa = 4``
+        so the bump is resolvable at ``p = 12, L = 1`` for a fast CI test.
+        """
+        caplog.set_level(logging.DEBUG)
+        kappa = 4.0
+        eta = kappa
+        A_bump = -1.5
+        c_bump = 40.0
+        w = np.array([1.0, 1.0, 1.0]) / np.sqrt(3.0)
+        p, q, L = 12, 10, 1
+
+        root = DiscretizationNode3D(
+            xmin=-0.5,
+            xmax=0.5,
+            ymin=-0.5,
+            ymax=0.5,
+            zmin=-0.5,
+            zmax=0.5,
+        )
+        domain = Domain(p=p, q=q, root=root, L=L)
+        pts = np.asarray(domain.interior_points)
+        r2 = np.sum(pts**2, axis=-1)
+        b_int = A_bump * np.exp(-c_bump * r2)
+        u_int = np.exp(1j * kappa * (pts @ w))
+        I_var = (kappa**2 * (1.0 - b_int)).astype(np.complex128)
+        src = (-(kappa**2) * b_int * u_int).astype(np.complex128)
+
+        n_leaves = pts.shape[0]
+        ones = np.ones((n_leaves, p**3))
+        problem = PDEProblem(
+            domain=domain,
+            D_xx_coefficients=ones,
+            D_yy_coefficients=ones,
+            D_zz_coefficients=ones,
+            I_coefficients=I_var,
+            source=src,
+            use_ItI=True,
+            eta=eta,
+        )
+        build_solver(problem)
+
+        bp = np.asarray(domain.boundary_points).reshape(-1, 3)
+        nrm = _outward_normals_for_boundary(bp, root)
+        u_b = np.exp(1j * kappa * (bp @ w))
+        dn_u = 1j * kappa * (nrm @ w) * u_b
+        g_in = (dn_u + 1j * eta * u_b).astype(np.complex128)
+        solns = np.asarray(solve(problem, jnp.asarray(g_in)))
+        err = np.max(np.abs(solns - u_int)) / np.max(np.abs(u_int))
+        logging.info("bump-potential MMS err: %.3e", err)
+        assert err < 1e-6, f"bump-potential MMS test failed: err={err}"
+        jax.clear_caches()
+
+    def test_lens_potential_planewave_mms(self, caplog) -> None:
+        r"""3D analog of the section-5.2 vertical lens from arXiv:1308.5998.
+
+        Treats ``z`` as the graded axis:
+
+            ``b(x) = 4 (z - 0.2) * (1 - erf(25 * (|x| - 0.3)))``
+
+        which is essentially supported in ``|x| < ~0.4`` and reaches
+        amplitude ``~2`` near the origin — much larger than the bump test
+        above, so the source amplitude ``f = -kappa^2 b u`` is significant.
+        Same plane-wave MMS solution.
+        """
+        from scipy.special import erf as _erf
+
+        caplog.set_level(logging.DEBUG)
+        kappa = 4.0
+        eta = kappa
+        w = np.array([1.0, 1.0, 1.0]) / np.sqrt(3.0)
+        p, q, L = 12, 10, 1
+
+        root = DiscretizationNode3D(
+            xmin=-0.5,
+            xmax=0.5,
+            ymin=-0.5,
+            ymax=0.5,
+            zmin=-0.5,
+            zmax=0.5,
+        )
+        domain = Domain(p=p, q=q, root=root, L=L)
+        pts = np.asarray(domain.interior_points)
+        r = np.linalg.norm(pts, axis=-1)
+        b_int = 4.0 * (pts[..., 2] - 0.2) * (1.0 - _erf(25.0 * (r - 0.3)))
+        u_int = np.exp(1j * kappa * (pts @ w))
+        I_var = (kappa**2 * (1.0 - b_int)).astype(np.complex128)
+        src = (-(kappa**2) * b_int * u_int).astype(np.complex128)
+
+        n_leaves = pts.shape[0]
+        ones = np.ones((n_leaves, p**3))
+        problem = PDEProblem(
+            domain=domain,
+            D_xx_coefficients=ones,
+            D_yy_coefficients=ones,
+            D_zz_coefficients=ones,
+            I_coefficients=I_var,
+            source=src,
+            use_ItI=True,
+            eta=eta,
+        )
+        build_solver(problem)
+
+        bp = np.asarray(domain.boundary_points).reshape(-1, 3)
+        nrm = _outward_normals_for_boundary(bp, root)
+        u_b = np.exp(1j * kappa * (bp @ w))
+        dn_u = 1j * kappa * (nrm @ w) * u_b
+        g_in = (dn_u + 1j * eta * u_b).astype(np.complex128)
+        solns = np.asarray(solve(problem, jnp.asarray(g_in)))
+        err = np.max(np.abs(solns - u_int)) / np.max(np.abs(u_int))
+        logging.info("lens-potential MMS err: %.3e", err)
+        assert err < 1e-6, f"lens-potential MMS test failed: err={err}"
+        jax.clear_caches()

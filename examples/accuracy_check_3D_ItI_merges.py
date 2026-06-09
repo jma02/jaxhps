@@ -53,6 +53,8 @@ def setup_args() -> argparse.Namespace:
     )
     parser.add_argument("--problem_1", action="store_true")
     parser.add_argument("--problem_2", action="store_true")
+    parser.add_argument("--problem_3", action="store_true")
+    parser.add_argument("--problem_4", action="store_true")
     parser.add_argument(
         "--p_vals",
         type=int,
@@ -296,6 +298,110 @@ class Problem2(Problem3DItI):
 
 
 # ---------------------------------------------------------------------------
+# Problem 3 — paper-style Gaussian bump potential, plane-wave MMS.
+# ---------------------------------------------------------------------------
+
+
+class Problem3(Problem3DItI):
+    r"""Gaussian-bump variable medium with a plane-wave manufactured solution.
+
+    Mirrors the radial scattering potential from section 5.1 of Gillman,
+    Barnett, Martinsson 2014 (``arXiv:1308.5998``):
+
+        ``b(x) = A * exp(-c * |x|^2)``
+
+    with ``A = -1.5`` and ``c = 160`` (paper's Bump 1).  We solve the total-
+    field Helmholtz equation
+
+        ``Delta u + kappa^2 (1 - b(x)) u = f``
+
+    on the cube ``[-0.5, 0.5]^3`` and pick ``u(x) = exp(i kappa w . x)`` as the
+    manufactured solution; since ``Delta u = -kappa^2 u``, the required source
+    is ``f(x) = -kappa^2 b(x) u(x)``.  ``b`` is numerically zero on the cube
+    faces (``b(|x|=0.5) ~ 4e-18``), so the impedance trace is essentially that
+    of a free plane wave — but the interior solver still has to digest the
+    fast-varying ``b(x)`` and the matching complex-valued source.
+    """
+
+    kappa = 16.0
+    eta = 16.0
+    A = -1.5
+    c = 160.0
+    source_dir = jnp.array([1.0, 1.0, 1.0]) / jnp.sqrt(3)
+
+    def _b(self, pts):
+        r2 = jnp.sum(pts**2, axis=-1)
+        return self.A * jnp.exp(-self.c * r2)
+
+    def soln(self, pts):
+        return jnp.exp(1j * self.kappa * pts @ self.source_dir)
+
+    def source(self, pts):
+        return -(self.kappa**2) * self._b(pts) * self.soln(pts)
+
+    def I_coefficients(self, pts):
+        return self.kappa**2 * (1.0 - self._b(pts))
+
+    def _dx(self, pts):
+        return 1j * self.kappa * self.source_dir[0] * self.soln(pts)
+
+    def _dy(self, pts):
+        return 1j * self.kappa * self.source_dir[1] * self.soln(pts)
+
+    def _dz(self, pts):
+        return 1j * self.kappa * self.source_dir[2] * self.soln(pts)
+
+
+# ---------------------------------------------------------------------------
+# Problem 4 — paper-style "lens" potential, plane-wave MMS.
+# ---------------------------------------------------------------------------
+
+
+class Problem4(Problem3DItI):
+    r"""Vertically-graded lens variable medium with a plane-wave MMS.
+
+    Lifts section 5.2's lens potential to 3D by treating ``z`` as the graded
+    axis:
+
+        ``b(x) = 4 (z - 0.2) * (1 - erf(25 * (|x| - 0.3)))``
+
+    The bracket rolls off to ``0`` for ``|x| > ~0.4``, so ``b`` is essentially
+    supported in a ball of radius ``0.3`` around the origin.  Same PDE
+    ``Delta u + kappa^2 (1 - b) u = f`` and same manufactured plane-wave
+    solution as ``Problem3``; the source ``f = -kappa^2 b u`` carries a much
+    larger amplitude here (``b`` reaches ~``2``), which stresses the
+    variable-coefficient assembly more than the bump.
+    """
+
+    kappa = 16.0
+    eta = 16.0
+    source_dir = jnp.array([1.0, 1.0, 1.0]) / jnp.sqrt(3)
+
+    def _b(self, pts):
+        r = jnp.linalg.norm(pts, axis=-1)
+        z = pts[..., 2]
+        return 4.0 * (z - 0.2) * (1.0 - jax.scipy.special.erf(25.0 * (r - 0.3)))
+
+    def soln(self, pts):
+        return jnp.exp(1j * self.kappa * pts @ self.source_dir)
+
+    def source(self, pts):
+        return -(self.kappa**2) * self._b(pts) * self.soln(pts)
+
+    def I_coefficients(self, pts):
+        return self.kappa**2 * (1.0 - self._b(pts))
+
+    def _dx(self, pts):
+        return 1j * self.kappa * self.source_dir[0] * self.soln(pts)
+
+    def _dy(self, pts):
+        return 1j * self.kappa * self.source_dir[1] * self.soln(pts)
+
+    def _dz(self, pts):
+        return 1j * self.kappa * self.source_dir[2] * self.soln(pts)
+
+
+# ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------
 
@@ -354,9 +460,11 @@ def main() -> None:
         format="%(levelname)s %(name)s: %(message)s",
     )
 
-    if not (args.problem_1 or args.problem_2):
-        # Default: run both.
-        args.problem_1 = args.problem_2 = True
+    if not (
+        args.problem_1 or args.problem_2 or args.problem_3 or args.problem_4
+    ):
+        # Default: run all.
+        args.problem_1 = args.problem_2 = args.problem_3 = args.problem_4 = True
 
     if args.problem_1:
         e = Problem1().run(args.l_vals, args.p_vals)
@@ -386,6 +494,36 @@ def main() -> None:
             args.p_vals,
             "Problem 2: gravity Helmholtz plane wave",
             os.path.join(args.plots_dir, "problem_2.png"),
+        )
+
+    if args.problem_3:
+        e = Problem3().run(args.l_vals, args.p_vals)
+        print("\nProblem3 errors (rows=L, cols=p):")
+        print(
+            np.array2string(e, formatter={"float_kind": lambda x: f"{x:.3e}"})
+        )
+        save_results(e, args.l_vals, args.p_vals, "problem_3", args.plots_dir)
+        maybe_plot(
+            e,
+            args.l_vals,
+            args.p_vals,
+            "Problem 3: Gaussian bump potential (paper 5.1)",
+            os.path.join(args.plots_dir, "problem_3.png"),
+        )
+
+    if args.problem_4:
+        e = Problem4().run(args.l_vals, args.p_vals)
+        print("\nProblem4 errors (rows=L, cols=p):")
+        print(
+            np.array2string(e, formatter={"float_kind": lambda x: f"{x:.3e}"})
+        )
+        save_results(e, args.l_vals, args.p_vals, "problem_4", args.plots_dir)
+        maybe_plot(
+            e,
+            args.l_vals,
+            args.p_vals,
+            "Problem 4: lens potential (paper 5.2)",
+            os.path.join(args.plots_dir, "problem_4.png"),
         )
 
 
