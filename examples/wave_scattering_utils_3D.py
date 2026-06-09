@@ -16,6 +16,7 @@ matching 3D positions, so callers can work entirely in the domain's ordering.
 """
 
 import numpy as np
+import jax
 import jax.numpy as jnp
 from typing import Tuple
 
@@ -104,3 +105,163 @@ def as_jax(sd_data: dict) -> dict:
     for k in ("S", "D", "wts", "boundary_points", "normals", "face_idx"):
         out[k] = jnp.asarray(sd_data[k])
     return out
+
+
+# ---------------------------------------------------------------------------
+# BIE coupling -- 3D analogue of examples/wave_scattering_utils.py
+# ---------------------------------------------------------------------------
+#
+# Convention (matches the HPS 3D ItI solver and the 2D wave-scattering utils):
+#   g_in  = u_n + i*eta*u    (incoming impedance trace)
+#   g_out = u_n - i*eta*u    (outgoing impedance trace)
+#   R = T_ItI : g_in -> g_out
+#
+# From the two impedance equations,  u_n = T u  is recovered by Cayley:
+#   T_DtN = -i*eta * (R - I)^{-1} (R + I).
+#
+# Exterior BIE for the scattered field (Gillman-Barnett-Martinsson eq. 3.4):
+#   A u^s = b,   A = (1/2) I - D + S T_int,   b = S (u^inc_n - T_int u^inc),
+# where D here is the principal-value double-layer (no jump baked in) and
+# n is the outward normal of the cube.  After solving for u^s on the boundary,
+# the scattered normal trace and the incoming impedance for the down-pass are
+#   u^s_n = T_int (u^s + u^inc) - u^inc_n,
+#   g_in^s = u^s_n + i*eta*u^s,
+# and the off-surface representation is u^s(x) = D[u^s](x) - S[u^s_n](x).
+
+
+@jax.jit
+def get_DtN_from_ItI_3D(R: jnp.ndarray, eta: float) -> jnp.ndarray:
+    """Cayley transform from the 3D ItI map to the matching DtN map.
+
+    Implements ``T = -i*eta * (R - I)^{-1} (R + I)`` -- same convention as
+    :func:`wave_scattering_utils.get_DtN_from_ItI` in 2D.
+    """
+    n = R.shape[0]
+    I = jnp.eye(n, dtype=R.dtype)
+    return -1j * eta * jnp.linalg.solve(R - I, R + I)
+
+
+@jax.jit
+def get_uin_and_dn_3D(
+    k: float,
+    bdry_pts: jnp.ndarray,
+    normals: jnp.ndarray,
+    source_dirs: jnp.ndarray,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Evaluate plane-wave incident traces and normal derivatives on ``bdry_pts``.
+
+    ``u^inc(x) = exp(i k w . x)``,
+    ``d u^inc / dn = i k (w . n) u^inc(x)``.
+
+    Args:
+        k:            wavenumber.
+        bdry_pts:     ``(n_bdry, 3)`` boundary nodes.
+        normals:      ``(n_bdry, 3)`` outward unit normals at the boundary nodes.
+        source_dirs:  ``(n_src, 3)`` incident unit direction vectors.
+
+    Returns:
+        ``uin`` and ``uin_dn`` each of shape ``(n_bdry, n_src)``.
+    """
+    phases = bdry_pts @ source_dirs.T
+    uin = jnp.exp(1j * k * phases)
+    wn = normals @ source_dirs.T
+    uin_dn = 1j * k * wn * uin
+    return uin, uin_dn
+
+
+@jax.jit
+def setup_scattering_lin_system_3D(
+    S: jnp.ndarray,
+    D: jnp.ndarray,
+    T_int: jnp.ndarray,
+    bdry_pts: jnp.ndarray,
+    normals: jnp.ndarray,
+    k: float,
+    source_dirs: jnp.ndarray,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Assemble ``A`` and ``b`` for the exterior BIE coupling.
+
+    Returns
+    -------
+    A : ``(n_bdry, n_bdry)`` complex matrix  ``= (1/2) I - D + S T_int``.
+    b : ``(n_bdry, n_src)`` right-hand side  ``= S (u^inc_n - T_int u^inc)``.
+    """
+    n = bdry_pts.shape[0]
+    uin, uin_dn = get_uin_and_dn_3D(k, bdry_pts, normals, source_dirs)
+    A = 0.5 * jnp.eye(n, dtype=S.dtype) - D + S @ T_int
+    b = S @ (uin_dn - T_int @ uin)
+    return A, b
+
+
+@jax.jit
+def get_scattering_uscat_impedance_3D(
+    S: jnp.ndarray,
+    D: jnp.ndarray,
+    T_DtN: jnp.ndarray,
+    bdry_pts: jnp.ndarray,
+    normals: jnp.ndarray,
+    k: float,
+    eta: float,
+    source_dirs: jnp.ndarray,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Solve the BIE, recover the scattered Dirichlet + Neumann + impedance traces.
+
+    Returns
+    -------
+    imp        : ``(n_bdry, n_src)``  incoming impedance ``u^s_n + i*eta*u^s``.
+    uscat_b    : ``(n_bdry, n_src)``  scattered Dirichlet trace ``u^s``.
+    uscat_dn_b : ``(n_bdry, n_src)``  scattered Neumann trace  ``u^s_n``.
+    """
+    A, rhs = setup_scattering_lin_system_3D(
+        S, D, T_DtN, bdry_pts, normals, k, source_dirs
+    )
+    uin, uin_dn = get_uin_and_dn_3D(k, bdry_pts, normals, source_dirs)
+    uscat_b = jnp.linalg.solve(A, rhs)
+    uscat_dn_b = T_DtN @ (uscat_b + uin) - uin_dn
+    imp = uscat_dn_b + 1j * eta * uscat_b
+    return imp, uscat_b, uscat_dn_b
+
+
+@jax.jit
+def eval_uscat_offsurface_3D(
+    target_pts: jnp.ndarray,
+    src_pts: jnp.ndarray,
+    src_normals: jnp.ndarray,
+    src_weights: jnp.ndarray,
+    uscat_b: jnp.ndarray,
+    uscat_dn_b: jnp.ndarray,
+    k: float,
+) -> jnp.ndarray:
+    """Evaluate the scattered field at off-surface targets via the exterior rep.
+
+    ``u^s(x) = D[u^s](x) - S[u^s_n](x)`` for ``x`` strictly outside the cube.
+    Smooth Gauss-Legendre quadrature -- accuracy degrades for ``x`` within an
+    inter-node spacing of the surface (no local correction is applied here).
+    With ``q`` nodes per direction per face, the rule of thumb is to keep
+    ``dist(x, dOmega) >= a/q``.
+
+    Args:
+        target_pts:     ``(n_t, 3)`` target points outside the cube.
+        src_pts:        ``(n_s, 3)`` boundary quadrature nodes.
+        src_normals:    ``(n_s, 3)`` outward normals at the source nodes.
+        src_weights:    ``(n_s,)``   quadrature weights.
+        uscat_b:        ``(n_s,)`` or ``(n_s, n_src)`` scattered Dirichlet trace.
+        uscat_dn_b:     ``(n_s,)`` or ``(n_s, n_src)`` scattered Neumann trace.
+        k:              wavenumber.
+
+    Returns:
+        ``u^s`` at ``target_pts``; shape ``(n_t,)`` or ``(n_t, n_src)`` mirroring
+        the input trace shape.
+    """
+    diff = target_pts[:, None, :] - src_pts[None, :, :]
+    r = jnp.linalg.norm(diff, axis=-1)
+    G = jnp.exp(1j * k * r) / (4.0 * jnp.pi * r)
+    # d_{n_y} G  where  diff = x - y  =>  d/dy_i = (1/r - i k) (diff_i / r) G.
+    n_dot_diff = jnp.einsum("sj,tsj->ts", src_normals, diff)
+    dG_dny = (1.0 / r - 1j * k) / r * G * n_dot_diff
+
+    w_G = G * src_weights[None, :]
+    w_dG = dG_dny * src_weights[None, :]
+    if uscat_b.ndim == 1:
+        return w_dG @ uscat_b - w_G @ uscat_dn_b
+    return w_dG @ uscat_b - w_G @ uscat_dn_b
