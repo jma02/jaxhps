@@ -80,12 +80,19 @@ def _rotation_aligning_with_z(w: np.ndarray) -> np.ndarray:
 
 
 def _solve_radial_interior(
-    ell: int, kappa: float, b_radial, R_supp: float, eps: float = 1e-4
+    ell: int,
+    kappa: float,
+    b_radial,
+    R_supp: float,
+    eps: float = 1e-4,
+    dense_output: bool = False,
 ):
     """Solve the radial Helmholtz ODE on ``[eps * R_supp, R_supp]``.
 
-    Returns ``(R_end, Rp_end)``: value and derivative at ``r = R_supp`` of the
-    regular interior solution (normalized so ``R_ell(r) ~ r^ell`` near 0).
+    Returns ``(R_end, Rp_end, sol)``: value and derivative at ``r = R_supp`` of
+    the regular interior solution (normalized so ``R_ell(r) ~ r^ell`` near 0).
+    ``sol`` is the raw ``solve_ivp`` result with ``dense_output`` enabled when
+    requested, so the caller can sample ``R_ell(r)`` at arbitrary interior radii.
     """
     r0 = eps * R_supp
 
@@ -111,12 +118,12 @@ def _solve_radial_interior(
         method="RK45",
         rtol=1e-10,
         atol=1e-13,
-        dense_output=False,
+        dense_output=dense_output,
         max_step=0.05 * R_supp,
     )
     if not sol.success:
         raise RuntimeError(f"radial ODE failed at ell={ell}: {sol.message}")
-    return float(sol.y[0, -1]), float(sol.y[1, -1])
+    return float(sol.y[0, -1]), float(sol.y[1, -1]), sol
 
 
 def mie_scattering_coefficients(
@@ -124,15 +131,25 @@ def mie_scattering_coefficients(
     b_radial,
     R_supp: float,
     ell_max: int,
-) -> np.ndarray:
+    keep_interior: bool = False,
+):
     """Compute the outgoing-Hankel coefficients ``b_ell`` for ell=0..ell_max.
 
     Assumes a plane wave incident along ``+z`` with amplitude 1.
+
+    If ``keep_interior=True``, also returns the per-ell interior scale ``c_ell``
+    and the per-ell ``solve_ivp`` dense-output objects so the caller can
+    reconstruct ``u_total`` (and hence ``u^s = u_total - u^inc``) at arbitrary
+    radii inside ``R_supp``.
     """
     kR = kappa * R_supp
     coeffs = np.zeros(ell_max + 1, dtype=np.complex128)
+    c_arr = np.zeros(ell_max + 1, dtype=np.complex128)
+    sols = []
     for ell in range(ell_max + 1):
-        R_end, Rp_end = _solve_radial_interior(ell, kappa, b_radial, R_supp)
+        R_end, Rp_end, sol = _solve_radial_interior(
+            ell, kappa, b_radial, R_supp, dense_output=keep_interior
+        )
         jl = spherical_jn(ell, kR)
         jlp = spherical_jn(ell, kR, derivative=True)
         hl = _h1(ell, kR)
@@ -147,7 +164,70 @@ def mie_scattering_coefficients(
         rhs_vec = a_ell * np.array([jl, jlp], dtype=np.complex128)
         c_val, b_val = np.linalg.solve(M, rhs_vec)
         coeffs[ell] = b_val
+        c_arr[ell] = c_val
+        sols.append(sol)
+    if keep_interior:
+        return coeffs, c_arr, sols
     return coeffs
+
+
+def mie_scattered_field_interior(
+    target_pts: np.ndarray,
+    source_direction: np.ndarray,
+    kappa: float,
+    b_radial,
+    R_supp: float,
+    ell_max: int | None = None,
+) -> np.ndarray:
+    """Mie scattered field ``u^s = u_total - u^inc`` for ``r < R_supp``."""
+    u_total = mie_total_field_interior(
+        target_pts, source_direction, kappa, b_radial, R_supp, ell_max
+    )
+    target_pts = np.asarray(target_pts, dtype=np.float64)
+    w = np.asarray(source_direction, dtype=np.float64)
+    w = w / np.linalg.norm(w)
+    u_inc = np.exp(1j * kappa * (target_pts @ w))
+    return u_total - u_inc
+
+
+def mie_total_field_interior(
+    target_pts: np.ndarray,
+    source_direction: np.ndarray,
+    kappa: float,
+    b_radial,
+    R_supp: float,
+    ell_max: int | None = None,
+) -> np.ndarray:
+    """Evaluate the Mie ``u_total = u^inc + u^s`` for ``r < R_supp``.
+
+    Uses the interior radial solutions from the same matching that produced
+    the scattering coefficients.  Targets with ``r > R_supp`` are not allowed
+    here; use :func:`mie_scattered_field` for those.
+    """
+    target_pts = np.asarray(target_pts, dtype=np.float64)
+    rot = _rotation_aligning_with_z(
+        np.asarray(source_direction, dtype=np.float64)
+    )
+    pts_rot = target_pts @ rot.T
+    r = np.linalg.norm(pts_rot, axis=-1)
+    if np.any(r >= R_supp - 1e-12):
+        raise ValueError(
+            f"all target_pts must satisfy r < R_supp ({R_supp}); "
+            f"found max(r) = {r.max():.6e}."
+        )
+    cos_theta = np.clip(pts_rot[:, 2] / np.maximum(r, 1e-300), -1.0, 1.0)
+    if ell_max is None:
+        ell_max = int(np.ceil(2 * (kappa * R_supp + 6)))
+
+    _, c_arr, sols = mie_scattering_coefficients(
+        kappa, b_radial, R_supp, ell_max, keep_interior=True
+    )
+
+    u = np.zeros_like(r, dtype=np.complex128)
+    for ell in range(ell_max + 1):
+        R_vals = np.asarray(sols[ell].sol(r)[0], dtype=np.complex128)
+        u += c_arr[ell] * R_vals * lpmv(0, ell, cos_theta)
+    return u
 
 
 def mie_scattered_field(
