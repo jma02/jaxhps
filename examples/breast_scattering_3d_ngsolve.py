@@ -115,18 +115,40 @@ def main():
     ap.add_argument(
         "--ppw", type=float, default=8.0, help="points per wavelength in air"
     )
+    ap.add_argument(
+        "--hmax_breast",
+        type=float,
+        default=None,
+        help="mesh size in the breast region; default resolves the smoothed"
+        " interfaces (min(hmax_air/sqrt(max n), 2/kval))",
+    )
+    ap.add_argument(
+        "--water_layers",
+        type=float,
+        default=2.0,
+        help="water thickness between the breast and the PML, in wavelengths"
+        " (py-helm uses 2; must keep the sensors inside the water region)",
+    )
     ap.add_argument("--out", default="breast_umeas_ngsolve.npz")
     args = ap.parse_args()
 
     kappa = KAPPA
     lam_water = 2.0 * np.pi / kappa
-    pmlmin = B_RADIUS + 2.0 * lam_water
+    pmlmin = B_RADIUS + args.water_layers * lam_water
     delta_pml = lam_water / 2.0
     hmax_air = lam_water / args.ppw
     # The smoothed interfaces have width ~1/KVAL; resolve them.
-    hmax_breast = min(hmax_air / np.sqrt(max(DEFAULT_MVALS)), 2.0 / KVAL)
+    hmax_breast = args.hmax_breast
+    if hmax_breast is None:
+        hmax_breast = min(hmax_air / np.sqrt(max(DEFAULT_MVALS)), 2.0 / KVAL)
 
     sensors = fibonacci_cap_points(args.n_sensors)
+    sensor_rad = float(np.linalg.norm(sensors[0]))
+    if sensor_rad >= pmlmin:
+        raise ValueError(
+            f"sensors (radius {sensor_rad:.3f}) must lie inside the water"
+            f" region (PML starts at {pmlmin:.3f}); increase --water_layers."
+        )
     print(
         f"kappa={kappa}, hmax_air={hmax_air:.4f}, hmax_breast={hmax_breast:.4f},"
         f" n_sensors={sensors.shape[0]}"
