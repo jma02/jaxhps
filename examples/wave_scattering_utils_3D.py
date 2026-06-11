@@ -188,6 +188,37 @@ def get_uin_and_dn_3D(
 
 
 @jax.jit
+def get_uin_and_dn_pointsource_3D(
+    k: float,
+    bdry_pts: jnp.ndarray,
+    normals: jnp.ndarray,
+    src_pts: jnp.ndarray,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Point-source incident traces and normal derivatives on ``bdry_pts``.
+
+    ``u^inc(x) = exp(i k |x - s|) / (4 pi |x - s|)`` (3D free-space Green's
+    function), so
+
+    ``d u^inc / dn = (i k - 1/r) ((x - s) . n / r) u^inc(x)``.
+
+    Args:
+        k:         wavenumber.
+        bdry_pts:  ``(n_bdry, 3)`` boundary nodes.
+        normals:   ``(n_bdry, 3)`` outward unit normals at the boundary nodes.
+        src_pts:   ``(n_src, 3)`` point-source locations (outside the cube).
+
+    Returns:
+        ``uin`` and ``uin_dn`` each of shape ``(n_bdry, n_src)``.
+    """
+    diff = bdry_pts[:, None, :] - src_pts[None, :, :]  # (n_bdry, n_src, 3)
+    r = jnp.linalg.norm(diff, axis=-1)
+    uin = jnp.exp(1j * k * r) / (4.0 * jnp.pi * r)
+    n_dot_diff = jnp.einsum("bj,bsj->bs", normals, diff)
+    uin_dn = (1j * k - 1.0 / r) * (n_dot_diff / r) * uin
+    return uin, uin_dn
+
+
+@jax.jit
 def setup_scattering_lin_system_3D(
     S: jnp.ndarray,
     D: jnp.ndarray,
@@ -234,6 +265,36 @@ def get_scattering_uscat_impedance_3D(
         S, D, T_DtN, bdry_pts, normals, k, source_dirs
     )
     uin, uin_dn = get_uin_and_dn_3D(k, bdry_pts, normals, source_dirs)
+    uscat_b = jnp.linalg.solve(A, rhs)
+    uscat_dn_b = T_DtN @ (uscat_b + uin) - uin_dn
+    imp = uscat_dn_b + 1j * eta * uscat_b
+    return imp, uscat_b, uscat_dn_b
+
+
+@jax.jit
+def get_scattering_uscat_impedance_from_traces_3D(
+    S: jnp.ndarray,
+    D: jnp.ndarray,
+    T_DtN: jnp.ndarray,
+    uin: jnp.ndarray,
+    uin_dn: jnp.ndarray,
+    eta: float,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Same BIE solve as :func:`get_scattering_uscat_impedance_3D` but for
+    precomputed incident traces (e.g. from point sources).
+
+    Args:
+        S, D:     ``(n_bdry, n_bdry)`` single/double-layer matrices.
+        T_DtN:    ``(n_bdry, n_bdry)`` interior DtN map.
+        uin:      ``(n_bdry, n_src)`` incident Dirichlet trace.
+        uin_dn:   ``(n_bdry, n_src)`` incident Neumann trace.
+        eta:      ItI impedance parameter.
+
+    Returns ``(imp, uscat_b, uscat_dn_b)``, each ``(n_bdry, n_src)``.
+    """
+    n = uin.shape[0]
+    A = 0.5 * jnp.eye(n, dtype=S.dtype) - D + S @ T_DtN
+    rhs = S @ (uin_dn - T_DtN @ uin)
     uscat_b = jnp.linalg.solve(A, rhs)
     uscat_dn_b = T_DtN @ (uscat_b + uin) - uin_dn
     imp = uscat_dn_b + 1j * eta * uscat_b
@@ -378,6 +439,94 @@ def solve_scattering_bie_3D(
         k=float(kappa),
         eta=eta,
         source_dirs=jnp.asarray(source_dirs),
+    )
+    return dict(
+        problem=problem,
+        boundary_points=bp,
+        normals=nrm,
+        sdp=sdp,
+        imp=imp,
+        uscat_b=np.asarray(uscat_b),
+        uscat_dn_b=np.asarray(uscat_dn_b),
+    )
+
+
+def solve_scattering_bie_3D_pointsource(
+    sd: dict,
+    b_cartesian: Callable[[np.ndarray], np.ndarray],
+    src_pts: np.ndarray,
+    eta: float = None,
+    p: int = None,
+) -> dict:
+    """Point-source variant of :func:`solve_scattering_bie_3D`.
+
+    Identical HPS+BIE coupling, with two generalizations:
+
+    * the scattering potential is an arbitrary (smooth) cartesian function
+      ``b_cartesian(pts)`` evaluated on ``(..., 3)`` arrays, rather than a
+      radial profile;
+    * the incident field is a point source ``exp(i k |x - s|) / (4 pi |x - s|)``
+      for each row ``s`` of ``src_pts`` (all sources must lie strictly outside
+      the cube), rather than a plane wave.
+
+    Returns the same dict as :func:`solve_scattering_bie_3D`.
+    """
+    a, q, L, kappa = sd["a"], sd["q"], sd["L"], sd["kappa"]
+    eta = float(kappa if eta is None else eta)
+    p = q + 2 if p is None else p
+    src_pts = np.asarray(src_pts, dtype=np.float64)
+    if np.max(np.abs(src_pts)) <= a:
+        raise ValueError(
+            "all point sources must lie strictly outside the cube"
+        )
+
+    root = DiscretizationNode3D(
+        xmin=-a, xmax=a, ymin=-a, ymax=a, zmin=-a, zmax=a
+    )
+    domain = Domain(p=p, q=q, root=root, L=L)
+
+    int_pts = np.asarray(domain.interior_points)  # (n_leaves, p^3, 3)
+    b_int = b_cartesian(int_pts)
+    I_coeffs = (kappa**2 * (1.0 - b_int)).astype(np.complex128)
+    diff = int_pts[:, :, None, :] - src_pts[None, None, :, :]
+    r = np.linalg.norm(diff, axis=-1)  # (n_leaves, p^3, n_src)
+    uin_int = np.exp(1j * kappa * r) / (4.0 * np.pi * r)
+    src = (kappa**2 * b_int[..., None] * uin_int).astype(np.complex128)
+
+    ones = np.ones_like(I_coeffs)
+    problem = PDEProblem(
+        domain=domain,
+        D_xx_coefficients=ones,
+        D_yy_coefficients=ones,
+        D_zz_coefficients=ones,
+        I_coefficients=I_coeffs,
+        source=src,
+        use_ItI=True,
+        eta=eta,
+    )
+
+    bp = np.asarray(domain.boundary_points).reshape(-1, 3)
+    _, sdp = permute_to_domain(sd, bp)
+    nrm = outward_normals_for_cube_boundary(bp, root)
+    if not np.allclose(sdp["normals"], nrm):
+        bad = float(np.linalg.norm(sdp["normals"] - nrm, axis=-1).max())
+        raise RuntimeError(
+            f"normals don't agree after permutation: max diff {bad:.2e}"
+        )
+
+    T_ItI = build_solver(problem, return_top_T=True)
+    T_DtN = get_DtN_from_ItI_3D(jnp.asarray(T_ItI), eta)
+
+    uin, uin_dn = get_uin_and_dn_pointsource_3D(
+        float(kappa), jnp.asarray(bp), jnp.asarray(nrm), jnp.asarray(src_pts)
+    )
+    imp, uscat_b, uscat_dn_b = get_scattering_uscat_impedance_from_traces_3D(
+        S=jnp.asarray(sdp["S"]),
+        D=jnp.asarray(sdp["D"]),
+        T_DtN=T_DtN,
+        uin=uin,
+        uin_dn=uin_dn,
+        eta=eta,
     )
     return dict(
         problem=problem,
