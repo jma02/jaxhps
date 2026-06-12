@@ -40,20 +40,47 @@ def main():
     )
     p.add_argument("--R_bump", type=float, default=0.3)
     p.add_argument("--A_bump", type=float, default=-0.4)
+    p.add_argument(
+        "--bump",
+        choices=["poly", "smooth"],
+        default="poly",
+        help="bump shape: poly = A (1-(r/R)^2)^4 (C^3 at r=R), "
+        "smooth = A exp(1 - 1/(1-(r/R)^2)) (C^inf)",
+    )
+    p.add_argument(
+        "--p", type=int, default=None, help="interior Chebyshev order"
+    )
     args = p.parse_args()
 
     sd = load_SD_matrices_3D(args.npz)
     a, kappa = sd["a"], sd["kappa"]
     R_bump, A_bump = args.R_bump, args.A_bump
 
-    def b_radial(r):
-        rho = np.where(r < R_bump, r / R_bump, 1.0)
-        return np.where(r < R_bump, A_bump * (1.0 - rho * rho) ** 4, 0.0)
+    if args.bump == "poly":
+
+        def b_radial(r):
+            rho = np.where(r < R_bump, r / R_bump, 1.0)
+            return np.where(r < R_bump, A_bump * (1.0 - rho * rho) ** 4, 0.0)
+
+        bump_text = f"b(r) = {A_bump}(1-(r/{R_bump})^2)^4 1_{{r<{R_bump}}}"
+    else:
+
+        def b_radial(r):
+            r = np.asarray(r, dtype=float)
+            out = np.zeros_like(r)
+            inside = r < R_bump
+            t = 1.0 - (r[inside] / R_bump) ** 2
+            out[inside] = A_bump * np.exp(1.0 - 1.0 / t)
+            return out
+
+        bump_text = (
+            f"b(r) = {A_bump} exp(1 - 1/(1-(r/{R_bump})^2)) 1_{{r<{R_bump}}}"
+        )
 
     source_dir = np.array([[1.0, 0.0, 0.0]], dtype=np.float64)
 
     # HPS build + ItI->DtN Cayley + exterior BIE solve, all in one call.
-    out = solve_scattering_bie_3D(sd, b_radial, source_dir)
+    out = solve_scattering_bie_3D(sd, b_radial, source_dir, p=args.p)
     problem = out["problem"]
     domain = problem.domain
     bp_dom = out["boundary_points"]
@@ -187,8 +214,8 @@ def main():
         ax.set_aspect("equal")
 
     fig.suptitle(
-        f"Scattered field on y=0 slice; bump  b(r) = {A_bump}(1-(r/{R_bump})^2)^4"
-        f" 1_{{r<{R_bump}}};   plane wave  exp(i kappa x)",
+        f"Scattered field on y=0 slice;  q={sd['q']} L={sd['L']};"
+        f"  {bump_text};   plane wave  exp(i kappa x)",
         fontsize=11,
     )
     fig.savefig(args.out, dpi=130)

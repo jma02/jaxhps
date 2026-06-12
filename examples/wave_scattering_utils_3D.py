@@ -310,7 +310,13 @@ def solve_scattering_bie_3D(
                       on arrays of radii.
         source_dirs:  ``(n_src, 3)`` incident unit directions.
         eta:          ItI impedance parameter; defaults to ``kappa``.
-        p:            interior Chebyshev order; defaults to ``q + 2``.
+        p:            interior Chebyshev order; defaults to ``q + 4``.
+                      The exterior-field error is dominated by the interior
+                      solve (and its Neumann trace) rather than the boundary
+                      quadrature, so the default keeps the interior order
+                      ahead of ``q``; ``q + 4`` puts the interior error at
+                      or below the boundary-quadrature error in measured
+                      sweeps over q = 4..8 and L = 1..3.
 
     Returns a dict with:
         ``problem``           the PDEProblem (solver built; pass ``imp`` to
@@ -324,7 +330,7 @@ def solve_scattering_bie_3D(
     """
     a, q, L, kappa = sd["a"], sd["q"], sd["L"], sd["kappa"]
     eta = float(kappa if eta is None else eta)
-    p = q + 2 if p is None else p
+    p = q + 4 if p is None else p
     source_dirs = np.asarray(source_dirs, dtype=np.float64)
 
     root = DiscretizationNode3D(

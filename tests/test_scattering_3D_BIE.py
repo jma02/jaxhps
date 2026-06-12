@@ -56,7 +56,7 @@ SD_NPZ = os.environ.get("JAXHPS_SD_3D_NPZ", "/tmp/SD_k4_q8_L1.npz")
 
 # Comma-separated fixture paths for the convergence sweeps.  Each sweep
 # varies one discretization knob while everything else stays fixed:
-# "q" raises the boundary order (and with it the interior order p = q + 2)
+# "q" raises the boundary order (and with it the interior order p = q + 4)
 # at fixed tree depth; "L" deepens the octree at fixed boundary order.
 SD_NPZ_SWEEPS = {
     "q": os.environ.get(
@@ -69,9 +69,10 @@ SD_NPZ_SWEEPS = {
     ),
 }
 
-# Ceiling on the finest-discretization error for each sweep.  Observed:
-# 2.8e-3 at (q=8, L=1) for the q sweep, 1.7e-3 at (q=4, L=3) for the L sweep.
-FINEST_REL_ERR = {"q": 1e-2, "L": 1e-2}
+# Ceiling on the finest-discretization error for each sweep.  Observed with
+# the driver default p = q + 4: 5.2e-4 at (q=8, L=1) for the q sweep,
+# 2.9e-5 at (q=4, L=3) for the L sweep.
+FINEST_REL_ERR = {"q": 2e-3, "L": 2e-4}
 
 # Radial scattering potential shared by the Mie comparison tests:
 # a smooth bump b(r) = A (1 - (r/R)^2)^4 supported on r < R.
@@ -222,7 +223,7 @@ def test_radial_bump_vs_mie_convergence(vary, caplog) -> None:
     cube size:
 
     * ``vary="q"``: increasing boundary order q at fixed tree depth.  The
-      interior Chebyshev order follows the driver default p = q + 2, so this
+      interior Chebyshev order follows the driver default p = q + 4, so this
       sweep raises the order of the interior HPS solve and the boundary
       quadrature together (p-refinement).
     * ``vary="L"``: increasing octree depth L at fixed boundary order
@@ -277,7 +278,7 @@ def test_radial_bump_vs_mie_convergence(vary, caplog) -> None:
             "q=%d L=%d (p=%d): rel_err vs Mie = %.3e",
             sd["q"],
             sd["L"],
-            sd["q"] + 2,
+            sd["q"] + 4,
             rel_err,
         )
         jax.clear_caches()

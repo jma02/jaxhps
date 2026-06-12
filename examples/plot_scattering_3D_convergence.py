@@ -5,7 +5,7 @@ Runs the same radial-bump scattering problem as
 two fixture sweeps and plots the relative error at exterior targets:
 
 * boundary order q = 4, 6, 8 at fixed tree depth L=1 (interior order
-  follows the driver default p = q + 2), and
+  follows the driver default p = q + 4), and
 * octree depth L = 1, 2, 3 at fixed q = 4.
 
 Usage:
@@ -58,13 +58,40 @@ def main():
     p.add_argument("--out", default="scattering_3d_convergence.png")
     p.add_argument("--R_bump", type=float, default=0.3)
     p.add_argument("--A_bump", type=float, default=-0.4)
+    p.add_argument(
+        "--bump",
+        choices=["poly", "smooth"],
+        default="poly",
+        help="bump shape: poly = A (1-(r/R)^2)^4 (C^3 at r=R), "
+        "smooth = A exp(1 - 1/(1-(r/R)^2)) (C^inf)",
+    )
     args = p.parse_args()
 
     R_bump, A_bump = args.R_bump, args.A_bump
 
-    def b_radial(r):
-        rho = np.where(r < R_bump, r / R_bump, 1.0)
-        return np.where(r < R_bump, A_bump * (1.0 - rho * rho) ** 4, 0.0)
+    if args.bump == "poly":
+
+        def b_radial(r):
+            rho = np.where(r < R_bump, r / R_bump, 1.0)
+            return np.where(r < R_bump, A_bump * (1.0 - rho * rho) ** 4, 0.0)
+
+        bump_label = (
+            rf"$b(r) = {A_bump}\,(1 - (r/{R_bump})^2)^4\,1_{{r<{R_bump}}}$"
+        )
+    else:
+
+        def b_radial(r):
+            r = np.asarray(r, dtype=float)
+            out = np.zeros_like(r)
+            inside = r < R_bump
+            t = 1.0 - (r[inside] / R_bump) ** 2
+            out[inside] = A_bump * np.exp(1.0 - 1.0 / t)
+            return out
+
+        bump_label = (
+            rf"$b(r) = {A_bump}\,e^{{1 - 1/(1-(r/{R_bump})^2)}}"
+            rf"\,1_{{r<{R_bump}}}$"
+        )
 
     source_dirs = np.array([[1.0, 0.0, 0.0]], dtype=np.float64)
     targets = exterior_targets()
@@ -115,17 +142,23 @@ def main():
     qs = [q for q, _, _ in sweep_q]
     errs_q = [e for _, _, e in sweep_q]
     axes[0].semilogy(qs, errs_q, "o-", color="tab:blue")
-    axes[0].set_xlabel("boundary order $q$  (interior order $p = q + 2$)")
+    axes[0].set_xlabel("boundary order $q$  (interior order $p = q + 4$)")
     axes[0].set_title(f"order refinement, $L = {sweep_q[0][1]}$")
     axes[0].set_xticks(qs)
 
     Ls = [ell for _, ell, _ in sweep_L]
     errs_L = [e for _, _, e in sweep_L]
+    q_L = sweep_L[0][0]
     axes[1].semilogy(Ls, errs_L, "o-", color="tab:red")
-    # Reference decay for a third-order method: leaf width halves per level,
-    # so the error falls 8x per level.  Anchored at the finest point.
-    ref = [errs_L[-1] * 8.0 ** (Ls[-1] - ell) for ell in Ls]
-    axes[1].semilogy(Ls, ref, "k--", linewidth=0.9, label=r"$O(h^3)$")
+    # Reference decay at order q+1: with the driver default p = q + 4, the
+    # interior rate h^(p-3) equals h^(q+1), and the measured fmm3dbie
+    # boundary-quadrature rate at q=4 is also ~h^5.  Leaf width halves per
+    # level; anchored at the finest point.
+    ref_order = q_L + 1
+    ref = [errs_L[-1] * (2.0**ref_order) ** (Ls[-1] - ell) for ell in Ls]
+    axes[1].semilogy(
+        Ls, ref, "k--", linewidth=0.9, label=rf"$O(h^{{{ref_order}}})$"
+    )
     axes[1].set_xlabel("octree depth $L$  (leaf width $2^{-L}$)")
     axes[1].set_title(f"mesh refinement, $q = {sweep_L[0][0]}$")
     axes[1].set_xticks(Ls)
@@ -136,8 +169,7 @@ def main():
         ax.grid(True, which="both", alpha=0.3)
 
     fig.suptitle(
-        rf"HPS+BIE vs Mie, $\kappa = {kappa}$;"
-        rf"  $b(r) = {A_bump}\,(1 - (r/{R_bump})^2)^4\,1_{{r<{R_bump}}}$",
+        rf"HPS+BIE vs Mie, $\kappa = {kappa}$;  {bump_label}",
         fontsize=11,
     )
     fig.savefig(args.out, dpi=130)
