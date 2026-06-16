@@ -38,8 +38,9 @@ import numpy as np
 # Per-face parametrization (u, v) in [-1, 1]^2 -> R^3 chosen so that the
 # induced surface normal n = (d/du x d/dv) / |...|  points OUTWARD.  We fix
 # each face by giving its origin, the world-frame u-axis, and v-axis; the
-# outward normal then comes out as u_axis x v_axis (we verified this in
-# scripts/build_fmm3dbie.sh probe).
+# outward normal then comes out as u_axis x v_axis.  The constructed normals
+# are cross-checked against the fmm3dbie-stored srcvals normals at runtime
+# in wave_scattering_utils_3D.solve_scattering_bie_3D.
 FACES = [
     # (face_name, origin, u_axis, v_axis)  -- on the unit cube [-1, 1]^3
     (

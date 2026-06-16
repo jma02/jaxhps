@@ -33,11 +33,13 @@ echo ">>> creating env at ${ENV_DIR}"
     python=3.10 "numpy<2" "setuptools<60" gfortran openblas pip charset_normalizer
 "${ENV_DIR}/bin/pip" install --quiet fmm3dpy
 
-# 2. fmm3dbie source (with FMM3D submodule).
-echo ">>> cloning fmm3dbie into ${BIE_DIR}"
+# 2. fmm3dbie source (with FMM3D submodule).  Pinned to a known-working
+# commit; bump deliberately when fmm3dbie changes break this build.
+FMM3DBIE_COMMIT="ddc93f53e60181b79928fb896a678b49865810aa"
+echo ">>> cloning fmm3dbie into ${BIE_DIR} at ${FMM3DBIE_COMMIT}"
 rm -rf "${BIE_DIR}"
-git clone --depth 1 --recurse-submodules --shallow-submodules \
-    https://github.com/fastalgorithms/fmm3dbie.git "${BIE_DIR}"
+git clone --recurse-submodules https://github.com/fastalgorithms/fmm3dbie.git "${BIE_DIR}"
+(cd "${BIE_DIR}" && git checkout "${FMM3DBIE_COMMIT}" && git submodule update --recursive)
 
 # 3. Patch upstream typo: setup.py references stok_comb_vel.f, but the file is .f90.
 sed -i "s|'../src/stok_wrappers/stok_comb_vel.f'|'../src/stok_wrappers/stok_comb_vel.f90'|" \
