@@ -451,6 +451,85 @@ def solve_scattering_bie_3D(
     )
 
 
+def solve_scattering_bie_3D_cartesian(
+    sd: dict,
+    b_cartesian: Callable[[np.ndarray], np.ndarray],
+    source_dirs: np.ndarray,
+    eta: float = None,
+    p: int = None,
+) -> dict:
+    """Plane-wave variant of :func:`solve_scattering_bie_3D` with a cartesian ``b``.
+
+    Identical HPS+BIE coupling and plane-wave incidence as
+    :func:`solve_scattering_bie_3D`, but the scattering potential is an
+    arbitrary (smooth) cartesian function ``b_cartesian(pts)`` evaluated on
+    ``(..., 3)`` arrays rather than a radial profile.  Use this for
+    off-center or multi-bump scatterers.
+
+    Returns the same dict as :func:`solve_scattering_bie_3D`.
+    """
+    a, q, L, kappa = sd["a"], sd["q"], sd["L"], sd["kappa"]
+    eta = float(kappa if eta is None else eta)
+    p = q + 4 if p is None else p
+    source_dirs = np.asarray(source_dirs, dtype=np.float64)
+
+    root = DiscretizationNode3D(
+        xmin=-a, xmax=a, ymin=-a, ymax=a, zmin=-a, zmax=a
+    )
+    domain = Domain(p=p, q=q, root=root, L=L)
+
+    int_pts = np.asarray(domain.interior_points)  # (n_leaves, p^3, 3)
+    b_int = b_cartesian(int_pts)
+    I_coeffs = (kappa**2 * (1.0 - b_int)).astype(np.complex128)
+    phases = np.einsum("lpd,sd->lps", int_pts, source_dirs)
+    uin_int = np.exp(1j * kappa * phases)  # (n_leaves, p^3, n_src)
+    src = (kappa**2 * b_int[..., None] * uin_int).astype(np.complex128)
+
+    ones = np.ones_like(I_coeffs)
+    problem = PDEProblem(
+        domain=domain,
+        D_xx_coefficients=ones,
+        D_yy_coefficients=ones,
+        D_zz_coefficients=ones,
+        I_coefficients=I_coeffs,
+        source=src,
+        use_ItI=True,
+        eta=eta,
+    )
+
+    bp = np.asarray(domain.boundary_points).reshape(-1, 3)
+    _, sdp = permute_to_domain(sd, bp)
+    nrm = outward_normals_for_cube_boundary(bp, root)
+    if not np.allclose(sdp["normals"], nrm):
+        bad = float(np.linalg.norm(sdp["normals"] - nrm, axis=-1).max())
+        raise RuntimeError(
+            f"normals don't agree after permutation: max diff {bad:.2e}"
+        )
+
+    T_ItI = build_solver(problem, return_top_T=True)
+    T_DtN = get_DtN_from_ItI_3D(jnp.asarray(T_ItI), eta)
+
+    imp, uscat_b, uscat_dn_b = get_scattering_uscat_impedance_3D(
+        S=jnp.asarray(sdp["S"]),
+        D=jnp.asarray(sdp["D"]),
+        T_DtN=T_DtN,
+        bdry_pts=jnp.asarray(bp),
+        normals=jnp.asarray(nrm),
+        k=float(kappa),
+        eta=eta,
+        source_dirs=jnp.asarray(source_dirs),
+    )
+    return dict(
+        problem=problem,
+        boundary_points=bp,
+        normals=nrm,
+        sdp=sdp,
+        imp=imp,
+        uscat_b=np.asarray(uscat_b),
+        uscat_dn_b=np.asarray(uscat_dn_b),
+    )
+
+
 def solve_scattering_bie_3D_pointsource(
     sd: dict,
     b_cartesian: Callable[[np.ndarray], np.ndarray],
