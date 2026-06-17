@@ -49,6 +49,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(__file__))
 from wave_scattering_utils_3D import (  # noqa: E402
+    build_cartesian_ctx,
     eval_uscat_offsurface_3D,
     load_SD_matrices_3D,
     solve_scattering_bie_3D_cartesian,
@@ -112,12 +113,17 @@ def make_b(centers, radii, amps):
     return b
 
 
-def solve_sample(sd, centers, radii, amps, tx_dirs, rx_pts, p):
-    """Forward solve + off-surface eval -> multistatic matrix ``(n_rx, n_tx)``."""
+def solve_sample(sd, centers, radii, amps, tx_dirs, rx_pts, p, ctx=None):
+    """Forward solve + off-surface eval -> multistatic matrix ``(n_rx, n_tx)``.
+
+    ``ctx`` is an optional cache from
+    :func:`wave_scattering_utils_3D.build_cartesian_ctx`; passing the same
+    ``ctx`` across samples amortizes the ``b``-independent setup.
+    """
     import jax.numpy as jnp
 
     b = make_b(centers, radii, amps)
-    out = solve_scattering_bie_3D_cartesian(sd, b, tx_dirs, p=p)
+    out = solve_scattering_bie_3D_cartesian(sd, b, tx_dirs, p=p, ctx=ctx)
     M = np.asarray(
         eval_uscat_offsurface_3D(
             target_pts=jnp.asarray(rx_pts),
@@ -344,6 +350,8 @@ def main():
     meta = write_metadata(args.out, sd, args, tx_dirs, rx_pts)
     write_card(args.out, meta)
 
+    ctx = build_cartesian_ctx(sd, tx_dirs, p=args.p)
+
     n_shards = (args.n_samples + args.shard_size - 1) // args.shard_size
     print(
         f"generating {args.n_samples} samples in {n_shards} shards "
@@ -367,7 +375,9 @@ def main():
             n, centers, radii, amps = sample_config(
                 rng, args.n_max, args.R_range, args.A_range, args.c_max
             )
-            M = solve_sample(sd, centers, radii, amps, tx_dirs, rx_pts, args.p)
+            M = solve_sample(
+                sd, centers, radii, amps, tx_dirs, rx_pts, args.p, ctx=ctx
+            )
             rows.append(
                 dict(
                     n=n,

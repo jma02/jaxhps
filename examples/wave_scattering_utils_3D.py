@@ -15,6 +15,9 @@ outward-normal requirement of fmm3dbie's quad patches.  The
 matching 3D positions, so callers can work entirely in the domain's ordering.
 """
 
+import os
+import time
+
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -26,6 +29,20 @@ from jaxhps import (
     PDEProblem,
     build_solver,
 )
+
+_TIMING = bool(os.environ.get("JAXHPS_TIMING"))
+
+
+def _tic():
+    return time.perf_counter()
+
+
+def _toc(label, t0):
+    if _TIMING:
+        print(
+            f"  [timing] {label}: {time.perf_counter() - t0:.2f}s", flush=True
+        )
+    return time.perf_counter()
 
 
 def load_SD_matrices_3D(
@@ -451,12 +468,65 @@ def solve_scattering_bie_3D(
     )
 
 
+def build_cartesian_ctx(
+    sd: dict,
+    source_dirs: np.ndarray,
+    eta: float = None,
+    p: int = None,
+) -> dict:
+    """Precompute the ``b``-independent pieces shared by every solve.
+
+    The discretization ``Domain``, the boundary-point permutation of the
+    SD matrices, the outward normals, and the device-resident copies of
+    ``S``, ``D``, the boundary points/normals and source directions depend
+    only on ``(sd, source_dirs, p)`` -- not on the scattering potential.
+    Building them once and reusing the returned ``ctx`` across many samples
+    (see :func:`solve_scattering_bie_3D_cartesian`) removes the per-sample
+    k-d tree permutation (~2 s) and the 1.2 GB host->device copy of ``S, D``.
+    """
+    a, q, L, kappa = sd["a"], sd["q"], sd["L"], sd["kappa"]
+    eta = float(kappa if eta is None else eta)
+    p = q + 4 if p is None else p
+    source_dirs = np.asarray(source_dirs, dtype=np.float64)
+    dev = jax.devices()[0]
+
+    root = DiscretizationNode3D(
+        xmin=-a, xmax=a, ymin=-a, ymax=a, zmin=-a, zmax=a
+    )
+    domain = Domain(p=p, q=q, root=root, L=L)
+    int_pts = np.asarray(domain.interior_points)  # (n_leaves, p^3, 3)
+    bp = np.asarray(domain.boundary_points).reshape(-1, 3)
+    _, sdp = permute_to_domain(sd, bp)
+    nrm = outward_normals_for_cube_boundary(bp, root)
+    if not np.allclose(sdp["normals"], nrm):
+        bad = float(np.linalg.norm(sdp["normals"] - nrm, axis=-1).max())
+        raise RuntimeError(
+            f"normals don't agree after permutation: max diff {bad:.2e}"
+        )
+    return dict(
+        eta=eta,
+        kappa=float(kappa),
+        domain=domain,
+        int_pts=int_pts,
+        bp=bp,
+        sdp=sdp,
+        nrm=nrm,
+        source_dirs=source_dirs,
+        dev_S=jax.device_put(jnp.asarray(sdp["S"]), dev),
+        dev_D=jax.device_put(jnp.asarray(sdp["D"]), dev),
+        dev_bp=jax.device_put(jnp.asarray(bp), dev),
+        dev_nrm=jax.device_put(jnp.asarray(nrm), dev),
+        dev_src=jax.device_put(jnp.asarray(source_dirs), dev),
+    )
+
+
 def solve_scattering_bie_3D_cartesian(
     sd: dict,
     b_cartesian: Callable[[np.ndarray], np.ndarray],
     source_dirs: np.ndarray,
     eta: float = None,
     p: int = None,
+    ctx: dict = None,
 ) -> dict:
     """Plane-wave variant of :func:`solve_scattering_bie_3D` with a cartesian ``b``.
 
@@ -466,19 +536,25 @@ def solve_scattering_bie_3D_cartesian(
     ``(..., 3)`` arrays rather than a radial profile.  Use this for
     off-center or multi-bump scatterers.
 
+    ``ctx`` is an optional cache from :func:`build_cartesian_ctx`; when reused
+    across many samples it amortizes the ``b``-independent setup.  If omitted,
+    it is built on the fly (one-shot behaviour, unchanged results).
+
     Returns the same dict as :func:`solve_scattering_bie_3D`.
     """
-    a, q, L, kappa = sd["a"], sd["q"], sd["L"], sd["kappa"]
-    eta = float(kappa if eta is None else eta)
-    p = q + 4 if p is None else p
-    source_dirs = np.asarray(source_dirs, dtype=np.float64)
+    if ctx is None:
+        ctx = build_cartesian_ctx(sd, source_dirs, eta=eta, p=p)
+    eta = ctx["eta"]
+    kappa = ctx["kappa"]
+    domain = ctx["domain"]
+    int_pts = ctx["int_pts"]
+    bp = ctx["bp"]
+    sdp = ctx["sdp"]
+    nrm = ctx["nrm"]
+    source_dirs = ctx["source_dirs"]
+    dev = jax.devices()[0]
 
-    root = DiscretizationNode3D(
-        xmin=-a, xmax=a, ymin=-a, ymax=a, zmin=-a, zmax=a
-    )
-    domain = Domain(p=p, q=q, root=root, L=L)
-
-    int_pts = np.asarray(domain.interior_points)  # (n_leaves, p^3, 3)
+    t0 = _tic()
     b_int = b_cartesian(int_pts)
     I_coeffs = (kappa**2 * (1.0 - b_int)).astype(np.complex128)
     phases = np.einsum("lpd,sd->lps", int_pts, source_dirs)
@@ -496,29 +572,31 @@ def solve_scattering_bie_3D_cartesian(
         use_ItI=True,
         eta=eta,
     )
+    t0 = _toc("PDEProblem", t0)
 
-    bp = np.asarray(domain.boundary_points).reshape(-1, 3)
-    _, sdp = permute_to_domain(sd, bp)
-    nrm = outward_normals_for_cube_boundary(bp, root)
-    if not np.allclose(sdp["normals"], nrm):
-        bad = float(np.linalg.norm(sdp["normals"] - nrm, axis=-1).max())
-        raise RuntimeError(
-            f"normals don't agree after permutation: max diff {bad:.2e}"
-        )
-
+    # ``build_solver`` stores its outputs on ``host_device`` (CPU by default),
+    # so the returned ItI map lands on CPU.  Move it to the compute device so
+    # the Cayley transform and BIE solve below run there (a ~50x speedup on GPU).
     T_ItI = build_solver(problem, return_top_T=True)
-    T_DtN = get_DtN_from_ItI_3D(jnp.asarray(T_ItI), eta)
+    R = jax.device_put(jnp.asarray(T_ItI), dev)
+    jax.block_until_ready(R)
+    t0 = _toc("build_solver", t0)
+    T_DtN = get_DtN_from_ItI_3D(R, eta)
+    jax.block_until_ready(T_DtN)
+    t0 = _toc("get_DtN_from_ItI", t0)
 
     imp, uscat_b, uscat_dn_b = get_scattering_uscat_impedance_3D(
-        S=jnp.asarray(sdp["S"]),
-        D=jnp.asarray(sdp["D"]),
+        S=ctx["dev_S"],
+        D=ctx["dev_D"],
         T_DtN=T_DtN,
-        bdry_pts=jnp.asarray(bp),
-        normals=jnp.asarray(nrm),
-        k=float(kappa),
+        bdry_pts=ctx["dev_bp"],
+        normals=ctx["dev_nrm"],
+        k=kappa,
         eta=eta,
-        source_dirs=jnp.asarray(source_dirs),
+        source_dirs=ctx["dev_src"],
     )
+    jax.block_until_ready(uscat_b)
+    t0 = _toc("get_scattering_uscat_impedance", t0)
     return dict(
         problem=problem,
         boundary_points=bp,
