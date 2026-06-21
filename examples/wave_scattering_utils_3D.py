@@ -551,6 +551,7 @@ def solve_bie_gmres_gpu(
     built once as dense :math:`n \\times n` matrices on the GPU, the
     near-field corrections are added, and each GMRES iteration reduces to
     three GPU GEMVs (:math:`T \\cdot x`, :math:`D \\cdot x`, :math:`S \\cdot Tx`).
+    GMRES itself runs on GPU via :func:`jax.scipy.sparse.linalg.gmres`.
 
     Memory: :math:`3n^2 \\times 16` bytes for the stored matrices
     (S + D + T).  At :math:`n = 24{,}576` (L = 3) this is ~29 GB —
@@ -558,7 +559,6 @@ def solve_bie_gmres_gpu(
 
     Returns ``(imp, uscat_b, uscat_dn_b, info)`` matching the dense solver.
     """
-    from scipy.sparse.linalg import LinearOperator, gmres
 
     n = bdry_pts.shape[0]
 
@@ -601,22 +601,10 @@ def solve_bie_gmres_gpu(
     mem_gb = (K_S.nbytes + K_D.nbytes + T.nbytes) / 1e9
     print(f"  K_S + K_D + T memory: {mem_gb:.2f} GB")
 
-    # ---- JIT-compiled matvec: A x = 1/2 x - D x + S (T x) ----
-    @jax.jit
+    # ---- GPU-native GMRES via JAX ----
     def _matvec(x):
         return 0.5 * x - K_D @ x + K_S @ (T @ x)
 
-    # Warm up JIT
-    _dummy = _matvec(jnp.zeros(n, dtype=jnp.complex128))
-    jax.block_until_ready(_dummy)
-    del _dummy
-
-    def matvec_np(x_np):
-        return np.array(_matvec(jnp.asarray(x_np)))  # writable copy
-
-    A_op = LinearOperator((n, n), matvec=matvec_np, dtype=np.complex128)
-
-    # ---- RHS and GMRES solve ----
     uin_np = np.asarray(uin)
     uin_dn_np = np.asarray(uin_dn)
     n_src = uin_np.shape[1] if uin_np.ndim > 1 else 1
@@ -624,18 +612,25 @@ def solve_bie_gmres_gpu(
         uin_np = uin_np[:, None]
         uin_dn_np = uin_dn_np[:, None]
 
+    n_restart_cycles = max(1, maxiter // restart)
     uscat_b_cols = []
     gmres_info_list = []
     for s in range(n_src):
         u_s = jnp.asarray(uin_np[:, s])
         udn_s = jnp.asarray(uin_dn_np[:, s])
-        rhs_j = K_S @ (udn_s - T @ u_s)
-        rhs_np = np.array(rhs_j)  # writable copy for scipy
-        sol, info_code = gmres(
-            A_op, rhs_np, rtol=tol, restart=restart, maxiter=maxiter, atol=0
+        rhs = K_S @ (udn_s - T @ u_s)
+        sol, info_code = jax.scipy.sparse.linalg.gmres(
+            _matvec,
+            rhs,
+            tol=tol,
+            atol=0.0,
+            restart=restart,
+            maxiter=n_restart_cycles,
         )
-        uscat_b_cols.append(sol)
-        gmres_info_list.append(info_code)
+        jax.block_until_ready(sol)
+        # info_code: 0 = converged in JAX gmres
+        uscat_b_cols.append(np.array(sol))
+        gmres_info_list.append(int(info_code))
 
     uscat_b = np.column_stack(uscat_b_cols)
     uscat_dn_b = np.array(
