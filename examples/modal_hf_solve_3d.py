@@ -15,7 +15,10 @@ Usage
     modal run examples/modal_hf_solve_3d.py --mode solve --freq-khz 150 --a 0.055
 """
 
+import os
 import modal
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 app = modal.App("jaxhps-hf-solve")
 
@@ -54,6 +57,13 @@ fmm_image = (
         # Verify
         "python -c 'import fmm3dbie; print(\"fmm3dbie OK\")'",
     )
+    .add_local_dir(
+        REPO_ROOT,
+        remote_path="/root/jaxhps",
+        ignore=["data/**", ".git/**", "**/__pycache__/**", "**/*.npz"],
+        copy=True,
+    )
+    .run_commands("pip install --no-deps /root/jaxhps")
 )
 
 vol = modal.Volume.from_name("jaxhps-data", create_if_missing=True)
@@ -82,34 +92,13 @@ def run_hf_solve(
     import time
     import numpy as np
 
-    # Add the examples directory to path
-    repo_dir = "/root/jaxhps"
-    if not os.path.exists(repo_dir):
-        os.system(f"git clone https://github.com/jma02/jaxhps.git {repo_dir}")
-        os.system(
-            f"cd {repo_dir} && git checkout devin/1781152283-breast-scattering-3d"
-        )
-        os.system(f"cd {repo_dir} && pip install -e .")
-    sys.path.insert(0, os.path.join(repo_dir, "examples"))
-    sys.path.insert(0, repo_dir)
-
+    sys.path.insert(0, "/root/jaxhps/examples")
     os.environ["JAXHPS_TIMING"] = "1"
 
     import jax
 
     print(f"JAX devices: {jax.devices()}")
     print(f"JAX version: {jax.__version__}")
-    # Diagnostic: test jaxhps import
-    try:
-        from jaxhps import DiscretizationNode3D
-
-        print("jaxhps import OK")
-    except ImportError as e:
-        print(f"jaxhps import error: {e}")
-        import traceback
-
-        traceback.print_exc()
-        raise
     import jax.numpy as jnp
 
     # Physical parameters
