@@ -390,8 +390,9 @@ def run_hf_solve(
     R = jax.device_put(jnp.asarray(T_ItI), dev)
     jax.block_until_ready(R)
     T_DtN = get_DtN_from_ItI_3D(R, float(kappa))
+    # Keep T_DtN on GPU for accelerated matmul inside GMRES
     jax.block_until_ready(T_DtN)
-    T_DtN_np = np.asarray(T_DtN)
+    T_DtN_np = np.asarray(T_DtN)  # CPU copy for permutation / fallback
     dt_hps = time.perf_counter() - t0
     print(f"  HPS build+Cayley: {dt_hps:.2f}s")
     print(
@@ -419,8 +420,11 @@ def run_hf_solve(
         # T_DtN_nf[nf_i, nf_j] = T_DtN[hps_i, hps_j] where hps_i = perm_inv[nf_i]
         perm_inv = np.argsort(perm)
         T_DtN_np = T_DtN_np[np.ix_(perm_inv, perm_inv)]
-        print("  Permuted T_DtN to fmm3dbie ordering")
+        # Re-upload permuted T_DtN to GPU
+        T_DtN_gpu = jax.device_put(jnp.asarray(T_DtN_np), dev)
+        print("  Permuted T_DtN to fmm3dbie ordering (re-uploaded to GPU)")
     else:
+        T_DtN_gpu = T_DtN  # already on GPU, no permutation needed
         wts_nf = nf.get("wts", np.ones(bp.shape[0]))
         bdry_pts_nf = bp
         normals_nf = nrm
@@ -435,7 +439,7 @@ def run_hf_solve(
     )
     t0 = time.perf_counter()
     imp, uscat_b, uscat_dn_b, info = solve_bie_gmres_fmm(
-        T_DtN_np,
+        T_DtN_gpu,
         bdry_pts_nf,
         normals_nf,
         wts_nf,
@@ -447,6 +451,7 @@ def run_hf_solve(
         tol=gmres_tol,
         maxiter=200,
         restart=50,
+        use_gpu_tdtn=True,
     )
     dt_gmres = time.perf_counter() - t0
     print(f"  GMRES+FMM: {dt_gmres:.2f}s")
