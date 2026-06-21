@@ -21,7 +21,7 @@ app = modal.App("jaxhps-hf-solve")
 
 # Build image with all dependencies
 fmm_image = (
-    modal.Image.debian_slim(python_version="3.12")
+    modal.Image.debian_slim(python_version="3.10")
     .apt_install(
         "gfortran",
         "libopenblas-dev",
@@ -30,15 +30,15 @@ fmm_image = (
         "curl",
     )
     .pip_install(
-        "numpy==2.4.6",
+        "numpy<2",
+        "setuptools<60",
         "fmm3dpy",
-        "scipy==1.17.1",
-        "jax[cuda12]==0.10.1",
+        "scipy",
+        "jax[cuda12]",
         "charset_normalizer",
     )
     .run_commands(
-        # Clone and build fmm3dbie (needs numpy<2 for f2py at build time)
-        "pip install 'numpy<2' 'setuptools>=60,<70'",
+        # Clone and build fmm3dbie
         "git clone --recurse-submodules https://github.com/fastalgorithms/fmm3dbie.git /opt/fmm3dbie",
         "cd /opt/fmm3dbie && git checkout ddc93f53e60181b79928fb896a678b49865810aa && git submodule update --recursive",
         # Patch setup.py typo
@@ -51,8 +51,6 @@ fmm_image = (
         "cd /opt/fmm3dbie/python && FMMBIE_LIBS='-fopenmp -lopenblas' "
         "FFLAGS='-fallow-argument-mismatch -fPIC -O3 -funroll-loops -std=legacy -w' "
         "python setup.py install",
-        # Restore numpy>=2 for jaxhps runtime
-        "pip install 'numpy==2.4.6'",
         # Verify
         "python -c 'import fmm3dbie; print(\"fmm3dbie OK\")'",
     )
@@ -100,6 +98,18 @@ def run_hf_solve(
     import jax
 
     print(f"JAX devices: {jax.devices()}")
+    print(f"JAX version: {jax.__version__}")
+    # Diagnostic: test jaxhps import
+    try:
+        from jaxhps import DiscretizationNode3D
+
+        print("jaxhps import OK")
+    except ImportError as e:
+        print(f"jaxhps import error: {e}")
+        import traceback
+
+        traceback.print_exc()
+        raise
     import jax.numpy as jnp
 
     # Physical parameters
