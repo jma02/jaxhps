@@ -127,7 +127,7 @@ def run_hf_solve(
     # Step 1: Generate near-field corrections
     print("\n=== Step 1: Near-field corrections ===")
     nf_path = f"/data/NF_k{kappa:.2f}_q{q}_L{L}_a{a}.npz"
-    regen = os.environ.get("REGEN_NF", "0") == "1"
+    regen = True  # Force regen to clear potentially corrupt cache
     if os.path.exists(nf_path) and not regen:
         print(f"  Loading cached: {nf_path}")
         from wave_scattering_utils_3D import load_nearfield_correction
