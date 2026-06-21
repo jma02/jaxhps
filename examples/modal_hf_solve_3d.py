@@ -89,6 +89,7 @@ def run_hf_solve(
         os.system(
             f"cd {repo_dir} && git checkout devin/1781152283-breast-scattering-3d"
         )
+        os.system(f"cd {repo_dir} && pip install -e .")
     sys.path.insert(0, os.path.join(repo_dir, "examples"))
     sys.path.insert(0, repo_dir)
 
