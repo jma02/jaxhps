@@ -143,6 +143,356 @@ def outward_normals_for_cube_boundary(
 
 
 # ---------------------------------------------------------------------------
+# FMM-accelerated BIE -- replaces dense S, D with FMM + near-field correction
+# ---------------------------------------------------------------------------
+
+
+def _patch_indices(n_bdry: int, q: int, L: int) -> np.ndarray:
+    """Return (n_patches, q^2) array of node indices grouped by patch."""
+    q2 = q * q
+    n_patches = n_bdry // q2
+    return np.arange(n_bdry).reshape(n_patches, q2)
+
+
+def build_nearfield_correction(
+    sd: dict,
+    bdry_pts: np.ndarray,
+    normals: np.ndarray,
+    wts: np.ndarray,
+    q: int,
+    L: int,
+    kappa: float,
+    fmm_eps: float = 1e-7,
+    near_ratio: float = 4.0,
+) -> dict:
+    """Precompute additive near-field correction for FMM layer potentials.
+
+    The dense matrices S, D from ``sd`` include accurate singular quadrature.
+    The FMM evaluates the smooth kernel everywhere (excluding self) but is
+    inaccurate for near interactions and misses the self-interaction entirely.
+
+    The correction matrix C satisfies  S @ v = FMM_S(v) + C_S @ v  for each
+    layer, where the correction is nonzero only in near-field blocks.
+
+    Parameters
+    ----------
+    sd : dict from ``load_SD_matrices_3D`` (permuted to domain order).
+    bdry_pts, normals, wts : (n_bdry, 3), (n_bdry, 3), (n_bdry,).
+    q, L : boundary quadrature order and octree levels.
+    kappa : wavenumber.
+    fmm_eps : FMM tolerance (must match what will be used at solve time).
+    near_ratio : patch pairs within ``near_ratio * patch_width`` are "near".
+
+    Returns a dict with sparse CSR correction matrices and metadata.
+    """
+    from scipy.sparse import csr_matrix
+
+    n_bdry = bdry_pts.shape[0]
+    q2 = q * q
+    patches = _patch_indices(n_bdry, q, L)
+    n_patches = patches.shape[0]
+
+    # Patch centers and widths for near-field detection
+    patch_centers = np.array(
+        [bdry_pts[patches[ip]].mean(axis=0) for ip in range(n_patches)]
+    )
+    patch_widths = np.array(
+        [
+            np.max(np.ptp(bdry_pts[patches[ip]], axis=0))
+            for ip in range(n_patches)
+        ]
+    )
+    max_pw = patch_widths.max()
+    threshold = near_ratio * max_pw
+
+    # Identify near patch pairs
+    from scipy.spatial import cKDTree
+
+    tree = cKDTree(patch_centers)
+    near_pairs = []  # (i, j) patch-level
+    for ip in range(n_patches):
+        neighbors = tree.query_ball_point(patch_centers[ip], threshold)
+        for jp in neighbors:
+            near_pairs.append((ip, jp))
+
+    S_dense = np.asarray(sd["S"])
+    D_dense = np.asarray(sd["D"])
+
+    # Smooth kernel blocks (what FMM would give for these pairs)
+    def _smooth_kernel_block(row_idx, col_idx):
+        """G(x_i, y_j) * w_j for the single layer; dG/dn_y * w_j for double."""
+        xi = bdry_pts[row_idx][:, None, :]  # (ni, 1, 3)
+        yj = bdry_pts[col_idx][None, :, :]  # (1, nj, 3)
+        diff = xi - yj  # (ni, nj, 3)
+        r = np.linalg.norm(diff, axis=-1)  # (ni, nj)
+        wj = wts[col_idx]
+
+        # Single layer: G * w_j
+        with np.errstate(divide="ignore", invalid="ignore"):
+            G = np.exp(1j * kappa * r) / (4.0 * np.pi * r)
+        S_smooth = G * wj[None, :]
+        # Self-interaction (r=0): FMM skips these, so smooth contribution = 0
+        S_smooth[r == 0] = 0.0
+
+        # Double layer: dG/dn_y * w_j
+        # diff = x_i - y_j; dG/dn_y = (1/r - ik)(n_y . diff)/r * G
+        nj = normals[col_idx]  # (nj, 3)
+        n_dot_diff = np.einsum("ijk,jk->ij", diff, nj)  # (ni, nj)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            dGdny = (1.0 / r - 1j * kappa) / r * G * n_dot_diff
+        D_smooth = dGdny * wj[None, :]
+        D_smooth[r == 0] = 0.0
+
+        return S_smooth, D_smooth
+
+    # Build sparse correction: C = exact_near - smooth_near (block-wise)
+    n_pairs = len(near_pairs)
+    rows_arr = np.empty(n_pairs * q2 * q2, dtype=np.int64)
+    cols_arr = np.empty(n_pairs * q2 * q2, dtype=np.int64)
+    S_vals = np.empty(n_pairs * q2 * q2, dtype=np.complex128)
+    D_vals = np.empty(n_pairs * q2 * q2, dtype=np.complex128)
+
+    idx = 0
+    for ip, jp in near_pairs:
+        ri = patches[ip]
+        ci = patches[jp]
+        S_exact = S_dense[np.ix_(ri, ci)]
+        D_exact = D_dense[np.ix_(ri, ci)]
+        S_smooth, D_smooth = _smooth_kernel_block(ri, ci)
+
+        block_size = q2 * q2
+        rr, cc = np.meshgrid(ri, ci, indexing="ij")
+        rows_arr[idx : idx + block_size] = rr.ravel()
+        cols_arr[idx : idx + block_size] = cc.ravel()
+        S_vals[idx : idx + block_size] = (S_exact - S_smooth).ravel()
+        D_vals[idx : idx + block_size] = (D_exact - D_smooth).ravel()
+        idx += block_size
+
+    S_corr_csr = csr_matrix(
+        (S_vals[:idx], (rows_arr[:idx], cols_arr[:idx])),
+        shape=(n_bdry, n_bdry),
+    )
+    D_corr_csr = csr_matrix(
+        (D_vals[:idx], (rows_arr[:idx], cols_arr[:idx])),
+        shape=(n_bdry, n_bdry),
+    )
+
+    return dict(
+        S_corr=S_corr_csr,
+        D_corr=D_corr_csr,
+        n_near_pairs=len(near_pairs),
+        n_patches=n_patches,
+        nnz_S=S_corr_csr.nnz,
+        nnz_D=D_corr_csr.nnz,
+        kappa=kappa,
+        fmm_eps=fmm_eps,
+    )
+
+
+def load_nearfield_correction(fp: str, fmm_eps: float = 1e-7) -> dict:
+    """Load near-field correction from .npz (generated by gen_nearfield_3D.py).
+
+    Returns a dict compatible with :func:`solve_bie_gmres_fmm`.
+    """
+    from scipy.sparse import csr_matrix
+
+    d = np.load(fp, allow_pickle=False)
+    shape = tuple(d["shape"])
+    S_corr = csr_matrix(
+        (d["S_corr_data"], d["S_corr_indices"], d["S_corr_indptr"]),
+        shape=shape,
+    )
+    D_corr = csr_matrix(
+        (d["D_corr_data"], d["D_corr_indices"], d["D_corr_indptr"]),
+        shape=shape,
+    )
+    return dict(
+        S_corr=S_corr,
+        D_corr=D_corr,
+        boundary_points=d["boundary_points"],
+        normals=d["normals"],
+        wts=d["wts"],
+        n_near_pairs=int(d["n_near_pairs"]),
+        nnz_S=S_corr.nnz,
+        nnz_D=D_corr.nnz,
+        kappa=float(d["kappa"]),
+        fmm_eps=fmm_eps,
+        a=float(d["a"]),
+        q=int(d["q"]),
+        L=int(d["L"]),
+    )
+
+
+def _fmm_apply_S(
+    v: np.ndarray,
+    bdry_pts: np.ndarray,
+    wts: np.ndarray,
+    kappa: float,
+    eps: float,
+) -> np.ndarray:
+    """Apply single-layer operator via FMM: [Sv]_i = sum_{j!=i} G(x_i,x_j) w_j v_j."""
+    import fmm3dpy
+
+    src = np.asfortranarray(bdry_pts.T)  # (3, n)
+    if v.ndim == 1:
+        charges = (wts * v).astype(np.complex128)
+        out = fmm3dpy.hfmm3d(
+            eps=eps, zk=complex(kappa), sources=src, charges=charges, pg=1
+        )
+        return np.asarray(out.pot, dtype=np.complex128).ravel()
+    # Batched: v is (n_bdry, n_rhs)
+    n_rhs = v.shape[1]
+    result = np.empty_like(v, dtype=np.complex128)
+    for k in range(n_rhs):
+        charges = (wts * v[:, k]).astype(np.complex128)
+        out = fmm3dpy.hfmm3d(
+            eps=eps, zk=complex(kappa), sources=src, charges=charges, pg=1
+        )
+        result[:, k] = np.asarray(out.pot, dtype=np.complex128).ravel()
+    return result
+
+
+def _fmm_apply_D(
+    v: np.ndarray,
+    bdry_pts: np.ndarray,
+    normals: np.ndarray,
+    wts: np.ndarray,
+    kappa: float,
+    eps: float,
+) -> np.ndarray:
+    """Apply double-layer operator via FMM: [Dv]_i = sum_{j!=i} dG/dn_y(x_i,x_j) w_j v_j.
+
+    fmm3dpy evaluates  u(x) = sum_j -v_j . grad_x G(x, x_j).  Setting
+    v_j = n_j w_j sigma_j yields the double-layer potential because
+    -n_j . grad_x G = n_j . grad_y G = dG/dn_y.
+    """
+    import fmm3dpy
+
+    src = np.asfortranarray(bdry_pts.T)  # (3, n)
+    nrm_T = normals.T  # (3, n)
+    if v.ndim == 1:
+        scale = (wts * v).astype(np.complex128)  # (n,)
+        dipvec = np.asfortranarray(nrm_T * scale[None, :])  # (3, n)
+        out = fmm3dpy.hfmm3d(
+            eps=eps, zk=complex(kappa), sources=src, dipvec=dipvec, pg=1
+        )
+        return np.asarray(out.pot, dtype=np.complex128).ravel()
+    n_rhs = v.shape[1]
+    result = np.empty_like(v, dtype=np.complex128)
+    for k in range(n_rhs):
+        scale = (wts * v[:, k]).astype(np.complex128)
+        dipvec = np.asfortranarray(nrm_T * scale[None, :])
+        out = fmm3dpy.hfmm3d(
+            eps=eps, zk=complex(kappa), sources=src, dipvec=dipvec, pg=1
+        )
+        result[:, k] = np.asarray(out.pot, dtype=np.complex128).ravel()
+    return result
+
+
+def fmm_matvec_S(
+    v: np.ndarray,
+    bdry_pts: np.ndarray,
+    wts: np.ndarray,
+    kappa: float,
+    S_corr,
+    fmm_eps: float = 1e-7,
+) -> np.ndarray:
+    """FMM-accelerated single-layer matvec: S @ v = FMM(v) + S_corr @ v."""
+    fmm_part = _fmm_apply_S(v, bdry_pts, wts, kappa, fmm_eps)
+    if v.ndim == 1:
+        return fmm_part + S_corr @ v
+    return fmm_part + S_corr @ v
+
+
+def fmm_matvec_D(
+    v: np.ndarray,
+    bdry_pts: np.ndarray,
+    normals: np.ndarray,
+    wts: np.ndarray,
+    kappa: float,
+    D_corr,
+    fmm_eps: float = 1e-7,
+) -> np.ndarray:
+    """FMM-accelerated double-layer matvec: D @ v = FMM(v) + D_corr @ v."""
+    fmm_part = _fmm_apply_D(v, bdry_pts, normals, wts, kappa, fmm_eps)
+    if v.ndim == 1:
+        return fmm_part + D_corr @ v
+    return fmm_part + D_corr @ v
+
+
+def solve_bie_gmres_fmm(
+    T_DtN: np.ndarray,
+    bdry_pts: np.ndarray,
+    normals: np.ndarray,
+    wts: np.ndarray,
+    kappa: float,
+    eta: float,
+    uin: np.ndarray,
+    uin_dn: np.ndarray,
+    nf_corr: dict,
+    tol: float = 1e-6,
+    maxiter: int = 200,
+    restart: int = 50,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+    """Solve the exterior BIE via GMRES with FMM-accelerated matvecs.
+
+    Solves ``A u^s = b`` where ``A = ½I - D + S T_DtN`` and
+    ``b = S (u^inc_n - T_DtN u^inc)`` using GMRES with FMM for S, D.
+
+    Returns ``(imp, uscat_b, uscat_dn_b, info)`` matching the dense solver.
+    """
+    from scipy.sparse.linalg import LinearOperator, gmres
+
+    S_corr = nf_corr["S_corr"]
+    D_corr = nf_corr["D_corr"]
+    fmm_eps = nf_corr["fmm_eps"]
+    n = bdry_pts.shape[0]
+    T_DtN_np = np.asarray(T_DtN)
+
+    def _apply_S(v):
+        return fmm_matvec_S(v, bdry_pts, wts, kappa, S_corr, fmm_eps)
+
+    def _apply_D(v):
+        return fmm_matvec_D(v, bdry_pts, normals, wts, kappa, D_corr, fmm_eps)
+
+    def matvec(x):
+        Tx = T_DtN_np @ x
+        return 0.5 * x - _apply_D(x) + _apply_S(Tx)
+
+    A_op = LinearOperator((n, n), matvec=matvec, dtype=np.complex128)
+
+    # RHS: b = S @ (uin_dn - T_DtN @ uin)
+    uin_np = np.asarray(uin)
+    uin_dn_np = np.asarray(uin_dn)
+
+    n_src = uin_np.shape[1] if uin_np.ndim > 1 else 1
+    if uin_np.ndim == 1:
+        uin_np = uin_np[:, None]
+        uin_dn_np = uin_dn_np[:, None]
+
+    uscat_b_cols = []
+    gmres_info_list = []
+    for s in range(n_src):
+        rhs_s = _apply_S(uin_dn_np[:, s] - T_DtN_np @ uin_np[:, s])
+        sol, info_code = gmres(
+            A_op, rhs_s, rtol=tol, restart=restart, maxiter=maxiter, atol=0
+        )
+        uscat_b_cols.append(sol)
+        gmres_info_list.append(info_code)
+
+    uscat_b = np.column_stack(uscat_b_cols)
+    uscat_dn_b = T_DtN_np @ (uscat_b + uin_np) - uin_dn_np
+    imp = uscat_dn_b + 1j * eta * uscat_b
+
+    info = dict(
+        gmres_info=gmres_info_list,
+        n_src=n_src,
+        converged=all(c == 0 for c in gmres_info_list),
+    )
+    return imp, uscat_b, uscat_dn_b, info
+
+
+# ---------------------------------------------------------------------------
 # BIE coupling -- 3D analogue of examples/wave_scattering_utils.py
 # ---------------------------------------------------------------------------
 #
