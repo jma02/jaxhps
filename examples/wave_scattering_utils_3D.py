@@ -421,7 +421,7 @@ def fmm_matvec_D(
 
 
 def solve_bie_gmres_fmm(
-    T_DtN: np.ndarray,
+    T_DtN,
     bdry_pts: np.ndarray,
     normals: np.ndarray,
     wts: np.ndarray,
@@ -433,11 +433,17 @@ def solve_bie_gmres_fmm(
     tol: float = 1e-6,
     maxiter: int = 200,
     restart: int = 50,
+    use_gpu_tdtn: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
     """Solve the exterior BIE via GMRES with FMM-accelerated matvecs.
 
-    Solves ``A u^s = b`` where ``A = ½I - D + S T_DtN`` and
+    Solves ``A u^s = b`` where ``A = 1/2 I - D + S T_DtN`` and
     ``b = S (u^inc_n - T_DtN u^inc)`` using GMRES with FMM for S, D.
+
+    When ``use_gpu_tdtn=True``, the dense ``T_DtN @ v`` products are
+    dispatched to the GPU via JAX while FMM calls run concurrently on
+    CPU.  The GPU launch is asynchronous, so ``T_DtN @ x`` and
+    ``FMM_D(x)`` overlap within each GMRES iteration.
 
     Returns ``(imp, uscat_b, uscat_dn_b, info)`` matching the dense solver.
     """
@@ -447,7 +453,36 @@ def solve_bie_gmres_fmm(
     D_corr = nf_corr["D_corr"]
     fmm_eps = nf_corr["fmm_eps"]
     n = bdry_pts.shape[0]
-    T_DtN_np = np.asarray(T_DtN)
+
+    # ---- T_DtN matmul dispatch (GPU or CPU) ----
+    if use_gpu_tdtn:
+        T_gpu = jnp.asarray(T_DtN)
+        jax.block_until_ready(T_gpu)
+
+        def _tdtn_mv(v_np):
+            """T_DtN @ v on GPU; returns np.ndarray."""
+            result = T_gpu @ jax.device_put(jnp.asarray(v_np))
+            return np.asarray(result)
+
+        def _tdtn_mv_async(v_np):
+            """Launch T_DtN @ v on GPU; return a lazy JAX array (not blocked)."""
+            return T_gpu @ jax.device_put(jnp.asarray(v_np))
+
+        def _collect(jax_arr):
+            """Block + transfer a lazy JAX result to numpy."""
+            return np.asarray(jax_arr)
+
+    else:
+        T_cpu = np.asarray(T_DtN)
+
+        def _tdtn_mv(v_np):
+            return T_cpu @ v_np
+
+        def _tdtn_mv_async(v_np):
+            return T_cpu @ v_np
+
+        def _collect(arr):
+            return arr
 
     def _apply_S(v):
         return fmm_matvec_S(v, bdry_pts, wts, kappa, S_corr, fmm_eps)
@@ -456,8 +491,11 @@ def solve_bie_gmres_fmm(
         return fmm_matvec_D(v, bdry_pts, normals, wts, kappa, D_corr, fmm_eps)
 
     def matvec(x):
-        Tx = T_DtN_np @ x
-        return 0.5 * x - _apply_D(x) + _apply_S(Tx)
+        # T_DtN @ x on GPU (async) while FMM_D runs on CPU
+        Tx_lazy = _tdtn_mv_async(x)
+        Dx = _apply_D(x)
+        Tx = _collect(Tx_lazy)
+        return 0.5 * x - Dx + _apply_S(Tx)
 
     A_op = LinearOperator((n, n), matvec=matvec, dtype=np.complex128)
 
@@ -473,7 +511,7 @@ def solve_bie_gmres_fmm(
     uscat_b_cols = []
     gmres_info_list = []
     for s in range(n_src):
-        rhs_s = _apply_S(uin_dn_np[:, s] - T_DtN_np @ uin_np[:, s])
+        rhs_s = _apply_S(uin_dn_np[:, s] - _tdtn_mv(uin_np[:, s]))
         sol, info_code = gmres(
             A_op, rhs_s, rtol=tol, restart=restart, maxiter=maxiter, atol=0
         )
@@ -481,7 +519,7 @@ def solve_bie_gmres_fmm(
         gmres_info_list.append(info_code)
 
     uscat_b = np.column_stack(uscat_b_cols)
-    uscat_dn_b = T_DtN_np @ (uscat_b + uin_np) - uin_dn_np
+    uscat_dn_b = _tdtn_mv(uscat_b + uin_np) - uin_dn_np
     imp = uscat_dn_b + 1j * eta * uscat_b
 
     info = dict(
