@@ -31,7 +31,6 @@ fmm_image = (
     )
     .pip_install(
         "numpy==2.4.6",
-        "setuptools<60",
         "fmm3dpy",
         "scipy==1.17.1",
         "jax[cuda12]==0.10.1",
@@ -39,7 +38,7 @@ fmm_image = (
     )
     .run_commands(
         # Clone and build fmm3dbie (needs numpy<2 for f2py at build time)
-        "pip install 'numpy<2' 'setuptools<60'",
+        "pip install 'numpy<2' 'setuptools>=60,<70'",
         "git clone --recurse-submodules https://github.com/fastalgorithms/fmm3dbie.git /opt/fmm3dbie",
         "cd /opt/fmm3dbie && git checkout ddc93f53e60181b79928fb896a678b49865810aa && git submodule update --recursive",
         # Patch setup.py typo
