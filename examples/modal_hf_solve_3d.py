@@ -127,7 +127,8 @@ def run_hf_solve(
     # Step 1: Generate near-field corrections
     print("\n=== Step 1: Near-field corrections ===")
     nf_path = f"/data/NF_k{kappa:.2f}_q{q}_L{L}_a{a}.npz"
-    if os.path.exists(nf_path):
+    regen = os.environ.get("REGEN_NF", "0") == "1"
+    if os.path.exists(nf_path) and not regen:
         print(f"  Loading cached: {nf_path}")
         from wave_scattering_utils_3D import load_nearfield_correction
 
@@ -414,10 +415,10 @@ def run_hf_solve(
 
         tree_nf = cKDTree(bdry_pts_nf)
         _, perm = tree_nf.query(bp)
-        # perm[i] = index in NF ordering of the i-th HPS domain point
-        # T_DtN is in HPS ordering; NF correction is in fmm3dbie ordering
-        # Convert T_DtN to fmm3dbie ordering: T_DtN_nf = P T_DtN P^T
-        T_DtN_np = T_DtN_np[np.ix_(perm, perm)]
+        # perm[hps_i] = nf_i.  We need T_DtN in NF ordering:
+        # T_DtN_nf[nf_i, nf_j] = T_DtN[hps_i, hps_j] where hps_i = perm_inv[nf_i]
+        perm_inv = np.argsort(perm)
+        T_DtN_np = T_DtN_np[np.ix_(perm_inv, perm_inv)]
         print("  Permuted T_DtN to fmm3dbie ordering")
     else:
         wts_nf = nf.get("wts", np.ones(bp.shape[0]))
