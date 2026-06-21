@@ -71,7 +71,7 @@ vol = modal.Volume.from_name("jaxhps-data", create_if_missing=True)
 
 @app.function(
     image=fmm_image,
-    gpu="A100",
+    gpu="H100",
     timeout=7200,
     volumes={"/data": vol},
 )
