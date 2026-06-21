@@ -530,6 +530,125 @@ def solve_bie_gmres_fmm(
     return imp, uscat_b, uscat_dn_b, info
 
 
+def solve_bie_gmres_gpu(
+    T_DtN,
+    bdry_pts: np.ndarray,
+    normals: np.ndarray,
+    wts: np.ndarray,
+    kappa: float,
+    eta: float,
+    uin: np.ndarray,
+    uin_dn: np.ndarray,
+    nf_corr: dict,
+    tol: float = 1e-6,
+    maxiter: int = 200,
+    restart: int = 50,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+    """Solve the exterior BIE entirely on GPU via JAX direct summation.
+
+    Replaces the CPU-side FMM with GPU kernel evaluation.  The smooth
+    Helmholtz kernels :math:`G` and :math:`\\partial G/\\partial n_y` are
+    built once as dense :math:`n \\times n` matrices on the GPU, the
+    near-field corrections are added, and each GMRES iteration reduces to
+    three GPU GEMVs (:math:`T \\cdot x`, :math:`D \\cdot x`, :math:`S \\cdot Tx`).
+
+    Memory: :math:`3n^2 \\times 16` bytes for the stored matrices
+    (S + D + T).  At :math:`n = 24{,}576` (L = 3) this is ~29 GB —
+    fits on an 80 GB GPU.
+
+    Returns ``(imp, uscat_b, uscat_dn_b, info)`` matching the dense solver.
+    """
+    from scipy.sparse.linalg import LinearOperator, gmres
+
+    n = bdry_pts.shape[0]
+
+    # ---- Build smooth kernel matrices on GPU ----
+    t0 = time.perf_counter()
+    bp = jnp.asarray(bdry_pts)
+    nrm = jnp.asarray(normals)
+    w = jnp.asarray(wts)
+    T = jnp.asarray(T_DtN)
+
+    diff = bp[:, None, :] - bp[None, :, :]  # (n, n, 3)
+    r2 = jnp.sum(diff**2, axis=-1)  # (n, n)
+    r = jnp.sqrt(r2)
+    safe_r = jnp.where(r > 0, r, 1.0)
+
+    # S kernel: G(x_i, x_j) * w_j
+    G = jnp.exp(1j * kappa * r) / (4.0 * jnp.pi * safe_r)
+    G = jnp.where(r > 0, G, 0j)
+    K_S = G * w[None, :]
+
+    # D kernel: dG/dn_y * w_j
+    nd = jnp.sum(diff * nrm[None, :, :], axis=-1)
+    dGdn = (1.0 / safe_r - 1j * kappa) / safe_r * G * nd
+    dGdn = jnp.where(r > 0, dGdn, 0j)
+    K_D = dGdn * w[None, :]
+
+    del diff, r2, r, safe_r, G, nd, dGdn
+
+    # Add near-field corrections (exact quadrature minus smooth kernel)
+    K_S = K_S + jnp.asarray(nf_corr["S_corr"].toarray())
+    K_D = K_D + jnp.asarray(nf_corr["D_corr"].toarray())
+
+    jax.block_until_ready(K_S)
+    jax.block_until_ready(K_D)
+    dt_build = time.perf_counter() - t0
+    print(f"  GPU kernel build: {dt_build:.2f}s")
+    mem_gb = (K_S.nbytes + K_D.nbytes + T.nbytes) / 1e9
+    print(f"  K_S + K_D + T memory: {mem_gb:.2f} GB")
+
+    # ---- JIT-compiled matvec: A x = 1/2 x - D x + S (T x) ----
+    @jax.jit
+    def _matvec(x):
+        return 0.5 * x - K_D @ x + K_S @ (T @ x)
+
+    # Warm up JIT
+    _dummy = _matvec(jnp.zeros(n, dtype=jnp.complex128))
+    jax.block_until_ready(_dummy)
+    del _dummy
+
+    def matvec_np(x_np):
+        return np.asarray(_matvec(jnp.asarray(x_np)))
+
+    A_op = LinearOperator((n, n), matvec=matvec_np, dtype=np.complex128)
+
+    # ---- RHS and GMRES solve ----
+    uin_np = np.asarray(uin)
+    uin_dn_np = np.asarray(uin_dn)
+    n_src = uin_np.shape[1] if uin_np.ndim > 1 else 1
+    if uin_np.ndim == 1:
+        uin_np = uin_np[:, None]
+        uin_dn_np = uin_dn_np[:, None]
+
+    uscat_b_cols = []
+    gmres_info_list = []
+    for s in range(n_src):
+        u_s = jnp.asarray(uin_np[:, s])
+        udn_s = jnp.asarray(uin_dn_np[:, s])
+        rhs_j = K_S @ (udn_s - T @ u_s)
+        rhs_np = np.asarray(rhs_j)
+        sol, info_code = gmres(
+            A_op, rhs_np, rtol=tol, restart=restart, maxiter=maxiter, atol=0
+        )
+        uscat_b_cols.append(sol)
+        gmres_info_list.append(info_code)
+
+    uscat_b = np.column_stack(uscat_b_cols)
+    uscat_dn_b = np.asarray(
+        T @ jnp.asarray(uscat_b + uin_np) - jnp.asarray(uin_dn_np)
+    )
+    imp = uscat_dn_b + 1j * eta * uscat_b
+
+    info = dict(
+        gmres_info=gmres_info_list,
+        n_src=n_src,
+        converged=all(c == 0 for c in gmres_info_list),
+        kernel_build_time=dt_build,
+    )
+    return imp, uscat_b, uscat_dn_b, info
+
+
 # ---------------------------------------------------------------------------
 # BIE coupling -- 3D analogue of examples/wave_scattering_utils.py
 # ---------------------------------------------------------------------------

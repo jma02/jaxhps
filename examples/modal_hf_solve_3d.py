@@ -346,7 +346,7 @@ def run_hf_solve(
     from wave_scattering_utils_3D import (
         get_DtN_from_ItI_3D,
         get_uin_and_dn_3D,
-        solve_bie_gmres_fmm,
+        solve_bie_gmres_gpu,
         outward_normals_for_cube_boundary,
     )
 
@@ -429,8 +429,8 @@ def run_hf_solve(
         bdry_pts_nf = bp
         normals_nf = nrm
 
-    # Step 3: GMRES+FMM solve
-    print("\n=== Step 3: GMRES+FMM solve ===")
+    # Step 3: GMRES+GPU solve (direct summation, no CPU FMM)
+    print("\n=== Step 3: GMRES+GPU solve ===")
     uin, uin_dn = get_uin_and_dn_3D(
         float(kappa),
         jnp.asarray(bdry_pts_nf),
@@ -438,7 +438,7 @@ def run_hf_solve(
         jnp.asarray(source_dirs),
     )
     t0 = time.perf_counter()
-    imp, uscat_b, uscat_dn_b, info = solve_bie_gmres_fmm(
+    imp, uscat_b, uscat_dn_b, info = solve_bie_gmres_gpu(
         T_DtN_gpu,
         bdry_pts_nf,
         normals_nf,
@@ -451,10 +451,9 @@ def run_hf_solve(
         tol=gmres_tol,
         maxiter=200,
         restart=50,
-        use_gpu_tdtn=True,
     )
     dt_gmres = time.perf_counter() - t0
-    print(f"  GMRES+FMM: {dt_gmres:.2f}s")
+    print(f"  GMRES+GPU: {dt_gmres:.2f}s")
     print(f"  Converged: {info['converged']}")
     print(f"  ||u^s||_max = {np.abs(uscat_b).max():.6e}")
     print(f"  GMRES info: {info['gmres_info']}")
