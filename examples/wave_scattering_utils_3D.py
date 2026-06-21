@@ -562,30 +562,33 @@ def solve_bie_gmres_gpu(
 
     n = bdry_pts.shape[0]
 
-    # ---- Build smooth kernel matrices on GPU ----
+    # ---- Build smooth kernel matrices on GPU (chunked for memory) ----
     t0 = time.perf_counter()
     bp = jnp.asarray(bdry_pts)
     nrm = jnp.asarray(normals)
     w = jnp.asarray(wts)
     T = jnp.asarray(T_DtN)
 
-    diff = bp[:, None, :] - bp[None, :, :]  # (n, n, 3)
-    r2 = jnp.sum(diff**2, axis=-1)  # (n, n)
-    r = jnp.sqrt(r2)
-    safe_r = jnp.where(r > 0, r, 1.0)
-
-    # S kernel: G(x_i, x_j) * w_j
-    G = jnp.exp(1j * kappa * r) / (4.0 * jnp.pi * safe_r)
-    G = jnp.where(r > 0, G, 0j)
-    K_S = G * w[None, :]
-
-    # D kernel: dG/dn_y * w_j
-    nd = jnp.sum(diff * nrm[None, :, :], axis=-1)
-    dGdn = (1.0 / safe_r - 1j * kappa) / safe_r * G * nd
-    dGdn = jnp.where(r > 0, dGdn, 0j)
-    K_D = dGdn * w[None, :]
-
-    del diff, r2, r, safe_r, G, nd, dGdn
+    chunk = min(2048, n)
+    S_blocks, D_blocks = [], []
+    for i0 in range(0, n, chunk):
+        i1 = min(i0 + chunk, n)
+        xi = bp[i0:i1]
+        diff = xi[:, None, :] - bp[None, :, :]
+        r2 = jnp.sum(diff**2, axis=-1)
+        r = jnp.sqrt(r2)
+        safe_r = jnp.where(r > 0, r, 1.0)
+        G = jnp.exp(1j * kappa * r) / (4.0 * jnp.pi * safe_r)
+        G = jnp.where(r > 0, G, 0j)
+        S_blocks.append(G * w[None, :])
+        nd = jnp.sum(diff * nrm[None, :, :], axis=-1)
+        dG = (1.0 / safe_r - 1j * kappa) / safe_r * G * nd
+        dG = jnp.where(r > 0, dG, 0j)
+        D_blocks.append(dG * w[None, :])
+        del diff, r2, r, safe_r, G, nd, dG
+    K_S = jnp.concatenate(S_blocks, axis=0)
+    K_D = jnp.concatenate(D_blocks, axis=0)
+    del S_blocks, D_blocks
 
     # Add near-field corrections (exact quadrature minus smooth kernel)
     K_S = K_S + jnp.asarray(nf_corr["S_corr"].toarray())
@@ -594,7 +597,7 @@ def solve_bie_gmres_gpu(
     jax.block_until_ready(K_S)
     jax.block_until_ready(K_D)
     dt_build = time.perf_counter() - t0
-    print(f"  GPU kernel build: {dt_build:.2f}s")
+    print(f"  GPU kernel build ({n // chunk} chunks): {dt_build:.2f}s")
     mem_gb = (K_S.nbytes + K_D.nbytes + T.nbytes) / 1e9
     print(f"  K_S + K_D + T memory: {mem_gb:.2f} GB")
 
