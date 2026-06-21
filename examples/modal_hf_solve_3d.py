@@ -35,6 +35,7 @@ fmm_image = (
         "fmm3dpy",
         "scipy",
         "jax[cuda12]",
+        "charset_normalizer",
     )
     .run_commands(
         # Clone and build fmm3dbie
@@ -42,6 +43,8 @@ fmm_image = (
         "cd /opt/fmm3dbie && git checkout ddc93f53e60181b79928fb896a678b49865810aa && git submodule update --recursive",
         # Patch setup.py typo
         "sed -i \"s|'../src/stok_wrappers/stok_comb_vel.f'|'../src/stok_wrappers/stok_comb_vel.f90'|\" /opt/fmm3dbie/python/setup.py",
+        # Fix non-ASCII chars in Fortran sources (f2py encoding issue)
+        "find /opt/fmm3dbie/src -name '*.f90' -exec sed -i 's/[^[:print:]\\t]//g' {} +",
         # Build static lib
         "cd /opt/fmm3dbie && cp make.inc.linux.gnu.openblas make.inc && make -j$(nproc) lib",
         # Build and install Python wrapper
@@ -180,7 +183,20 @@ def run_hf_solve(
         eps_quad = 1e-9
         ifwrite = 0
 
-        def _matgen_block(alpha, beta, row_ind_f, col_ind_f):
+        # Collect unique near-field indices for bulk generation
+        near_row_set = set()
+        near_col_set = set()
+        for ip, jp in near_pairs:
+            near_row_set.update(patches[ip].tolist())
+            near_col_set.update(patches[jp].tolist())
+        all_near_rows = np.array(sorted(near_row_set), dtype=np.int64)
+        all_near_cols = np.array(sorted(near_col_set), dtype=np.int64)
+        print(
+            f"  Near-field index set: {len(all_near_rows)} rows, "
+            f"{len(all_near_cols)} cols"
+        )
+
+        def _matgen_bulk(alpha, beta, row_f, col_f):
             zpars = np.array([kappa + 0j, alpha, beta], dtype=np.complex128)
             nifds, _, nzfds = h3.helm_comb_dir_fds_block_mem(
                 norders,
@@ -214,8 +230,8 @@ def run_hf_solve(
                 zpars,
                 ifds,
                 zfds,
-                row_ind_f,
-                col_ind_f,
+                row_f,
+                col_f,
                 ifwrite,
             )
 
@@ -237,13 +253,31 @@ def run_hf_solve(
             D_s[r == 0] = 0.0
             return S_s, D_s
 
+        # Bulk generation: one fmm3dbie call per layer (S, D)
         t0 = time.perf_counter()
+        print("  Generating bulk S near-field matrix...")
+        S_bulk = _matgen_bulk(
+            1 + 0j, 0 + 0j, all_near_rows + 1, all_near_cols + 1
+        )
+        print("  Generating bulk D near-field matrix...")
+        D_bulk = _matgen_bulk(
+            0 + 0j, 1 + 0j, all_near_rows + 1, all_near_cols + 1
+        )
+        dt_bulk = time.perf_counter() - t0
+        print(f"  Bulk matgen: {dt_bulk:.1f}s, S shape={S_bulk.shape}")
+
+        # Build index maps for fast block extraction
+        row_map = {v: i for i, v in enumerate(all_near_rows)}
+        col_map = {v: i for i, v in enumerate(all_near_cols)}
+
         idx = 0
         for pi, (ip, jp) in enumerate(near_pairs):
             ri = patches[ip]
             ci = patches[jp]
-            S_ex = _matgen_block(1 + 0j, 0 + 0j, ri + 1, ci + 1)
-            D_ex = _matgen_block(0 + 0j, 1 + 0j, ri + 1, ci + 1)
+            ri_b = [row_map[r] for r in ri]
+            ci_b = [col_map[c] for c in ci]
+            S_ex = S_bulk[np.ix_(ri_b, ci_b)]
+            D_ex = D_bulk[np.ix_(ri_b, ci_b)]
             S_sm, D_sm = _smooth_block(ri, ci)
             bs = q2 * q2
             rr, cc = np.meshgrid(ri, ci, indexing="ij")
@@ -252,9 +286,6 @@ def run_hf_solve(
             S_vals[idx : idx + bs] = (S_ex - S_sm).ravel()
             D_vals[idx : idx + bs] = (D_ex - D_sm).ravel()
             idx += bs
-            if (pi + 1) % 500 == 0 or pi == n_pairs - 1:
-                el = time.perf_counter() - t0
-                print(f"    [{pi + 1}/{n_pairs}] {el:.1f}s")
 
         S_corr = csr_matrix(
             (S_vals[:idx], (rows_arr[:idx], cols_arr[:idx])),
