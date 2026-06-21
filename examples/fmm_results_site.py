@@ -130,7 +130,7 @@ MODAL_HF = dict(
     freq_khz=5.0,
 )
 
-# Modal high-frequency (L=3, kappa=26.18, H100) -- GPU T_DtN matmul
+# Modal high-frequency (L=3, kappa=26.18, H100) -- GPU T_DtN matmul only
 MODAL_HF_GPU = dict(
     kappa=26.1800,
     a=1.25,
@@ -151,6 +151,55 @@ MODAL_HF_GPU = dict(
     T_DtN_mem_gb=9.66,
     freq_khz=5.0,
     tdtn_on_gpu=True,
+)
+
+# Modal smoke test (L=2, kappa=4, H100) -- full GPU direct summation
+MODAL_SMOKE_FULL_GPU = dict(
+    kappa=4.0,
+    a=1.25,
+    L=2,
+    q=8,
+    p=12,
+    n_bdry=6144,
+    n_interior=110592,
+    n_src=4,
+    gpu="H100",
+    nf_gen_time=0.0,  # cached
+    hps_time=12.80,
+    gmres_time=9.13,
+    total_time=21.93,
+    converged=True,
+    gmres_info=[0, 0, 0, 0],
+    uscat_max=5.2824e-3,
+    T_DtN_mem_gb=0.60,
+    kernel_build_time=1.98,
+    kernel_mem_gb=1.81,
+    full_gpu=True,
+)
+
+# Modal high-frequency (L=3, kappa=26.18, H100) -- full GPU direct summation
+MODAL_HF_FULL_GPU = dict(
+    kappa=26.1800,
+    a=1.25,
+    L=3,
+    q=8,
+    p=12,
+    n_bdry=24576,
+    n_interior=884736,
+    n_src=4,
+    gpu="H100",
+    nf_gen_time=0.0,  # cached
+    hps_time=58.19,
+    gmres_time=17.51,
+    total_time=75.70,
+    converged=True,
+    gmres_info=[0, 0, 0, 0],
+    uscat_max=2.2272e-1,
+    T_DtN_mem_gb=9.66,
+    kernel_build_time=9.52,
+    kernel_mem_gb=28.99,
+    freq_khz=5.0,
+    full_gpu=True,
 )
 
 # Dense SD memory scaling for comparison
@@ -344,17 +393,21 @@ def fig_validation_bars():
 
 
 def fig_gpu_tdtn_comparison():
-    """Grouped bar: CPU T_DtN vs GPU T_DtN GMRES times at L=2 and L=3."""
+    """Grouped bar: CPU FMM vs GPU T_DtN vs full GPU GMRES times."""
     labels = ["L=2 (n=6,144)", "L=3 (n=24,576)"]
     cpu_times = [MODAL_SMOKE["gmres_time"], MODAL_HF["gmres_time"]]
-    gpu_times = [MODAL_SMOKE_GPU["gmres_time"], MODAL_HF_GPU["gmres_time"]]
+    gpu_tdtn = [MODAL_SMOKE_GPU["gmres_time"], MODAL_HF_GPU["gmres_time"]]
+    full_gpu = [
+        MODAL_SMOKE_FULL_GPU["gmres_time"],
+        MODAL_HF_FULL_GPU["gmres_time"],
+    ]
 
     fig = go.Figure()
     fig.add_trace(
         go.Bar(
             x=labels,
             y=cpu_times,
-            name="T_DtN on CPU (numpy)",
+            name="CPU FMM + CPU T (baseline)",
             marker_color="#d62728",
             text=[f"{t:.1f}s" for t in cpu_times],
             textposition="outside",
@@ -363,21 +416,32 @@ def fig_gpu_tdtn_comparison():
     fig.add_trace(
         go.Bar(
             x=labels,
-            y=gpu_times,
-            name="T_DtN on GPU (JAX, async overlap)",
-            marker_color="#1f77b4",
-            text=[f"{t:.1f}s" for t in gpu_times],
+            y=gpu_tdtn,
+            name="CPU FMM + GPU T",
+            marker_color="#ff7f0e",
+            text=[f"{t:.1f}s" for t in gpu_tdtn],
+            textposition="outside",
+        )
+    )
+    fig.add_trace(
+        go.Bar(
+            x=labels,
+            y=full_gpu,
+            name="Full GPU (direct sum + JAX GMRES)",
+            marker_color="#2ca02c",
+            text=[f"{t:.1f}s" for t in full_gpu],
             textposition="outside",
         )
     )
     fig.update_layout(
         barmode="group",
-        yaxis_title="GMRES+FMM solve time (s)",
+        yaxis_title="GMRES solve time (s)",
+        yaxis_type="log",
         legend=dict(
             orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5
         ),
         margin=dict(l=50, r=20, t=60, b=40),
-        height=460,
+        height=480,
     )
     return fig
 
@@ -559,16 +623,21 @@ is only $57.6$%; the crossover favours FMM at $L \ge 3$.</p>
         MODAL_L1,
         MODAL_SMOKE,
         MODAL_SMOKE_GPU,
+        MODAL_SMOKE_FULL_GPU,
         MODAL_HF,
         MODAL_HF_GPU,
+        MODAL_HF_FULL_GPU,
     ]
     parts.append(r"""
 <h2>Modal GPU results</h2>
 <p>All runs on NVIDIA H100 (80 GB) via Modal, with $q = 8$, $p = 12$,
 $n_{\mathrm{src}} = 4$ plane-wave illuminations (simultaneous RHS).
-NF corrections are generated once per $(\kappa, q, L, a)$ and cached.
-Rows marked <b>GPU $T$</b> dispatch the dense $T \cdot v$ matmul to the
-GPU (JAX) with asynchronous overlap against the CPU-side FMM call.</p>
+NF corrections are generated once per $(\kappa, q, L, a)$ and cached.</p>
+<p>Three solver variants:
+<b>CPU</b>&nbsp;= FMM on CPU (fmm3dpy) + $T$ on CPU (numpy);
+<b>GPU $T$</b>&nbsp;= FMM on CPU + $T$ on GPU (JAX);
+<b>full GPU</b>&nbsp;= direct summation for $S$, $D$ kernels on GPU +
+$T$ on GPU + JAX-native GMRES (no CPU FMM at all).</p>
 
 <table>
 <tr><th>$\kappa$</th><th>$\kappa a$</th><th>$L$</th>
@@ -581,12 +650,17 @@ GPU (JAX) with asynchronous overlap against the CPU-side FMM call.</p>
     for r in runs:
         ka = r["kappa"] * r["a"]
         c = "pass" if r["converged"] else "warn"
-        t_loc = "GPU" if r.get("tdtn_on_gpu") else "CPU"
+        if r.get("full_gpu"):
+            variant = "full GPU"
+        elif r.get("tdtn_on_gpu"):
+            variant = "GPU T"
+        else:
+            variant = "CPU"
         parts.append(
             f"<tr><td>{r['kappa']:.2f}</td><td>{ka:.1f}</td><td>{r['L']}</td>"
             f"<td>{r['n_bdry']:,}</td><td>{r['n_interior']:,}</td>"
             f"<td>{r['T_DtN_mem_gb']:.2f} GB</td>"
-            f"<td>{t_loc}</td>"
+            f"<td>{variant}</td>"
             f"<td>{r['nf_gen_time']:.1f} s</td><td>{r['hps_time']:.1f} s</td>"
             f"<td>{r['gmres_time']:.1f} s</td><td>{r['total_time']:.1f} s</td>"
             f"<td>{r['uscat_max']:.3e}</td>"
@@ -613,18 +687,32 @@ fmm3dpy runs on CPU and the $T \cdot v$ dense matvec
 """)
     parts.append('<div class="fig">' + div(fig_timing_breakdown()) + "</div>")
 
-    # ---- GPU T_DtN comparison ----
+    # ---- GPU comparison ----
     parts.append(r"""
-<h2>GPU $T_{\mathrm{DtN}}$ matmul acceleration</h2>
-<p>The dense $T \cdot v$ product inside each GMRES iteration is dispatched
-to the GPU via JAX, with the launch overlapping the CPU-side FMM double-layer
-call $D \cdot x$. At $L = 2$ ($n_{\mathrm{bdry}} = 6{,}144$) this yields a
-<b>24% reduction</b> in GMRES time ($17.97 \to 13.61$ s). At $L = 3$
-($n_{\mathrm{bdry}} = 24{,}576$) the FMM calls dominate per-iteration cost
-and the GPU matmul provides negligible speedup ($617.4 \to 622.7$ s).
-The primary benefit at $L \ge 3$ is architectural: keeping $T$ on-device
-avoids a 9.66 GB CPU copy and positions the solver for future GPU-native
-FMM integration.</p>
+<h2>GPU acceleration: three solver variants</h2>
+<p>Three exterior-solve strategies, all on the same H100:</p>
+<ul>
+  <li><b>CPU baseline</b>: FMM (fmm3dpy, CPU) for $S \cdot v$ and $D \cdot v$,
+      numpy for $T \cdot v$.</li>
+  <li><b>GPU $T$</b>: as above but $T \cdot v$ on GPU (JAX),
+      24% faster at $L = 2$, negligible at $L = 3$ (FMM-bottlenecked).</li>
+  <li><b>Full GPU</b>: replaces the CPU FMM entirely with
+      dense GPU kernel matrices $K_S$, $K_D$ ($O(n^2)$ storage) plus
+      JAX-native GMRES (<code>jax.scipy.sparse.linalg.gmres</code>).
+      No CPU roundtrip per iteration.</li>
+</ul>
+<p>Full GPU results:</p>
+<ul>
+  <li>$L = 2$: GMRES $9.1$ s (was $18.0$ s baseline, <b>$2\times$ speedup</b>).
+      Kernel build $2.0$ s, memory $1.8$ GB.</li>
+  <li>$L = 3$: GMRES $17.5$ s (was $617.4$ s baseline, <b>$35\times$ speedup</b>).
+      Kernel build $9.5$ s, memory $29.0$ GB (fits H100-80GB).</li>
+</ul>
+<p>The full GPU path stores $S + D + T$ as three $n \times n$ complex128
+dense matrices ($3 n^2 \times 16$ bytes). At $n = 24{,}576$ this is 29 GB.
+This approach trades $O(n^2)$ memory for massive GEMV parallelism:
+each GMRES iteration is three GPU matrix-vector products, compared to
+seconds-long CPU FMM calls in the baseline.</p>
 """)
     parts.append(
         '<div class="fig">' + div(fig_gpu_tdtn_comparison()) + "</div>"
