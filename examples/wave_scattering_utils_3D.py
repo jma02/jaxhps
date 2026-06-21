@@ -609,7 +609,7 @@ def solve_bie_gmres_gpu(
     del _dummy
 
     def matvec_np(x_np):
-        return np.asarray(_matvec(jnp.asarray(x_np)))
+        return np.array(_matvec(jnp.asarray(x_np)))  # writable copy
 
     A_op = LinearOperator((n, n), matvec=matvec_np, dtype=np.complex128)
 
@@ -627,7 +627,7 @@ def solve_bie_gmres_gpu(
         u_s = jnp.asarray(uin_np[:, s])
         udn_s = jnp.asarray(uin_dn_np[:, s])
         rhs_j = K_S @ (udn_s - T @ u_s)
-        rhs_np = np.asarray(rhs_j)
+        rhs_np = np.array(rhs_j)  # writable copy for scipy
         sol, info_code = gmres(
             A_op, rhs_np, rtol=tol, restart=restart, maxiter=maxiter, atol=0
         )
@@ -635,7 +635,7 @@ def solve_bie_gmres_gpu(
         gmres_info_list.append(info_code)
 
     uscat_b = np.column_stack(uscat_b_cols)
-    uscat_dn_b = np.asarray(
+    uscat_dn_b = np.array(
         T @ jnp.asarray(uscat_b + uin_np) - jnp.asarray(uin_dn_np)
     )
     imp = uscat_dn_b + 1j * eta * uscat_b
