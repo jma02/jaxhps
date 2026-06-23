@@ -647,6 +647,82 @@ def solve_bie_gmres_gpu(
     return imp, uscat_b, uscat_dn_b, info
 
 
+def _gmres_python_loop(
+    A_matvec: Callable,
+    b: jnp.ndarray,
+    x0: jnp.ndarray = None,
+    tol: float = 1e-6,
+    restart: int = 50,
+    maxiter: int = 200,
+    M: Callable = None,
+) -> Tuple[jnp.ndarray, int]:
+    r"""Restarted GMRES with Python-loop iterations (no jax.lax.while_loop).
+
+    JIT-compiles the matvec once; runs Arnoldi iterations imperatively.
+    This avoids the monolithic XLA trace that jax.scipy.sparse.linalg.gmres
+    produces with complex (e.g. vmap-based) matvec operators.
+
+    Returns ``(x, info)`` where info=0 means converged.
+    """
+    if x0 is None:
+        x0 = jnp.zeros_like(b)
+    if M is None:
+        M = lambda x: x  # noqa: E731
+
+    b_norm = float(jnp.linalg.norm(b))
+    if b_norm == 0:
+        return jnp.zeros_like(b), 0
+
+    atol = tol * b_norm
+    x = x0
+    n_outer = max(1, maxiter // restart)
+
+    for _cycle in range(n_outer):
+        r = M(b - A_matvec(x))
+        beta = float(jnp.linalg.norm(r))
+        if beta < atol:
+            return x, 0
+
+        # Arnoldi process: build orthonormal basis V and Hessenberg H
+        V_list = [r / beta]
+        H = np.zeros((restart + 1, restart), dtype=np.complex128)
+
+        k = 0
+        for j in range(restart):
+            w = M(A_matvec(V_list[j]))
+            # Modified Gram-Schmidt
+            for i in range(j + 1):
+                H[i, j] = complex(jnp.vdot(V_list[i], w))
+                w = w - H[i, j] * V_list[i]
+            h_norm = float(jnp.linalg.norm(w))
+            H[j + 1, j] = h_norm
+            if h_norm > 1e-30:
+                V_list.append(w / h_norm)
+            else:
+                V_list.append(jnp.zeros_like(b))
+            k = j + 1
+
+            # Check convergence via least-squares residual norm
+            e1 = np.zeros(k + 1, dtype=np.complex128)
+            e1[0] = beta
+            y_ls, _, _, _ = np.linalg.lstsq(H[: k + 1, :k], e1, rcond=None)
+            ls_res = np.linalg.norm(H[: k + 1, :k] @ y_ls - e1)
+            if ls_res < atol:
+                break
+
+        # Update solution from Arnoldi basis
+        e1 = np.zeros(k + 1, dtype=np.complex128)
+        e1[0] = beta
+        y_ls, _, _, _ = np.linalg.lstsq(H[: k + 1, :k], e1, rcond=None)
+        V_arr = jnp.stack(V_list[:k], axis=0)
+        x = x + V_arr.T @ jnp.asarray(y_ls)
+
+    # Final residual check
+    r_final = float(jnp.linalg.norm(b - A_matvec(x)))
+    info = 0 if r_final < atol else 1
+    return x, info
+
+
 def solve_bie_gpu_advanced(
     T_DtN,
     bdry_pts: np.ndarray,
@@ -846,22 +922,34 @@ def solve_bie_gpu_advanced(
         gmres_info_list = [int(info_code)] * n_src
 
     else:
-        # ---- Sequential GMRES per RHS (JIT cached after first) ----
+        # ---- Sequential GMRES per RHS ----
+        # Matrix-free: use Python-loop GMRES (avoids monolithic JIT).
+        # Dense: use JAX built-in (entire loop compiled = faster for small n).
         uscat_b_cols = []
         gmres_info_list = []
         for s in range(n_src):
             u_s = jnp.asarray(uin_np[:, s])
             udn_s = jnp.asarray(uin_dn_np[:, s])
             rhs = _S_apply(udn_s - T @ u_s)
-            sol, info_code = jax.scipy.sparse.linalg.gmres(
-                _matvec,
-                rhs,
-                tol=tol,
-                atol=0.0,
-                restart=restart,
-                maxiter=n_restart_cycles,
-                M=M_precond,
-            )
+            if matrix_free:
+                sol, info_code = _gmres_python_loop(
+                    _matvec,
+                    rhs,
+                    tol=tol,
+                    restart=restart,
+                    maxiter=maxiter,
+                    M=M_precond,
+                )
+            else:
+                sol, info_code = jax.scipy.sparse.linalg.gmres(
+                    _matvec,
+                    rhs,
+                    tol=tol,
+                    atol=0.0,
+                    restart=restart,
+                    maxiter=n_restart_cycles,
+                    M=M_precond,
+                )
             jax.block_until_ready(sol)
             uscat_b_cols.append(np.array(sol))
             gmres_info_list.append(int(info_code))
