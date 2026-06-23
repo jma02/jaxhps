@@ -346,7 +346,7 @@ def run_hf_solve(
     from wave_scattering_utils_3D import (
         get_DtN_from_ItI_3D,
         get_uin_and_dn_3D,
-        solve_bie_gmres_gpu,
+        solve_bie_gpu_advanced,
         outward_normals_for_cube_boundary,
     )
 
@@ -437,8 +437,8 @@ def run_hf_solve(
     del problem, domain
     gc.collect()
 
-    # Step 3: GMRES+GPU solve (direct summation, no CPU FMM)
-    print("\n=== Step 3: GMRES+GPU solve ===")
+    # Step 3: GMRES+GPU solve (advanced: matrix-free + block + preconditioner)
+    print("\n=== Step 3: GMRES+GPU solve (advanced) ===")
     uin, uin_dn = get_uin_and_dn_3D(
         float(kappa),
         jnp.asarray(bdry_pts_nf),
@@ -446,7 +446,7 @@ def run_hf_solve(
         jnp.asarray(source_dirs),
     )
     t0 = time.perf_counter()
-    imp, uscat_b, uscat_dn_b, info = solve_bie_gmres_gpu(
+    imp, uscat_b, uscat_dn_b, info = solve_bie_gpu_advanced(
         T_DtN_gpu,
         bdry_pts_nf,
         normals_nf,
@@ -459,6 +459,9 @@ def run_hf_solve(
         tol=gmres_tol,
         maxiter=200,
         restart=50,
+        matrix_free=True,
+        use_preconditioner=True,
+        block_rhs=True,
     )
     dt_gmres = time.perf_counter() - t0
     print(f"  GMRES+GPU: {dt_gmres:.2f}s")
