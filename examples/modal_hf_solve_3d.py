@@ -86,6 +86,7 @@ def run_hf_solve(
     n_src: int = 4,
     fmm_eps: float = 1e-7,
     gmres_tol: float = 1e-6,
+    solver_mode: str = "dense_block",
 ):
     import sys
     import os
@@ -437,8 +438,8 @@ def run_hf_solve(
     del problem, domain
     gc.collect()
 
-    # Step 3: GMRES+GPU solve (advanced: matrix-free + block + preconditioner)
-    print("\n=== Step 3: GMRES+GPU solve (advanced) ===")
+    # Step 3: GMRES+GPU solve
+    print(f"\n=== Step 3: GMRES+GPU solve (solver_mode={solver_mode}) ===")
     uin, uin_dn = get_uin_and_dn_3D(
         float(kappa),
         jnp.asarray(bdry_pts_nf),
@@ -446,23 +447,62 @@ def run_hf_solve(
         jnp.asarray(source_dirs),
     )
     t0 = time.perf_counter()
-    imp, uscat_b, uscat_dn_b, info = solve_bie_gpu_advanced(
-        T_DtN_gpu,
-        bdry_pts_nf,
-        normals_nf,
-        wts_nf,
-        float(kappa),
-        float(kappa),
-        np.asarray(uin),
-        np.asarray(uin_dn),
-        nf,
-        tol=gmres_tol,
-        maxiter=200,
-        restart=50,
-        matrix_free=True,
-        use_preconditioner=True,
-        block_rhs=True,
-    )
+    if solver_mode == "dense_block":
+        # Dense matrices + block GMRES + preconditioner
+        imp, uscat_b, uscat_dn_b, info = solve_bie_gpu_advanced(
+            T_DtN_gpu,
+            bdry_pts_nf,
+            normals_nf,
+            wts_nf,
+            float(kappa),
+            float(kappa),
+            np.asarray(uin),
+            np.asarray(uin_dn),
+            nf,
+            tol=gmres_tol,
+            maxiter=200,
+            restart=50,
+            matrix_free=False,
+            use_preconditioner=True,
+            block_rhs=True,
+        )
+    elif solver_mode == "matfree":
+        # Matrix-free + sequential + preconditioner
+        imp, uscat_b, uscat_dn_b, info = solve_bie_gpu_advanced(
+            T_DtN_gpu,
+            bdry_pts_nf,
+            normals_nf,
+            wts_nf,
+            float(kappa),
+            float(kappa),
+            np.asarray(uin),
+            np.asarray(uin_dn),
+            nf,
+            tol=gmres_tol,
+            maxiter=200,
+            restart=50,
+            matrix_free=True,
+            use_preconditioner=True,
+            block_rhs=False,
+        )
+    else:
+        # Default: dense sequential (baseline, same as solve_bie_gmres_gpu)
+        from wave_scattering_utils_3D import solve_bie_gmres_gpu
+
+        imp, uscat_b, uscat_dn_b, info = solve_bie_gmres_gpu(
+            T_DtN_gpu,
+            bdry_pts_nf,
+            normals_nf,
+            wts_nf,
+            float(kappa),
+            float(kappa),
+            np.asarray(uin),
+            np.asarray(uin_dn),
+            nf,
+            tol=gmres_tol,
+            maxiter=200,
+            restart=50,
+        )
     dt_gmres = time.perf_counter() - t0
     print(f"  GMRES+GPU: {dt_gmres:.2f}s")
     print(f"  Converged: {info['converged']}")
@@ -499,6 +539,7 @@ def main(
     a: float = 0.055,
     q: int = 8,
     n_src: int = 4,
+    solver_mode: str = "dense_block",
 ):
     result = run_hf_solve.remote(
         mode=mode,
@@ -506,5 +547,6 @@ def main(
         a=a,
         q=q,
         n_src=n_src,
+        solver_mode=solver_mode,
     )
     print(f"\nResult: {result}")
