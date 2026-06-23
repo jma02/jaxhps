@@ -759,6 +759,8 @@ def solve_bie_gpu_advanced(
     Returns ``(imp, uscat_b, uscat_dn_b, info)`` matching the dense solver.
     """
 
+    from jax.experimental import sparse as jsparse
+
     n = bdry_pts.shape[0]
     t0 = time.perf_counter()
 
@@ -767,12 +769,12 @@ def solve_bie_gpu_advanced(
     w = jnp.asarray(wts)
     T = jnp.asarray(T_DtN)
 
-    # Near-field corrections as dense GPU arrays (sparse, ~14% fill at L=3)
-    S_corr = jnp.asarray(nf_corr["S_corr"].toarray())
-    D_corr = jnp.asarray(nf_corr["D_corr"].toarray())
-
     if matrix_free:
         # ---- Matrix-free matvecs via vmap ----
+        # NF corrections as JAX sparse (BCOO): O(nnz) memory, not O(n^2).
+        S_corr_sp = jsparse.BCOO.from_scipy_sparse(nf_corr["S_corr"].tocsc())
+        D_corr_sp = jsparse.BCOO.from_scipy_sparse(nf_corr["D_corr"].tocsc())
+
         @jax.jit
         def _S_matvec(v):
             """Single-layer matvec: [Sv]_i = sum_j G(x_i,x_j) w_j v_j + C_S v."""
@@ -785,7 +787,7 @@ def solve_bie_gpu_advanced(
                 G = jnp.where(r > 0, G, 0j)
                 return jnp.dot(G * w, v)
 
-            return jax.vmap(row_i)(bp) + S_corr @ v
+            return jax.vmap(row_i)(bp) + S_corr_sp @ v
 
         @jax.jit
         def _D_matvec(v):
@@ -803,12 +805,14 @@ def solve_bie_gpu_advanced(
                 dG = jnp.where(r > 0, dG, 0j)
                 return jnp.dot(dG * w, v)
 
-            return jax.vmap(row_i)(bp) + D_corr @ v
+            return jax.vmap(row_i)(bp) + D_corr_sp @ v
 
         dt_build = time.perf_counter() - t0
-        mem_gb = (S_corr.nbytes + D_corr.nbytes + T.nbytes) / 1e9
+        s_mem = S_corr_sp.data.nbytes + S_corr_sp.indices.nbytes
+        d_mem = D_corr_sp.data.nbytes + D_corr_sp.indices.nbytes
+        mem_gb = (s_mem + d_mem + T.nbytes) / 1e9
         print(f"  Matrix-free setup: {dt_build:.2f}s")
-        print(f"  NF corrections + T memory: {mem_gb:.2f} GB")
+        print(f"  NF corrections (sparse) + T memory: {mem_gb:.2f} GB")
 
         def _matvec(x):
             return 0.5 * x - _D_matvec(x) + _S_matvec(T @ x)
@@ -818,6 +822,8 @@ def solve_bie_gpu_advanced(
 
     else:
         # Dense matrix path (same as solve_bie_gmres_gpu)
+        S_corr_dense = jnp.asarray(nf_corr["S_corr"].toarray())
+        D_corr_dense = jnp.asarray(nf_corr["D_corr"].toarray())
         chunk = min(2048, n)
         S_blocks, D_blocks = [], []
         for i0 in range(0, n, chunk):
@@ -835,9 +841,9 @@ def solve_bie_gpu_advanced(
             dG = jnp.where(r > 0, dG, 0j)
             D_blocks.append(dG * w[None, :])
             del diff, r2, r, safe_r, G, nd, dG
-        K_S = jnp.concatenate(S_blocks, axis=0) + S_corr
-        K_D = jnp.concatenate(D_blocks, axis=0) + D_corr
-        del S_blocks, D_blocks, S_corr, D_corr
+        K_S = jnp.concatenate(S_blocks, axis=0) + S_corr_dense
+        K_D = jnp.concatenate(D_blocks, axis=0) + D_corr_dense
+        del S_blocks, D_blocks, S_corr_dense, D_corr_dense
         jax.block_until_ready(K_S)
         jax.block_until_ready(K_D)
         dt_build = time.perf_counter() - t0
