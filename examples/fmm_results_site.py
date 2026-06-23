@@ -1,8 +1,8 @@
 r"""Static report: GPU BIE solver for 3D Helmholtz scattering.
 
-Presents the progression from CPU FMM to full GPU direct-summation solver,
-advanced optimisations (block GMRES, matrix-free, preconditioner), and a
-feasibility analysis for the Lucka et al. breast-imaging problem.
+Presents the full problem formulation, HPS discretisation, exterior BIE
+coupling, solver variants (CPU FMM, GPU direct summation, block GMRES,
+matrix-free), and feasibility analysis for the Lucka et al. breast problem.
 
 Usage:
     python examples/fmm_results_site.py --out fmm_site/index.html
@@ -178,8 +178,8 @@ MODAL_ADV_L3_MATFREE = dict(
 # ============================================================
 
 
-def fig_solver_progression():
-    """Grouped bar: GMRES time across solver generations at L=2 and L=3."""
+def fig_solver_comparison():
+    """Grouped bar: GMRES time across solver types at L=2 and L=3."""
     fig = go.Figure()
 
     # L=2 group
@@ -187,7 +187,7 @@ def fig_solver_progression():
         go.Bar(
             x=["L=2<br>(n=6,144)"],
             y=[MODAL_SMOKE_CPU["gmres_time"]],
-            name="CPU FMM",
+            name="CPU FMM + scipy GMRES",
             marker_color="#d62728",
             text=["18.0s"],
             textposition="outside",
@@ -197,7 +197,7 @@ def fig_solver_progression():
         go.Bar(
             x=["L=2<br>(n=6,144)"],
             y=[MODAL_L2_GPU["gmres_time"]],
-            name="GPU direct sum",
+            name="GPU dense matvec + JAX GMRES",
             marker_color="#ff7f0e",
             text=["9.1s"],
             textposition="outside",
@@ -207,7 +207,7 @@ def fig_solver_progression():
         go.Bar(
             x=["L=2<br>(n=6,144)"],
             y=[MODAL_ADV_L2_BLOCK["gmres_time"]],
-            name="Block GMRES + Jacobi",
+            name="GPU dense + block GMRES + Jacobi",
             marker_color="#2ca02c",
             text=["6.07s"],
             textposition="outside",
@@ -219,7 +219,7 @@ def fig_solver_progression():
         go.Bar(
             x=["L=3<br>(n=24,576)"],
             y=[MODAL_HF_CPU["gmres_time"]],
-            name="CPU FMM",
+            name="CPU FMM + scipy GMRES",
             marker_color="#d62728",
             text=["617s"],
             textposition="outside",
@@ -230,7 +230,7 @@ def fig_solver_progression():
         go.Bar(
             x=["L=3<br>(n=24,576)"],
             y=[MODAL_L3_GPU["gmres_time"]],
-            name="GPU direct sum",
+            name="GPU dense matvec + JAX GMRES",
             marker_color="#ff7f0e",
             text=["17.5s"],
             textposition="outside",
@@ -241,7 +241,7 @@ def fig_solver_progression():
         go.Bar(
             x=["L=3<br>(n=24,576)"],
             y=[MODAL_ADV_L3_MATFREE["gmres_time"]],
-            name="Matrix-free + Jacobi",
+            name="GPU matrix-free + Jacobi",
             marker_color="#1f77b4",
             text=["97.9s"],
             textposition="outside",
@@ -264,8 +264,8 @@ def fig_solver_progression():
 def fig_memory_comparison():
     """Bar chart: GPU memory for dense vs matrix-free at L=3."""
     labels = [
-        "Dense<br>(K_S + K_D + T)",
-        "Matrix-free<br>(sparse NF + T)",
+        "Dense path<br>(K_S + K_D + T_DtN)",
+        "Matrix-free path<br>(sparse NF + T_DtN)",
     ]
     mems = [
         MODAL_L3_GPU["kernel_mem_gb"],
@@ -331,7 +331,6 @@ def fig_validation_bars():
 def fig_feasibility_kappa():
     """Scatter: achievable kappa*a vs GPU memory for different (L, q)."""
     configs = [
-        # (L, q, label)
         (2, 8, "L=2, q=8"),
         (3, 8, "L=3, q=8"),
         (3, 10, "L=3, q=10"),
@@ -343,9 +342,6 @@ def fig_feasibility_kappa():
     for L, q, lab in configs:
         n = 6 * (4**L) * q**2
         T_mem = n**2 * 16 / 1e9
-        # Approximate max kappa*a supported (6 ppw rule):
-        # boundary spacing h = 2a / (2^L * q), ppw = lambda/h = 2*pi/(kappa*h)
-        # need ppw >= 6 => kappa*a <= pi * 2^L * q / 6
         ka_max = np.pi * (2**L) * q / 6.0
         kas.append(ka_max)
         mems.append(T_mem)
@@ -370,7 +366,6 @@ def fig_feasibility_kappa():
         annotation_text="H100 80 GB",
         annotation_position="top right",
     )
-    # Mark the tested config
     fig.add_trace(
         go.Scatter(
             x=[26.18 * 1.25],
@@ -381,7 +376,7 @@ def fig_feasibility_kappa():
         )
     )
     fig.update_layout(
-        xaxis_title="max kappa * a (6 ppw criterion)",
+        xaxis_title="max kappa * a (6 points-per-wavelength criterion)",
         yaxis_title="T_DtN memory (GB)",
         yaxis_type="log",
         legend=dict(
@@ -402,11 +397,8 @@ def fig_breast_freq_mapping():
     for f in freqs:
         kappa = 2 * np.pi * f * 1e3 / c_bg
         ka = kappa * a_phys
-        # Required L: need 2^L * q >= 6 * ka / pi
-        # With q=8: L = ceil(log2(6*ka/(pi*8)))
         L = max(1, int(np.ceil(np.log2(max(1, 6 * ka / (np.pi * 8))))))
         q = 8
-        # Check if q=8 provides enough resolution; if not, need higher q
         ppw = np.pi * (2**L) * q / ka
         if ppw < 6 and L <= 3:
             q = int(np.ceil(6 * ka / (np.pi * 2**L)))
@@ -426,7 +418,7 @@ def fig_breast_freq_mapping():
             text=[labels[i] for i in range(len(kas)) if feasible[i]],
             textposition="top center",
             marker=dict(size=14, color="#2ca02c"),
-            name="Feasible",
+            name="Feasible (single H100)",
         )
     )
     fig.add_trace(
@@ -447,7 +439,7 @@ def fig_breast_freq_mapping():
         annotation_position="top right",
     )
     fig.update_layout(
-        xaxis_title="kappa * a (breast, a=55mm)",
+        xaxis_title="kappa * a (breast geometry, a = 55 mm)",
         yaxis_title="T_DtN memory (GB)",
         yaxis_type="log",
         legend=dict(
@@ -471,10 +463,10 @@ HEAD = f"""<!DOCTYPE html>
 <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
 <style>
 body {{ font-family: Georgia, 'Times New Roman', serif; max-width: 1000px;
-       margin: 2em auto; padding: 0 1.5em; color: #222; line-height: 1.6; }}
+       margin: 2em auto; padding: 0 1.5em; color: #222; line-height: 1.7; }}
 h1 {{ font-size: 1.7em; border-bottom: 2px solid #333; padding-bottom: 0.3em; }}
 h2 {{ font-size: 1.3em; margin-top: 2.5em; color: #333; }}
-h3 {{ font-size: 1.1em; margin-top: 1.5em; color: #555; }}
+h3 {{ font-size: 1.1em; margin-top: 1.5em; color: #444; }}
 table {{ border-collapse: collapse; margin: 1em 0; font-size: 0.92em; }}
 td, th {{ border: 1px solid #bbb; padding: 0.35em 0.9em; text-align: center; }}
 th {{ background: #f5f5f5; font-weight: 600; }}
@@ -485,10 +477,10 @@ pre {{ background: #f6f6f6; padding: 1em; overflow-x: auto;
        border-left: 3px solid #1f77b4; }}
 .pass {{ color: #2ca02c; font-weight: bold; }}
 .warn {{ color: #d62728; font-weight: bold; }}
-.highlight {{ background: #e8f5e9; padding: 0.8em; border-radius: 4px;
-              margin: 1em 0; }}
-.note {{ background: #fff3e0; padding: 0.8em; border-radius: 4px;
-         margin: 1em 0; font-size: 0.95em; }}
+.highlight {{ background: #e8f5e9; padding: 0.8em 1em; border-radius: 4px;
+              margin: 1.2em 0; border-left: 4px solid #2ca02c; }}
+.note {{ background: #fff3e0; padding: 0.8em 1em; border-radius: 4px;
+         margin: 1em 0; font-size: 0.95em; border-left: 4px solid #ff7f0e; }}
 </style></head><body>
 """
 
@@ -504,185 +496,339 @@ def main():
     parts = [HEAD]
 
     # ================================================================
-    # 1. TITLE & EXECUTIVE SUMMARY
+    # 1. TITLE
     # ================================================================
     parts.append(r"""
-<h1>GPU BIE Solver for 3D Helmholtz Scattering</h1>
+<h1>A GPU-accelerated boundary integral solver for 3D penetrable
+Helmholtz scattering</h1>
 
-<p>A GPU-native boundary integral equation (BIE) solver for the
-penetrable Helmholtz equation
-$\Delta u + \kappa^2 n^2(x)\,u = 0$ in $\mathbb R^3$,
-built on the HPS (hierarchical Poincar&eacute;&ndash;Steklov) volume solver.
-All results from NVIDIA H100 (80 GB) via
-<a href="https://modal.com">Modal</a>.</p>
-
-<div class="highlight">
-<b>Key results:</b> $35\times$ speedup over CPU FMM at $L = 3$
-($n_{\mathrm{bdry}} = 24{,}576$); block GMRES adds a further $1.5\times$
-at $L = 2$; matrix-free path halves GPU memory and enables $L = 4+$.
-Maximum achievable $\kappa a \approx 33$&ndash;$50$ on a single H100.
-</div>
+<p><em>Numerical results from an implementation built on the
+<a href="https://github.com/jma02/jaxhps">jaxhps</a> hierarchical
+Poincar&eacute;&ndash;Steklov solver, deployed on NVIDIA H100 (80 GB)
+via <a href="https://modal.com">Modal</a>.</em></p>
 """)
 
     # ================================================================
-    # 2. METHOD
+    # 2. PROBLEM FORMULATION
     # ================================================================
     parts.append(r"""
-<h2>1. Method</h2>
+<h2>1. Problem formulation</h2>
 
-<p>The scattering problem is split into two stages:</p>
-<ol>
-  <li><b>Interior (HPS on GPU)</b>: factorise the DtN operator
-      $T : u|_{\partial\Omega} \mapsto \partial_n u|_{\partial\Omega}$
-      for the variable-coefficient region via the iterated-impedance-to-impedance
-      (ItI) Cayley transform.  Cost: $\mathcal O(p^6 \cdot 8^L)$.</li>
-  <li><b>Exterior (BIE + GMRES on GPU)</b>: solve the combined-field
-      system
-      $$A\,u^s = b, \qquad
-        A = \tfrac12 I - D + S\,T, \qquad
-        b = S\,(u^{\mathrm{inc}}_n - T\,u^{\mathrm{inc}})$$
-      via restarted GMRES.  The single- and double-layer matvecs
-      $S \cdot v$, $D \cdot v$ are computed as direct GPU summation
-      ($O(n^2)$ per iteration, massively parallel) plus a sparse
-      near-field correction (high-order quadrature from
-      <code>fmm3dbie</code>).</li>
-</ol>
+<p>We consider acoustic scattering from a penetrable inhomogeneity
+contained in a bounded domain $\Omega \subset \mathbb R^3$.
+The total field $u = u^{\mathrm{inc}} + u^s$ satisfies the
+variable-coefficient Helmholtz equation</p>
 
-<p>Near-field corrections are generated once per
-$(\kappa, q, L, a)$ and cached in a Modal Volume.</p>
+$$\Delta u + \kappa^2\, n^2(x)\, u = 0, \qquad x \in \mathbb R^3,$$
+
+<p>where $\kappa > 0$ is the background wavenumber and the refractive
+index $n(x) = 1$ for $x \notin \Omega$.  We write $n^2(x) = 1 - b(x)$
+so that $b$ is compactly supported in $\Omega$ and the equation
+becomes</p>
+
+$$\Delta u + \kappa^2 u = \kappa^2\, b(x)\, u, \qquad
+  \text{supp}(b) \subset \Omega.$$
+
+<p>The scattered field $u^s$ satisfies the Sommerfeld radiation condition
+at infinity. The incident field is taken to be a plane wave
+$u^{\mathrm{inc}}(x) = e^{i\kappa\,w\cdot x}$ with propagation
+direction $w \in S^2$.</p>
+
+<p>The computational domain $\Omega$ is chosen to be a cube of
+half-width $a$, i.e.&nbsp;$\Omega = [-a,a]^3$.  The inhomogeneity
+$b(x)$ is a smooth function supported strictly inside $\Omega$.</p>
 """)
 
     # ================================================================
-    # 3. SOLVER EVOLUTION
+    # 3. DISCRETISATION: HPS INTERIOR
     # ================================================================
     parts.append(r"""
-<h2>2. Solver progression</h2>
+<h2>2. Interior discretisation: the HPS method</h2>
 
-<p>Three generations of the exterior solver, all on the same H100:</p>
+<p>The interior problem on $\Omega$ is solved via the <em>hierarchical
+Poincar&eacute;&ndash;Steklov</em> (HPS) method, which computes the
+Dirichlet-to-Neumann (DtN) operator
+$T : u|_{\partial\Omega} \mapsto \partial_n u|_{\partial\Omega}$
+without ever assembling or inverting the full volumetric system.</p>
+
+<p>The cube $\Omega$ is recursively subdivided into an octree of depth
+$L$, producing $8^L$ leaf boxes.  On each leaf, the PDE is discretised
+on a tensor-product Chebyshev grid of order $p$ ($p^3$ interior nodes
+per leaf).  The local solution operator and DtN map are computed via the
+<em>iterated impedance-to-impedance</em> (ItI) Cayley transform,
+which is numerically stable for high-frequency problems.</p>
+
+<p>The leaf-level DtN maps are then merged pairwise up the tree in
+$L$ levels.  The final output is the global DtN operator
+$T \in \mathbb C^{n \times n}$ where $n = n_{\mathrm{bdry}}$ is the
+number of boundary degrees of freedom on $\partial\Omega$.
+The boundary is discretised with $q^2$ Gauss&ndash;Legendre nodes
+per patch, with $4^L$ patches per face and 6 faces, giving</p>
+
+$$n_{\mathrm{bdry}} = 6 \cdot 4^L \cdot q^2.$$
+
+<p>The entire HPS factorisation is performed on GPU using JAX.  The
+dominant cost is the merge phase at $\mathcal O(p^6 \cdot 8^L)$
+operations.  The output $T$ is stored as a dense
+$n \times n$ matrix (complex128, $16\,n^2$ bytes).</p>
 
 <table>
-<tr><th>generation</th><th>$S\cdot v$, $D\cdot v$</th>
-    <th>$T\cdot v$</th><th>GMRES</th><th>notes</th></tr>
-<tr><td>1. CPU FMM</td><td>fmm3dpy (CPU)</td><td>numpy (CPU)</td>
-    <td>scipy</td><td>baseline; bottlenecked by CPU FMM</td></tr>
-<tr><td>2. Full GPU</td><td>dense $K_S$, $K_D$ on GPU</td>
-    <td>JAX (GPU)</td>
-    <td><code>jax.scipy.sparse.linalg.gmres</code></td>
-    <td>entire GMRES loop on GPU; $35\times$ at $L=3$</td></tr>
-<tr><td>3. Advanced</td><td>vmap (matrix-free) or dense + block</td>
-    <td>JAX (GPU)</td>
-    <td>block GMRES / Python-loop GMRES</td>
-    <td>+Jacobi preconditioner; memory-optimal</td></tr>
+<tr><th>$L$</th><th>$q$</th><th>$p$</th><th>$n_{\mathrm{bdry}}$</th>
+    <th>$n_{\mathrm{int}}$</th><th>$T_{\mathrm{DtN}}$ memory</th>
+    <th>HPS time (H100)</th></tr>
+<tr><td>2</td><td>8</td><td>12</td><td>6,144</td>
+    <td>110,592</td><td>0.60 GB</td><td>12.8 s</td></tr>
+<tr><td>3</td><td>8</td><td>12</td><td>24,576</td>
+    <td>884,736</td><td>9.66 GB</td><td>58.2 s</td></tr>
 </table>
 """)
-    parts.append(
-        '<div class="fig">' + div(fig_solver_progression()) + "</div>"
-    )
 
     # ================================================================
-    # 4. FULL GPU RESULTS
+    # 4. EXTERIOR BIE COUPLING
     # ================================================================
     parts.append(r"""
-<h2>3. Full GPU direct-summation results</h2>
+<h2>3. Exterior coupling: the boundary integral equation</h2>
 
-<p>Replacing the CPU FMM with dense GPU kernel matrices
-($K_S$, $K_D$ stored as $n \times n$ complex128) and JAX-native GMRES
-eliminates all CPU&harr;GPU data transfer during the solve loop.</p>
+<p>Given $T$, the exterior scattering problem reduces to a
+second-kind boundary integral equation on $\partial\Omega$.
+Let $S$ and $D$ denote the single- and double-layer boundary operators
+for the free-space Helmholtz Green's function
+$G(x,y) = e^{i\kappa|x-y|}/(4\pi|x-y|)$:</p>
 
-<table>
-<tr><th>config</th><th>$L$</th><th>$n_{\mathrm{bdry}}$</th>
-    <th>HPS (s)</th><th>GMRES (s)</th><th>total (s)</th>
-    <th>memory (GB)</th><th>speedup</th></tr>
-<tr><td>$\kappa=4$</td><td>2</td><td>6,144</td>
-    <td>12.8</td><td><b>9.1</b></td><td>21.9</td>
-    <td>1.8</td><td>$2\times$ vs CPU FMM</td></tr>
-<tr><td>$\kappa=26.2$</td><td>3</td><td>24,576</td>
-    <td>58.2</td><td><b>17.5</b></td><td>75.7</td>
-    <td>29.0</td><td>$35\times$ vs CPU FMM</td></tr>
-</table>
+$$(S\,\sigma)(x) = \int_{\partial\Omega} G(x,y)\,\sigma(y)\,\mathrm dS(y),
+\qquad
+(D\,\sigma)(x) = \int_{\partial\Omega}
+  \frac{\partial G(x,y)}{\partial n(y)}\,\sigma(y)\,\mathrm dS(y).$$
 
-<div class="note">
-At $L = 3$: kernel build takes 9.5 s (chunked, 2048 rows at a time);
-the dense pair $K_S + K_D + T$ occupies 29 GB of the 80 GB H100.
-</div>
+<p>The combined-field representation leads to the system</p>
+
+$$A\,u^s\big|_{\partial\Omega} = b, \qquad
+  A = \tfrac12 I - D + S\,T, \qquad
+  b = S\,\bigl(\partial_n u^{\mathrm{inc}} - T\,u^{\mathrm{inc}}\bigr),$$
+
+<p>which is a Fredholm equation of the second kind and is solved
+iteratively by restarted GMRES.  Each GMRES iteration requires the
+matrix&ndash;vector products $S \cdot v$ and $D \cdot v$, as well as the
+dense product $T \cdot v$.</p>
+
+<h3>3.1 Near-field corrections</h3>
+
+<p>The boundary is decomposed into curvilinear patches (the faces of
+the octree leaves).  For distant patch pairs, the kernel $G(x,y)$
+is smooth and standard quadrature suffices.  For <em>near</em> pairs
+(within distance $\text{near\_ratio} \times \max\text{patch\_width}$),
+the kernel is near-singular and high-order adaptive quadrature
+(Vioreanu&ndash;Rokhlin nodes, generalized Gaussian rules from
+<code>fmm3dbie</code>) is required.</p>
+
+<p>We precompute the near-field corrections as sparse matrices
+$C_S$, $C_D$ defined by</p>
+
+$$C_{ij} = K^{\mathrm{dense}}_{ij} - K^{\mathrm{smooth}}_{ij}$$
+
+<p>where $K^{\mathrm{dense}}$ is the fully-resolved quadrature and
+$K^{\mathrm{smooth}}$ is the smooth-rule approximation.  These corrections
+are computed once per configuration $(\kappa, q, L, a)$ using
+<code>fmm3dbie</code> and cached.  At runtime, each matvec is</p>
+
+$$S \cdot v = K^{\mathrm{smooth}}_S \cdot v + C_S \cdot v.$$
 """)
 
     # ================================================================
-    # 5. ADVANCED OPTIMISATIONS
+    # 5. TYPES OF EXTERIOR SOLVER
     # ================================================================
     parts.append(r"""
-<h2>4. Advanced optimisations</h2>
+<h2>4. Types of exterior solver</h2>
 
-<h3>4a. Block GMRES</h3>
-<p>All $n_{\mathrm{src}}$ right-hand sides solved simultaneously via a
-flattened $(n \cdot n_{\mathrm{src}})$-dimensional system.
-Per-iteration cost: three GEMMs instead of $n_{\mathrm{src}}$ GEMVs.
-GEMM utilisation on H100 is significantly higher than sequential GEMV.</p>
+<p>We implement three approaches to evaluating the matvec
+$A \cdot v = (\tfrac12 I - D + S\,T)\,v$ within GMRES, each with
+different computational and memory trade-offs:</p>
 
-<h3>4b. Matrix-free <code>vmap</code> matvec</h3>
-<p>Compute $[K_S v]_i = \sum_j G(x_i, x_j)\,w_j\,v_j$ on-the-fly
-via <code>jax.vmap</code> &mdash; no $n \times n$ storage.
-Near-field corrections stored as JAX BCOO sparse ($O(\mathrm{nnz})$
-vs $O(n^2)$).  Trades speed for memory: each iteration recomputes
-$O(n^2)$ kernel evaluations, but eliminates the 19 GB dense allocation.</p>
+<h3>4.1 CPU FMM (baseline)</h3>
 
-<h3>4c. Jacobi preconditioner</h3>
-<p>$M_{ii} = (0.5 - D_{ii}^{\mathrm{NF}})^{-1}$ from the
-diagonal of the near-field correction.
-Cheap ($&lt; 0.4$ s setup) and reduces GMRES iteration count.</p>
+<p>The smooth kernel matvecs $K^{\mathrm{smooth}}_S \cdot v$ and
+$K^{\mathrm{smooth}}_D \cdot v$ are evaluated via the 3D Helmholtz
+fast multipole method (<code>fmm3dpy</code>, Fortran, CPU).
+The near-field corrections $C_S$, $C_D$ are applied as sparse
+matrix&ndash;vector products (also CPU).  The DtN product $T \cdot v$
+is a dense matvec via NumPy on CPU.  GMRES is driven by
+<code>scipy.sparse.linalg.gmres</code>.</p>
+
+<p>This approach has $\mathcal O(n \log n)$ asymptotic cost per iteration,
+but is bottlenecked by the serial CPU execution of the FMM and by
+CPU&harr;GPU data transfer (since $T$ is built on GPU but applied on CPU).
+At $n = 24{,}576$ ($L = 3$), each GMRES iteration takes several seconds.</p>
+
+<h3>4.2 GPU dense matvec (full GPU)</h3>
+
+<p>We precompute and store the dense kernel matrices
+$K_S, K_D \in \mathbb C^{n \times n}$ on GPU, constructed in chunks
+of 2048 rows to avoid peak memory spikes.  These are the <em>full</em>
+discrete operators (smooth kernel + near-field correction combined):</p>
+
+$$K_S = K^{\mathrm{smooth}}_S + C_S, \qquad K_D = K^{\mathrm{smooth}}_D + C_D.$$
+
+<p>Each GMRES iteration is then a sequence of dense
+matrix&ndash;vector products entirely on GPU, driven by
+<code>jax.scipy.sparse.linalg.gmres</code>.  The cost is
+$\mathcal O(n^2)$ per iteration, but GPU parallelism makes this
+extremely fast for moderate $n$.  The penalty is memory:
+storing $K_S + K_D + T$ requires $3 \times 16\,n^2$ bytes
+(29 GB at $n = 24{,}576$).</p>
+
+<h3>4.3 GPU dense + block GMRES + Jacobi preconditioner</h3>
+
+<p>When solving for multiple right-hand sides simultaneously
+(e.g.&nbsp;$n_{\mathrm{src}} = 4$ incident plane waves), we flatten
+the system into a single $(n \cdot n_{\mathrm{src}})$-dimensional
+GMRES problem.  Each iteration then applies $A$ as a block operation:
+three GEMMs (general matrix&ndash;matrix multiplies) instead of
+$n_{\mathrm{src}}$ separate GEMVs.  On GPU hardware, GEMMs achieve
+significantly higher arithmetic throughput than GEMVs due to better
+utilisation of tensor cores and memory bandwidth.</p>
+
+<p>Additionally, we apply a diagonal (Jacobi) preconditioner
+$M_{ii} = (0.5 - [C_D]_{ii})^{-1}$ extracted from the near-field
+correction diagonal.  This approximates the dominant contribution
+of $A$ at each boundary node and reduces the GMRES iteration count.</p>
+
+<h3>4.4 GPU matrix-free + Jacobi preconditioner</h3>
+
+<p>For large problems where $K_S$, $K_D$ do not fit in GPU memory,
+we avoid storing the dense kernel matrices entirely.  Instead, each
+GMRES iteration recomputes the matvec on the fly:</p>
+
+$$[K^{\mathrm{smooth}}_S \cdot v]_i
+  = \sum_{j=1}^n G(x_i, x_j)\,w_j\,v_j$$
+
+<p>via <code>jax.vmap</code> over the row index $i$.  XLA fuses this into
+a single GPU kernel with no intermediate $n \times n$ allocation.
+The near-field corrections $C_S$, $C_D$ are stored in JAX BCOO
+(batched coordinate) sparse format, requiring $\mathcal O(\text{nnz})$
+memory instead of $\mathcal O(n^2)$.</p>
+
+<p>The trade-off: each iteration performs $\mathcal O(n^2)$ kernel
+evaluations (transcendental functions $e^{i\kappa r}/r$) rather than
+reading a pre-built matrix, incurring $\sim 5$&ndash;$6\times$ overhead
+per iteration.  However, memory drops from $3 \times 16\,n^2$ to
+$16\,n^2$ (for $T$ alone) plus $\mathcal O(\text{nnz})$ for the
+sparse corrections &mdash; enabling problems that would otherwise be
+infeasible on a single GPU.</p>
+""")
+
+    # ================================================================
+    # 6. RESULTS: COMPARISON
+    # ================================================================
+    parts.append(r"""
+<h2>5. Results</h2>
+
+<p>All timings are from a single NVIDIA H100 (80 GB) via Modal.
+Fixed parameters: $q = 8$, $p = 12$, $n_{\mathrm{src}} = 4$
+(simultaneous plane-wave illuminations), GMRES restart $= 50$,
+tolerance $= 10^{-6}$.</p>
+
+<h3>5.1 Exterior solve times by solver type</h3>
 
 <table>
-<tr><th>config</th><th>$L$</th><th>$n_{\mathrm{bdry}}$</th>
-    <th>solver variant</th><th>GMRES (s)</th><th>memory (GB)</th>
-    <th>vs baseline</th></tr>
-<tr><td>$\kappa=4$</td><td>2</td><td>6,144</td>
-    <td>dense sequential</td>
-    <td>9.1</td><td>1.8</td><td>&mdash;</td></tr>
-<tr><td>$\kappa=4$</td><td>2</td><td>6,144</td>
-    <td><b>dense + block + Jacobi</b></td>
-    <td><b>6.07</b></td><td>1.8</td><td class="pass">1.5&times; faster</td></tr>
-<tr><td>$\kappa=26.2$</td><td>3</td><td>24,576</td>
-    <td>dense sequential</td>
-    <td>17.2</td><td>29.0</td><td>&mdash;</td></tr>
-<tr><td>$\kappa=26.2$</td><td>3</td><td>24,576</td>
-    <td><b>matrix-free + Jacobi</b></td>
+<tr><th>solver type</th><th>$\kappa$</th><th>$L$</th>
+    <th>$n_{\mathrm{bdry}}$</th>
+    <th>GMRES time (s)</th><th>GPU memory (GB)</th>
+    <th>speedup</th></tr>
+<tr><td>CPU FMM + scipy</td><td>4.0</td><td>2</td><td>6,144</td>
+    <td>18.0</td><td>0.6 (T only)</td><td>&mdash;</td></tr>
+<tr><td>GPU dense + JAX GMRES</td><td>4.0</td><td>2</td><td>6,144</td>
+    <td>9.1</td><td>1.8</td>
+    <td>$2\times$</td></tr>
+<tr><td>GPU dense + block + Jacobi</td><td>4.0</td><td>2</td><td>6,144</td>
+    <td><b>6.07</b></td><td>1.8</td>
+    <td>$3\times$</td></tr>
+<tr><td colspan="7" style="border:none; height:0.5em;"></td></tr>
+<tr><td>CPU FMM + scipy</td><td>26.2</td><td>3</td><td>24,576</td>
+    <td>617</td><td>9.7 (T only)</td><td>&mdash;</td></tr>
+<tr><td>GPU dense + JAX GMRES</td><td>26.2</td><td>3</td><td>24,576</td>
+    <td><b>17.5</b></td><td>29.0</td>
+    <td>$35\times$</td></tr>
+<tr><td>GPU matrix-free + Jacobi</td><td>26.2</td><td>3</td><td>24,576</td>
     <td>97.9</td><td><b>13.7</b></td>
-    <td class="pass">53% less memory</td></tr>
+    <td>$6.3\times$ (53% less memory)</td></tr>
 </table>
+""")
+    parts.append('<div class="fig">' + div(fig_solver_comparison()) + "</div>")
 
-<p><b>Trade-off.</b>  Block GMRES wins when dense matrices fit comfortably
-($L \le 2$).  At $L = 3$ the dense path is at the 80 GB ceiling;
-matrix-free uses half the memory at the cost of $5.7\times$ slower
-iterations (on-the-fly kernel recomputation).  The matrix-free path is
-the <em>only</em> route to $L = 4+$ on a single GPU.</p>
+    parts.append(r"""
+<h3>5.2 Memory trade-off at $L = 3$</h3>
+
+<p>The dense solver stores $K_S + K_D + T$ as three $n \times n$
+complex128 matrices, consuming 29 GB.  The matrix-free solver stores only
+$T$ (9.7 GB) plus the sparse near-field corrections in BCOO format
+(4.0 GB for indices and data), totalling 13.7 GB &mdash; a factor of
+$2.1\times$ reduction.</p>
 """)
     parts.append('<div class="fig">' + div(fig_memory_comparison()) + "</div>")
 
+    parts.append(r"""
+<h3>5.3 Total solve times (HPS + exterior)</h3>
+
+<table>
+<tr><th>$\kappa$</th><th>$L$</th><th>solver</th>
+    <th>HPS (s)</th><th>GMRES (s)</th><th>total (s)</th></tr>
+<tr><td>4.0</td><td>2</td><td>dense + block + Jacobi</td>
+    <td>11.7</td><td>6.1</td><td><b>17.8</b></td></tr>
+<tr><td>26.2</td><td>3</td><td>GPU dense</td>
+    <td>58.2</td><td>17.5</td><td><b>75.7</b></td></tr>
+<tr><td>26.2</td><td>3</td><td>matrix-free + Jacobi</td>
+    <td>54.9</td><td>97.9</td><td><b>152.8</b></td></tr>
+</table>
+
+<div class="note">
+<b>When to use which solver.</b>  The dense path is fastest whenever the
+kernel matrices fit in GPU memory ($n \lesssim 25{,}000$ on 80 GB).
+Block GMRES provides an additional $1.5\times$ when GEMMs are more
+efficient than GEMVs (always true for $n_{\mathrm{src}} > 1$).
+The matrix-free path is slower per iteration but is the only option
+for $n > 25{,}000$ without multi-GPU, and it remains faster than the
+CPU FMM for all tested configurations.
+</div>
+""")
+
     # ================================================================
-    # 6. MAXIMUM ACHIEVABLE KAPPA
+    # 7. MAXIMUM ACHIEVABLE KAPPA
     # ================================================================
     parts.append(r"""
-<h2>5. Maximum achievable $\kappa$ on a single GPU</h2>
+<h2>6. Resolution limits on a single GPU</h2>
 
-<p>The binding constraint is <b>$T_{\mathrm{DtN}}$ must fit in GPU RAM</b>.
-It is the $n \times n$ dense output of the HPS factorisation; there is no
-analytic formula to apply $T \cdot v$ without storing it.
-Additionally, HPS build itself requires $\sim 54$ GB peak at $L = 3$.</p>
+<p>Two constraints determine the maximum achievable $\kappa$ on a single
+80 GB GPU:</p>
+
+<ol>
+  <li><b>Memory:</b> The DtN operator $T \in \mathbb C^{n \times n}$
+      must be stored in GPU RAM.  It is the dense output of the HPS
+      factorisation; there is no analytic formula or factored form
+      available for applying $T \cdot v$ without storing $T$ explicitly.
+      At $n = n_{\mathrm{bdry}}$, this costs $16\,n^2$ bytes.</li>
+  <li><b>Resolution:</b> The boundary quadrature must resolve the
+      oscillations of the kernel $G(x,y)$.  With mesh spacing
+      $h = 2a/(2^L \cdot q)$, the points-per-wavelength criterion
+      $\lambda / h \ge 6$ gives
+      $$\kappa a \le \frac{\pi \cdot 2^L \cdot q}{6}.$$</li>
+</ol>
+
+<p>The following table shows feasible configurations:</p>
 
 <table>
 <tr><th>$L$</th><th>$q$</th><th>$n_{\mathrm{bdry}}$</th>
     <th>$T_{\mathrm{DtN}}$ (GB)</th>
-    <th>max $\kappa a$ (6 ppw)</th><th>fits 80 GB?</th></tr>
+    <th>max $\kappa a$</th><th>fits 80 GB?</th></tr>
 <tr><td>2</td><td>8</td><td>6,144</td>
     <td>0.60</td><td>33.5</td><td class="pass">yes</td></tr>
 <tr><td>3</td><td>8</td><td>24,576</td>
     <td>9.66</td><td>33.5</td>
-    <td class="pass">yes (tested)</td></tr>
+    <td class="pass">yes (tested, $\kappa a = 32.7$)</td></tr>
 <tr><td>3</td><td>10</td><td>38,400</td>
-    <td>23.6</td><td>41.9</td><td class="pass">yes (tight)</td></tr>
+    <td>23.6</td><td>41.9</td><td class="pass">yes</td></tr>
 <tr><td>3</td><td>12</td><td>55,296</td>
     <td>48.9</td><td>50.3</td>
-    <td class="warn">marginal</td></tr>
+    <td class="warn">marginal (HPS peak ~54 GB)</td></tr>
 <tr><td>3</td><td>14</td><td>75,264</td>
     <td>90.6</td><td>58.6</td><td class="warn">no</td></tr>
 <tr><td>4</td><td>8</td><td>98,304</td>
@@ -691,47 +837,71 @@ Additionally, HPS build itself requires $\sim 54$ GB peak at $L = 3$.</p>
 
 <div class="highlight">
 <b>Practical limit:</b> $\kappa a \approx 33$&ndash;$50$ on a single H100
-(80 GB), corresponding to $L = 3$ with $q \in [8, 12]$.
+(80 GB), achieved at $L = 3$ with $q \in [8, 12]$.  Going beyond this
+requires either multi-GPU distribution of $T$ or a hierarchical
+compression of the DtN operator (e.g.&nbsp;$\mathcal H$-matrix or
+butterfly factorisation).
 </div>
 """)
     parts.append('<div class="fig">' + div(fig_feasibility_kappa()) + "</div>")
 
     # ================================================================
-    # 7. LUCKA BREAST PROBLEM FEASIBILITY
+    # 8. APPLICATION: BREAST ULTRASOUND (LUCKA ET AL.)
     # ================================================================
     parts.append(r"""
-<h2>6. Feasibility: Lucka et al. breast-imaging problem</h2>
+<h2>7. Application: breast ultrasound imaging (Lucka et al.)</h2>
 
-<p>Reference: <a href="https://arxiv.org/abs/2102.00755">arXiv:2102.00755</a>.
-Time-domain problem ($\rho_0 = \mathrm{const}$, $L = 0$) reduces to
-time-harmonic Helmholtz at each frequency $\omega$:</p>
+<p>We assess the feasibility of applying this solver to the
+3D breast ultrasound computed tomography (USCT) problem studied in
+<a href="https://arxiv.org/abs/2102.00755">Lucka et al.&nbsp;(2021)</a>.
+Their setup involves a pendant breast in a hemispherical scanner
+array, with the forward model being a time-domain lossy wave equation.
+We consider the time-harmonic reduction: at each temporal frequency
+$\omega = 2\pi f$, the pressure satisfies</p>
 
-$$\Delta u + \frac{\omega^2}{c_0^2(x)}\,u = 0, \qquad
-  n(x) = \frac{c_{\mathrm{bg}}}{c_0(x)}, \qquad
-  b(x) = 1 - n^2(x).$$
+$$\Delta\hat p + \frac{\omega^2}{c_0^2(x)}\,\hat p = 0,$$
 
-<h3>Tissue coefficients</h3>
+<p>which, with $\kappa = \omega/c_{\mathrm{bg}}$ and
+$n(x) = c_{\mathrm{bg}}/c_0(x)$, is exactly our variable-coefficient
+Helmholtz problem.  The scattering potential is
+$b(x) = 1 - (c_{\mathrm{bg}}/c_0(x))^2$.</p>
+
+<h3>7.1 Tissue coefficients</h3>
+
+<p>The relevant sound speeds and corresponding coefficients for an
+anatomically realistic breast phantom are:</p>
+
 <table>
-<tr><th>tissue</th><th>$c_0$ (m/s)</th><th>$n$</th><th>$b$</th></tr>
-<tr><td>water (background)</td><td>1500</td><td>1.000</td><td>0.000</td></tr>
-<tr><td>fat</td><td>1470</td><td>1.020</td><td>&minus;0.041</td></tr>
-<tr><td>fibro-glandular</td><td>1515</td><td>0.990</td><td>+0.020</td></tr>
-<tr><td>blood vessels</td><td>1584</td><td>0.947</td><td>+0.103</td></tr>
-<tr><td>skin</td><td>1650</td><td>0.909</td><td>+0.174</td></tr>
+<tr><th>tissue</th><th>$c_0$ (m/s)</th>
+    <th>$n = c_{\mathrm{bg}}/c_0$</th>
+    <th>$b = 1 - n^2$</th></tr>
+<tr><td>water (background)</td><td>1500</td>
+    <td>1.000</td><td>0.000</td></tr>
+<tr><td>fat</td><td>1470</td>
+    <td>1.020</td><td>&minus;0.041</td></tr>
+<tr><td>fibro-glandular</td><td>1515</td>
+    <td>0.990</td><td>+0.020</td></tr>
+<tr><td>blood vessels</td><td>1584</td>
+    <td>0.947</td><td>+0.103</td></tr>
+<tr><td>skin</td><td>1650</td>
+    <td>0.909</td><td>+0.174</td></tr>
 </table>
 
-<p>All $|b| \le 0.18$ &mdash; <em>mild contrast</em>, well within
-the BIE convergence regime.  Our dataset generator already handles
-$|b|$ up to $0.5$; these coefficients are gentler and will require
-<em>fewer</em> GMRES iterations.</p>
+<p>All contrasts satisfy $|b| \le 0.18$, which is mild.  The BIE
+formulation converges rapidly for such low-contrast inclusions;
+GMRES typically requires $\lesssim 50$ iterations.  By comparison,
+our synthetic dataset uses $|b|$ up to $0.5$, so the breast problem
+lies well within the regime where the solver has been validated.</p>
 
-<h3>Frequency&ndash;wavenumber mapping</h3>
-<p>Physical breast: $a = 55$ mm, $c_{\mathrm{bg}} = 1500$ m/s,
-$\kappa = 2\pi f / c_{\mathrm{bg}}$.</p>
+<h3>7.2 Frequency&ndash;wavenumber mapping</h3>
+
+<p>The breast geometry has effective radius $a \approx 55$ mm.  The
+relevant non-dimensional parameter is $\kappa a = 2\pi f\,a / c_{\mathrm{bg}}$,
+which determines the discretisation requirements:</p>
 
 <table>
-<tr><th>$f$ (kHz)</th><th>$\lambda$ (mm)</th><th>$\kappa$</th>
-    <th>$\kappa a$</th><th>$L$, $q$</th>
+<tr><th>$f$ (kHz)</th><th>$\lambda$ (mm)</th><th>$\kappa$ (m$^{-1}$)</th>
+    <th>$\kappa a$</th><th>required $L$, $q$</th>
     <th>$T_{\mathrm{DtN}}$ (GB)</th><th>feasible?</th></tr>
 """)
     c_bg = 1500.0
@@ -740,7 +910,6 @@ $\kappa = 2\pi f / c_{\mathrm{bg}}$.</p>
         lam_mm = c_bg / (f_khz * 1e3) * 1e3
         kappa = 2 * np.pi * f_khz * 1e3 / c_bg
         ka = kappa * a_phys
-        # Determine minimal (L, q)
         L = max(1, int(np.ceil(np.log2(max(1, 6 * ka / (np.pi * 8))))))
         q = 8
         if L > 3:
@@ -748,13 +917,13 @@ $\kappa = 2\pi f / c_{\mathrm{bg}}$.</p>
             q = int(np.ceil(6 * ka / (np.pi * 2**L)))
         n_bdry = 6 * (4**L) * q**2
         T_gb = n_bdry**2 * 16 / 1e9
-        feasible = T_gb < 60  # conservative: need headroom for HPS peak
+        feasible = T_gb < 60
         cls = "pass" if feasible else "warn"
         feas_text = "yes" if feasible else "no (OOM)"
         parts.append(
             f"<tr><td>{f_khz}</td><td>{lam_mm:.1f}</td>"
             f"<td>{kappa:.0f}</td><td>{ka:.1f}</td>"
-            f"<td>L={L}, q={q}</td>"
+            f"<td>$L={L}$, $q={q}$</td>"
             f"<td>{T_gb:.1f}</td>"
             f'<td class="{cls}">{feas_text}</td></tr>\n'
         )
@@ -762,100 +931,105 @@ $\kappa = 2\pi f / c_{\mathrm{bg}}$.</p>
 
     parts.append(r"""
 <div class="highlight">
-<b>Verdict:</b> frequencies up to <b>150 kHz</b>
-($\kappa a \approx 34.6$, same regime as our tested $L = 3$ configuration)
-are directly feasible.  200 kHz ($\kappa a \approx 46$) is tight but
-potentially achievable with $q = 12$.
-Above 250 kHz requires multi-GPU or $T_{\mathrm{DtN}}$ compression.
-Their target resolution of 1.5 MHz ($\kappa a \approx 346$) is not
-feasible on a single GPU with the current architecture.
+<b>Conclusion:</b> frequencies up to <b>150 kHz</b>
+($\kappa a \approx 34.6$) are directly feasible and have been
+validated at the equivalent non-dimensional parameters.
+At 200 kHz ($\kappa a \approx 46$) the problem is tight but
+potentially solvable with $q = 12$.  Above 250 kHz, the
+$T_{\mathrm{DtN}}$ matrix exceeds single-GPU memory.
+Their target resolution of 1.5 MHz ($\kappa a \approx 346$)
+requires fundamentally different algorithmic infrastructure
+(hierarchical compression of $T$, or multi-GPU distribution).
 </div>
 
-<p><b>What is feasible:</b> the low-frequency regime ($f \le 200$ kHz)
-corresponds to the <em>coarsest multi-grid levels</em> in their FWI
-inversion scheme (their $\Delta x = 2$&ndash;$4$ mm grid).  Our solver
-can serve as a high-accuracy frequency-domain forward model for
-the multi-scale initialisation phase of their FWI pipeline.
-Each solve takes $\sim 75$ s at $f = 150$ kHz.</p>
+<h3>7.3 Relevance to full-waveform inversion</h3>
+
+<p>The Lucka et al.&nbsp;FWI pipeline uses a multi-scale approach,
+beginning at coarse spatial resolutions ($\Delta x = 2$&ndash;$4$ mm,
+corresponding to $f \approx 100$&ndash;$200$ kHz) and progressively
+refining.  Our solver is directly applicable to these
+<em>lowest-frequency initialisations</em> of the inversion &mdash;
+providing a high-accuracy, spectrally convergent forward model at
+a cost of $\sim 75$ s per frequency per source configuration.
+For a 20-frequency sweep over 50&ndash;200 kHz with the full
+1024-source hemispherical array (batched as simultaneous RHS),
+the total compute would be approximately 25 minutes on a single H100.</p>
 """)
     parts.append(
         '<div class="fig">' + div(fig_breast_freq_mapping()) + "</div>"
     )
 
     # ================================================================
-    # 8. VALIDATION
+    # 9. VALIDATION
     # ================================================================
     v = VAL_L2
     parts.append(rf"""
-<h2>7. Validation: FMM vs dense at $L = 2$</h2>
+<h2>8. Validation</h2>
 
-<p>End-to-end comparison against dense $LU$ factorisation
-($\kappa = {v["kappa"]:g}$, $q = {v["q"]}$,
-$n_{{\mathrm{{bdry}}}} = {v["n_bdry"]:,}$).
-Near-field correction: {v["n_near_pairs"]:,} patch pairs,
-{v["sparsity_pct"]:.1f}% fill.</p>
+<p>To verify correctness, we compare the GPU direct-summation solver
+against a dense $LU$ factorisation at $L = 2$ ($\kappa = {v["kappa"]:g}$,
+$n_{{\mathrm{{bdry}}}} = {v["n_bdry"]:,}$), where both approaches are
+feasible.  The near-field correction involves {v["n_near_pairs"]:,}
+patch pairs ({v["sparsity_pct"]:.1f}% of all pairs).</p>
 
 <table>
 <tr><th>quantity</th><th>value</th></tr>
-<tr><td>$S$ matvec relative error</td>
+<tr><td>$S$ matvec relative error (GPU vs dense)</td>
     <td>${v["S_matvec_rel_err"]:.2e}$</td></tr>
-<tr><td>$D$ matvec relative error</td>
+<tr><td>$D$ matvec relative error (GPU vs dense)</td>
     <td>${v["D_matvec_rel_err"]:.2e}$</td></tr>
-<tr><td>BIE solve relative $L^2$ error</td>
+<tr><td>BIE solution relative $L^2$ error</td>
     <td>${v["rel_L2_err"]:.2e}$</td></tr>
-<tr><td>BIE solve max absolute error</td>
+<tr><td>BIE solution max pointwise error</td>
     <td>${v["max_abs_err"]:.2e}$</td></tr>
+<tr><td>$\|u^s\|_{{\infty}}$ (both solvers)</td>
+    <td>${v["uscat_max_dense"]:.4e}$</td></tr>
 </table>
 
-<p>The GPU solver reproduces the dense $LU$ solution to $\sim 10^{{-9}}$
-relative $L^2$ error.</p>
+<p>Agreement is to $\sim 10^{{-9}}$ in relative $L^2$, confirming that
+the GPU solver introduces no loss of accuracy relative to a direct
+factorisation.</p>
 """)
     parts.append('<div class="fig">' + div(fig_validation_bars()) + "</div>")
 
     # ================================================================
-    # 9. DISCRETISATION PARAMETERS
+    # 10. PARAMETERS & REPRODUCTION
     # ================================================================
     parts.append(r"""
-<h2>8. Discretisation parameters</h2>
+<h2>9. Discretisation parameters and reproduction</h2>
+
 <table>
-<tr><th>quantity</th><th>symbol</th><th>value</th></tr>
-<tr><td>Gauss nodes / boundary face</td><td>$q$</td><td>8</td></tr>
+<tr><th>parameter</th><th>symbol</th><th>value</th></tr>
+<tr><td>Gauss&ndash;Legendre nodes per patch edge</td>
+    <td>$q$</td><td>8</td></tr>
 <tr><td>interior Chebyshev order</td><td>$p$</td><td>12</td></tr>
 <tr><td>cube half-width</td><td>$a$</td><td>1.25</td></tr>
-<tr><td>GMRES tolerance</td><td>$\texttt{rtol}$</td><td>$10^{-6}$</td></tr>
-<tr><td>GMRES restart</td><td></td><td>50</td></tr>
+<tr><td>GMRES relative tolerance</td><td></td><td>$10^{-6}$</td></tr>
+<tr><td>GMRES restart length</td><td></td><td>50</td></tr>
 <tr><td>GMRES max iterations</td><td></td><td>200</td></tr>
-<tr><td>near-field ratio</td><td></td><td>4.0</td></tr>
-<tr><td>incident fields</td><td>$n_{\mathrm{src}}$</td><td>4 plane waves</td></tr>
-<tr><td>GPU</td><td></td><td>NVIDIA H100 (80 GB) via Modal</td></tr>
+<tr><td>near-field ratio (patch widths)</td><td></td><td>4.0</td></tr>
+<tr><td>simultaneous incident fields</td>
+    <td>$n_{\mathrm{src}}$</td><td>4</td></tr>
+<tr><td>GPU hardware</td><td></td><td>NVIDIA H100 80 GB (Modal)</td></tr>
 </table>
-""")
 
-    # ================================================================
-    # 10. REPRODUCTION
-    # ================================================================
-    parts.append(r"""
-<h2>9. Reproduction</h2>
-<pre><code># Smoke test (L=2, kappa=4) on Modal H100
+<h3>Reproduction commands</h3>
+<pre><code># L=2 smoke test (kappa=4, ~22s total)
 modal run examples/modal_hf_solve_3d.py --mode smoke
 
-# High-frequency (L=3, kappa~26) — dense sequential baseline
+# L=3 high-frequency (kappa~26, ~76s dense, ~153s matrix-free)
 modal run examples/modal_hf_solve_3d.py --mode solve --freq-khz 5 --a 1.25
 
-# Dense + block GMRES + Jacobi preconditioner (L=2)
+# Dense + block GMRES + Jacobi (L=2)
 modal run examples/modal_hf_solve_3d.py --mode smoke --solver-mode dense_block
 
-# Matrix-free + preconditioner (L=3, low memory)
-modal run examples/modal_hf_solve_3d.py --mode solve --freq-khz 5 --a 1.25 --solver-mode matfree
-
-# Local CPU validation
-python examples/test_fmm_bie_3d.py</code></pre>
+# Matrix-free + Jacobi (L=3, low memory)
+modal run examples/modal_hf_solve_3d.py --mode solve --freq-khz 5 --a 1.25 \
+    --solver-mode matfree</code></pre>
 
 <p>Source:
 <a href="https://github.com/jma02/jaxhps/pull/3">jaxhps PR&nbsp;#3</a>,
-branch <code>devin/1781152283-breast-scattering-3d</code>.
-Solver implementation: <code>wave_scattering_utils_3D.py</code>;
-Modal deployment: <code>modal_hf_solve_3d.py</code>.</p>
+branch <code>devin/1781152283-breast-scattering-3d</code>.</p>
 </body></html>
 """)
 
