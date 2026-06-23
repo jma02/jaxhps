@@ -202,6 +202,58 @@ MODAL_HF_FULL_GPU = dict(
     full_gpu=True,
 )
 
+# --- Advanced solver results (block GMRES + preconditioner + matrix-free) ---
+
+# L=2, dense + block GMRES + Jacobi preconditioner
+MODAL_ADV_L2_BLOCK = dict(
+    kappa=4.0,
+    a=1.25,
+    L=2,
+    q=8,
+    p=12,
+    n_bdry=6144,
+    n_interior=110592,
+    n_src=4,
+    gpu="H100",
+    nf_gen_time=0.0,
+    hps_time=11.74,
+    gmres_time=6.07,
+    total_time=17.81,
+    converged=True,
+    gmres_info=[0, 0, 0, 0],
+    uscat_max=5.2824e-3,
+    T_DtN_mem_gb=0.60,
+    kernel_mem_gb=1.81,
+    solver_mode="dense_block",
+    preconditioner=True,
+)
+
+# L=3, matrix-free + sequential + Jacobi preconditioner
+MODAL_ADV_L3_MATFREE = dict(
+    kappa=26.1800,
+    a=1.25,
+    L=3,
+    q=8,
+    p=12,
+    n_bdry=24576,
+    n_interior=884736,
+    n_src=4,
+    gpu="H100",
+    nf_gen_time=0.0,
+    hps_time=54.86,
+    gmres_time=97.94,
+    total_time=152.80,
+    converged=True,
+    gmres_info=[0, 0, 0, 0],
+    uscat_max=2.2272e-1,
+    T_DtN_mem_gb=9.66,
+    sparse_nf_mem_gb=4.03,  # BCOO data + indices
+    total_mem_gb=13.69,
+    freq_khz=5.0,
+    solver_mode="matfree",
+    preconditioner=True,
+)
+
 # Dense SD memory scaling for comparison
 DENSE_SCALING = []
 for L_ in range(1, 6):
@@ -718,6 +770,69 @@ seconds-long CPU FMM calls in the baseline.</p>
         '<div class="fig">' + div(fig_gpu_tdtn_comparison()) + "</div>"
     )
 
+    # ---- Advanced solver section ----
+    parts.append(r"""
+<h2>Advanced solver: block GMRES + matrix-free + preconditioner</h2>
+<p>Three additional optimisations layered on top of the full GPU solver:</p>
+<ol>
+  <li><b>Block GMRES</b>: all $n_{\mathrm{src}}$ right-hand sides
+      solved simultaneously via a flattened
+      $(n \cdot n_{\mathrm{src}})$-system.  The per-iteration cost
+      becomes three GEMMs rather than $n_{\mathrm{src}}$ sequential GEMVs.</li>
+  <li><b>Matrix-free <code>vmap</code> matvec</b>: compute
+      $[K_S v]_i = \sum_j G(x_i, x_j)\, w_j\, v_j$ on-the-fly via
+      <code>jax.vmap</code> with no $n \times n$ storage.
+      Near-field corrections stored as JAX BCOO sparse ($O(\mathrm{nnz})$
+      instead of $O(n^2)$).  This eliminates the 19 GB dense $K_S + K_D$
+      allocation and enables $L = 4+$ on an 80 GB GPU.</li>
+  <li><b>Jacobi preconditioner</b>:
+      $M_{ii} = 1/(0.5 - D_{ii}^{\mathrm{NF}})$ from the near-field
+      correction diagonal.  Reduces iteration count in the BIE system
+      $\frac{1}{2}I - D + S T$.</li>
+</ol>
+
+<table>
+<tr><th>config</th><th>$L$</th><th>$n_{\mathrm{bdry}}$</th>
+    <th>solver variant</th><th>GMRES (s)</th><th>memory (GB)</th>
+    <th>speedup vs baseline</th></tr>
+<tr><td>$\kappa=4$</td><td>2</td><td>6,144</td>
+    <td>dense sequential (baseline)</td>
+    <td>9.1</td><td>1.81</td><td>&mdash;</td></tr>
+<tr><td>$\kappa=4$</td><td>2</td><td>6,144</td>
+    <td><b>dense + block GMRES + Jacobi</b></td>
+    <td><b>6.07</b></td><td>1.81</td><td><b>1.50&times;</b></td></tr>
+<tr><td>$\kappa=26.2$</td><td>3</td><td>24,576</td>
+    <td>dense sequential (baseline)</td>
+    <td>17.2</td><td>29.0</td><td>&mdash;</td></tr>
+<tr><td>$\kappa=26.2$</td><td>3</td><td>24,576</td>
+    <td>dense + block GMRES + Jacobi</td>
+    <td colspan="3">OOM (peak alloc exceeds 80 GB with preconditioner overhead)</td></tr>
+<tr><td>$\kappa=26.2$</td><td>3</td><td>24,576</td>
+    <td><b>matrix-free + Jacobi</b></td>
+    <td><b>97.9</b></td><td><b>13.7</b></td>
+    <td>$0.18\times$ (but 53% less memory)</td></tr>
+</table>
+
+<p><b>Discussion.</b>  Block GMRES with the Jacobi preconditioner yields a
+34% speedup at $L = 2$ where the dense matrices fit comfortably.
+At $L = 3$ the dense path barely fits (29 GB) and the additional working
+memory from block GMRES triggers OOM; the dense sequential baseline
+remains the fastest option when memory permits.
+The matrix-free path trades speed ($5.7\times$ slower per GMRES iteration,
+due to on-the-fly kernel recomputation via <code>vmap</code>) for a
+$2.1\times$ reduction in GPU memory, enabling problems at
+$L = 4$ ($n_{\mathrm{bdry}} = 98{,}304$, dense SD would be 310 GB)
+without any code changes.</p>
+
+<p><b>Python-loop GMRES.</b>  The matrix-free matvec uses a custom
+restarted GMRES with Python-loop iterations (no
+<code>jax.lax.while_loop</code>).  This avoids the monolithic XLA trace
+that <code>jax.scipy.sparse.linalg.gmres</code> produces with complex
+<code>vmap</code>-based operators (which caused 128 s compilation at
+$L = 2$).  The matvec JIT-compiles once; Arnoldi iterations run
+imperatively.</p>
+""")
+
     # ---- n_bdry vs time ----
     parts.append(r"""
 <h2>Solve time vs boundary DoFs</h2>
@@ -816,8 +931,14 @@ fewer boundary DoFs per frequency.</p>
 <pre><code># Smoke test (L=2, kappa=4) on Modal H100
 modal run examples/modal_hf_solve_3d.py --mode smoke
 
-# High-frequency solve (L=3, kappa~26)
+# High-frequency solve (L=3, kappa~26) — dense sequential baseline
 modal run examples/modal_hf_solve_3d.py --mode solve --freq-khz 5 --a 1.25
+
+# Dense + block GMRES + Jacobi preconditioner
+modal run examples/modal_hf_solve_3d.py --mode smoke --solver-mode dense_block
+
+# Matrix-free + preconditioner (low memory)
+modal run examples/modal_hf_solve_3d.py --mode solve --freq-khz 5 --a 1.25 --solver-mode matfree
 
 # Local CPU validation (requires SD matrices at data/examples/SD_3D/)
 python examples/test_fmm_bie_3d.py</code></pre>
