@@ -806,9 +806,13 @@ def solve_bie_gpu_advanced(
 
     n_restart_cycles = max(1, maxiter // restart)
 
-    if block_rhs and n_src > 1:
-        # ---- Block GMRES: solve all RHS simultaneously ----
-        # Build RHS matrix: rhs[:, s] = S @ (uin_dn[:, s] - T @ uin[:, s])
+    # Block GMRES only benefits the dense path (GEMMs vs GEMVs).
+    # Matrix-free path: sequential GMRES reuses JIT-cached matvec.
+    use_block = block_rhs and n_src > 1 and not matrix_free
+
+    if use_block:
+        # ---- Block GMRES: all RHS via flattened (n*n_src,) system ----
+        # Dense matvec A @ X is 3 GEMMs (efficient on GPU).
         uin_j = jnp.asarray(uin_np)
         udn_j = jnp.asarray(uin_dn_np)
         rhs_block = jnp.zeros((n, n_src), dtype=jnp.complex128)
@@ -816,23 +820,15 @@ def solve_bie_gpu_advanced(
             rhs_col = _S_apply(udn_j[:, s] - T @ uin_j[:, s])
             rhs_block = rhs_block.at[:, s].set(rhs_col)
 
-        # Block matvec: A @ X where X is (n, n_src)
-        def _block_matvec(X):
-            # Apply column-by-column (vmap over columns)
-            return jax.vmap(_matvec, in_axes=1, out_axes=1)(X)
-
-        # Block GMRES via repeated application
-        # JAX gmres doesn't support block RHS natively, so we use a
-        # flattened approach: treat (n*n_src,) as the vector,
-        # with the block-diagonal operator.
         def _flat_matvec(x_flat):
             X = x_flat.reshape(n, n_src)
-            return _block_matvec(X).ravel()
+            Y = 0.5 * X - K_D @ X + K_S @ (T @ X)
+            return Y.ravel()
 
         def _flat_precond(x_flat):
             if M_precond is not None:
                 X = x_flat.reshape(n, n_src)
-                return jax.vmap(M_precond, in_axes=1, out_axes=1)(X).ravel()
+                return (prec_diag[:, None] * X).ravel()
             return x_flat
 
         rhs_flat = rhs_block.ravel()
@@ -850,7 +846,7 @@ def solve_bie_gpu_advanced(
         gmres_info_list = [int(info_code)] * n_src
 
     else:
-        # ---- Sequential GMRES per RHS ----
+        # ---- Sequential GMRES per RHS (JIT cached after first) ----
         uscat_b_cols = []
         gmres_info_list = []
         for s in range(n_src):
