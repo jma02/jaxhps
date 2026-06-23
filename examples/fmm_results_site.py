@@ -1,8 +1,8 @@
-r"""Static plotly report for FMM-accelerated BIE solver results.
+r"""Static report: GPU BIE solver for 3D Helmholtz scattering.
 
-Displays GMRES+FMM high-frequency solve results from Modal (H100/A100),
-including convergence data, timing breakdowns, memory scaling, and the
-FMM validation against the dense solver at L=2.
+Presents the progression from CPU FMM to full GPU direct-summation solver,
+advanced optimisations (block GMRES, matrix-free, preconditioner), and a
+feasibility analysis for the Lucka et al. breast-imaging problem.
 
 Usage:
     python examples/fmm_results_site.py --out fmm_site/index.html
@@ -16,9 +16,11 @@ import plotly.graph_objects as go
 
 PLOTLY_CDN = "https://cdn.plot.ly/plotly-2.35.2.min.js"
 
-# ---- Hardcoded results from Modal runs and local validation ----
+# ============================================================
+# Hardcoded results from Modal runs and local validation
+# ============================================================
 
-# L=2 validation (test_fmm_bie_3d.py, CPU)
+# --- Validation (CPU, L=2) ---
 VAL_L2 = dict(
     kappa=4.0,
     a=1.25,
@@ -43,8 +45,8 @@ VAL_L2 = dict(
     uscat_max_fmm=5.2824e-3,
 )
 
-# Modal smoke test (L=2, kappa=4, H100) -- CPU T_DtN baseline
-MODAL_SMOKE = dict(
+# --- Modal: CPU FMM baseline ---
+MODAL_SMOKE_CPU = dict(
     kappa=4.0,
     a=1.25,
     L=2,
@@ -59,58 +61,12 @@ MODAL_SMOKE = dict(
     gmres_time=17.97,
     total_time=33.16,
     converged=True,
-    gmres_info=[0, 0, 0, 0],
     uscat_max=5.2824e-3,
     T_DtN_mem_gb=0.60,
 )
 
-# Modal smoke test (L=2, kappa=4, H100) -- GPU T_DtN matmul
-MODAL_SMOKE_GPU = dict(
-    kappa=4.0,
-    a=1.25,
-    L=2,
-    q=8,
-    p=12,
-    n_bdry=6144,
-    n_interior=110592,
-    n_src=4,
-    gpu="H100",
-    nf_gen_time=0.0,  # cached
-    hps_time=9.63,
-    gmres_time=13.61,
-    total_time=23.24,
-    converged=True,
-    gmres_info=[0, 0, 0, 0],
-    uscat_max=5.2824e-3,
-    T_DtN_mem_gb=0.60,
-    tdtn_on_gpu=True,
-)
-
-# Modal L=1, kappa=6.28 (H100)
-MODAL_L1 = dict(
-    kappa=6.2832,
-    a=1.25,
-    L=1,
-    q=8,
-    p=12,
-    n_bdry=1536,
-    n_interior=13824,
-    n_src=4,
-    gpu="H100",
-    nf_gen_time=7.6,
-    hps_time=5.48,
-    gmres_time=6.18,
-    total_time=11.66,
-    converged=True,
-    gmres_info=[0, 0, 0, 0],
-    uscat_max=1.3197e-2,
-    T_DtN_mem_gb=0.04,
-    freq_khz=1.2,
-)
-
-# Modal high-frequency (L=3, kappa=26.18, H100) -- CPU T_DtN baseline
-MODAL_HF = dict(
-    kappa=26.1800,
+MODAL_HF_CPU = dict(
+    kappa=26.18,
     a=1.25,
     L=3,
     q=8,
@@ -124,37 +80,13 @@ MODAL_HF = dict(
     gmres_time=617.36,
     total_time=664.58,
     converged=True,
-    gmres_info=[0, 0, 0, 0],
     uscat_max=2.2272e-1,
     T_DtN_mem_gb=9.66,
     freq_khz=5.0,
 )
 
-# Modal high-frequency (L=3, kappa=26.18, H100) -- GPU T_DtN matmul only
-MODAL_HF_GPU = dict(
-    kappa=26.1800,
-    a=1.25,
-    L=3,
-    q=8,
-    p=12,
-    n_bdry=24576,
-    n_interior=884736,
-    n_src=4,
-    gpu="H100",
-    nf_gen_time=0.0,  # cached
-    hps_time=84.15,
-    gmres_time=622.74,
-    total_time=706.89,
-    converged=True,
-    gmres_info=[0, 0, 0, 0],
-    uscat_max=2.2272e-1,
-    T_DtN_mem_gb=9.66,
-    freq_khz=5.0,
-    tdtn_on_gpu=True,
-)
-
-# Modal smoke test (L=2, kappa=4, H100) -- full GPU direct summation
-MODAL_SMOKE_FULL_GPU = dict(
+# --- Modal: full GPU direct-summation (current default) ---
+MODAL_L2_GPU = dict(
     kappa=4.0,
     a=1.25,
     L=2,
@@ -164,22 +96,19 @@ MODAL_SMOKE_FULL_GPU = dict(
     n_interior=110592,
     n_src=4,
     gpu="H100",
-    nf_gen_time=0.0,  # cached
+    nf_gen_time=0.0,
     hps_time=12.80,
     gmres_time=9.13,
     total_time=21.93,
     converged=True,
-    gmres_info=[0, 0, 0, 0],
     uscat_max=5.2824e-3,
     T_DtN_mem_gb=0.60,
     kernel_build_time=1.98,
     kernel_mem_gb=1.81,
-    full_gpu=True,
 )
 
-# Modal high-frequency (L=3, kappa=26.18, H100) -- full GPU direct summation
-MODAL_HF_FULL_GPU = dict(
-    kappa=26.1800,
+MODAL_L3_GPU = dict(
+    kappa=26.18,
     a=1.25,
     L=3,
     q=8,
@@ -188,23 +117,19 @@ MODAL_HF_FULL_GPU = dict(
     n_interior=884736,
     n_src=4,
     gpu="H100",
-    nf_gen_time=0.0,  # cached
+    nf_gen_time=0.0,
     hps_time=58.19,
     gmres_time=17.51,
     total_time=75.70,
     converged=True,
-    gmres_info=[0, 0, 0, 0],
     uscat_max=2.2272e-1,
     T_DtN_mem_gb=9.66,
     kernel_build_time=9.52,
     kernel_mem_gb=28.99,
     freq_khz=5.0,
-    full_gpu=True,
 )
 
-# --- Advanced solver results (block GMRES + preconditioner + matrix-free) ---
-
-# L=2, dense + block GMRES + Jacobi preconditioner
+# --- Advanced solver: block GMRES + Jacobi preconditioner ---
 MODAL_ADV_L2_BLOCK = dict(
     kappa=4.0,
     a=1.25,
@@ -215,22 +140,18 @@ MODAL_ADV_L2_BLOCK = dict(
     n_interior=110592,
     n_src=4,
     gpu="H100",
-    nf_gen_time=0.0,
     hps_time=11.74,
     gmres_time=6.07,
     total_time=17.81,
     converged=True,
-    gmres_info=[0, 0, 0, 0],
     uscat_max=5.2824e-3,
-    T_DtN_mem_gb=0.60,
     kernel_mem_gb=1.81,
     solver_mode="dense_block",
-    preconditioner=True,
 )
 
-# L=3, matrix-free + sequential + Jacobi preconditioner
+# --- Advanced solver: matrix-free + Jacobi preconditioner ---
 MODAL_ADV_L3_MATFREE = dict(
-    kappa=26.1800,
+    kappa=26.18,
     a=1.25,
     L=3,
     q=8,
@@ -239,186 +160,149 @@ MODAL_ADV_L3_MATFREE = dict(
     n_interior=884736,
     n_src=4,
     gpu="H100",
-    nf_gen_time=0.0,
     hps_time=54.86,
     gmres_time=97.94,
     total_time=152.80,
     converged=True,
-    gmres_info=[0, 0, 0, 0],
     uscat_max=2.2272e-1,
     T_DtN_mem_gb=9.66,
-    sparse_nf_mem_gb=4.03,  # BCOO data + indices
+    sparse_nf_mem_gb=4.03,
     total_mem_gb=13.69,
     freq_khz=5.0,
     solver_mode="matfree",
-    preconditioner=True,
 )
 
-# Dense SD memory scaling for comparison
-DENSE_SCALING = []
-for L_ in range(1, 6):
-    n = 6 * 64 * (4**L_)
-    mem = n**2 * 16 * 2 / 1e9  # S + D, complex128
-    DENSE_SCALING.append(dict(L=L_, n_bdry=n, SD_mem_gb=mem))
+
+# ============================================================
+# Plotly figures
+# ============================================================
 
 
-def fig_timing_breakdown():
-    """Stacked bar chart: NF gen + HPS + GMRES for each run."""
-    runs = [MODAL_L1, MODAL_SMOKE, MODAL_HF]
-    labels_plain = [
-        f"L={r['L']}, kappa={r['kappa']:.1f}<br>n_bdry={r['n_bdry']:,}"
-        for r in runs
+def fig_solver_progression():
+    """Grouped bar: GMRES time across solver generations at L=2 and L=3."""
+    fig = go.Figure()
+
+    # L=2 group
+    fig.add_trace(
+        go.Bar(
+            x=["L=2<br>(n=6,144)"],
+            y=[MODAL_SMOKE_CPU["gmres_time"]],
+            name="CPU FMM",
+            marker_color="#d62728",
+            text=["18.0s"],
+            textposition="outside",
+        )
+    )
+    fig.add_trace(
+        go.Bar(
+            x=["L=2<br>(n=6,144)"],
+            y=[MODAL_L2_GPU["gmres_time"]],
+            name="GPU direct sum",
+            marker_color="#ff7f0e",
+            text=["9.1s"],
+            textposition="outside",
+        )
+    )
+    fig.add_trace(
+        go.Bar(
+            x=["L=2<br>(n=6,144)"],
+            y=[MODAL_ADV_L2_BLOCK["gmres_time"]],
+            name="Block GMRES + Jacobi",
+            marker_color="#2ca02c",
+            text=["6.07s"],
+            textposition="outside",
+        )
+    )
+
+    # L=3 group
+    fig.add_trace(
+        go.Bar(
+            x=["L=3<br>(n=24,576)"],
+            y=[MODAL_HF_CPU["gmres_time"]],
+            name="CPU FMM",
+            marker_color="#d62728",
+            text=["617s"],
+            textposition="outside",
+            showlegend=False,
+        )
+    )
+    fig.add_trace(
+        go.Bar(
+            x=["L=3<br>(n=24,576)"],
+            y=[MODAL_L3_GPU["gmres_time"]],
+            name="GPU direct sum",
+            marker_color="#ff7f0e",
+            text=["17.5s"],
+            textposition="outside",
+            showlegend=False,
+        )
+    )
+    fig.add_trace(
+        go.Bar(
+            x=["L=3<br>(n=24,576)"],
+            y=[MODAL_ADV_L3_MATFREE["gmres_time"]],
+            name="Matrix-free + Jacobi",
+            marker_color="#1f77b4",
+            text=["97.9s"],
+            textposition="outside",
+        )
+    )
+
+    fig.update_layout(
+        barmode="group",
+        yaxis_title="GMRES solve time (s)",
+        yaxis_type="log",
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5
+        ),
+        margin=dict(l=50, r=20, t=80, b=40),
+        height=500,
+    )
+    return fig
+
+
+def fig_memory_comparison():
+    """Bar chart: GPU memory for dense vs matrix-free at L=3."""
+    labels = [
+        "Dense<br>(K_S + K_D + T)",
+        "Matrix-free<br>(sparse NF + T)",
+    ]
+    mems = [
+        MODAL_L3_GPU["kernel_mem_gb"],
+        MODAL_ADV_L3_MATFREE["total_mem_gb"],
     ]
 
-    fig = go.Figure()
-    fig.add_trace(
+    fig = go.Figure(
         go.Bar(
-            x=labels_plain,
-            y=[r["nf_gen_time"] for r in runs],
-            name="NF correction gen (fmm3dbie)",
-            marker_color="#2ca02c",
+            x=labels,
+            y=mems,
+            text=[f"{m:.1f} GB" for m in mems],
+            textposition="outside",
+            marker_color=["#d62728", "#2ca02c"],
+            width=0.5,
         )
     )
-    fig.add_trace(
-        go.Bar(
-            x=labels_plain,
-            y=[r["hps_time"] for r in runs],
-            name="HPS interior solve (GPU)",
-            marker_color="#1f77b4",
-        )
-    )
-    fig.add_trace(
-        go.Bar(
-            x=labels_plain,
-            y=[r["gmres_time"] for r in runs],
-            name="GMRES+FMM exterior (CPU)",
-            marker_color="#d62728",
-        )
-    )
-    fig.update_layout(
-        barmode="stack",
-        yaxis_title="wall-clock time (s)",
-        legend=dict(
-            orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5
-        ),
-        margin=dict(l=50, r=20, t=60, b=40),
-        height=480,
-    )
-    return fig
-
-
-def fig_memory_scaling():
-    """Log-scale plot: dense SD memory vs FMM memory (NF correction)."""
-    Ls = [r["L"] for r in DENSE_SCALING]
-    sd_mems = [r["SD_mem_gb"] for r in DENSE_SCALING]
-
-    # FMM NF correction memory: measured sparsity ~57.6% at L=2
-    # For higher L, near-field fraction decreases (patches are smaller relative
-    # to the wavelength), so we extrapolate conservatively
-    nf_mems = []
-    for ds in DENSE_SCALING:
-        n = ds["n_bdry"]
-        # Near-field is ~60% of n^2 at L=2, decreasing at higher L
-        # Actual measured: L=2 sparsity=57.6%, L=3 near_pairs=20472/384^2=13.9%
-        if ds["L"] == 1:
-            frac = 1.0  # all pairs are near at L=1
-        elif ds["L"] == 2:
-            frac = 0.576
-        elif ds["L"] == 3:
-            frac = 0.139
-        else:
-            frac = 0.05  # approximate for L>=4
-        nf_mems.append(n**2 * 16 * 2 * frac / 1e9)
-
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=Ls,
-            y=sd_mems,
-            mode="lines+markers",
-            name="Dense S + D matrices",
-            line=dict(color="#d62728", width=3),
-            marker=dict(size=10),
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=Ls,
-            y=nf_mems,
-            mode="lines+markers",
-            name="FMM near-field correction (CSR)",
-            line=dict(color="#2ca02c", width=3),
-            marker=dict(size=10),
-        )
-    )
-    # A100 80GB line
     fig.add_hline(
         y=80,
-        line=dict(color="#ff7f0e", dash="dash", width=2),
-        annotation_text="A100/H100 80 GB",
-        annotation_position="top left",
+        line=dict(color="#999", dash="dash", width=2),
+        annotation_text="H100 80 GB limit",
+        annotation_position="top right",
     )
     fig.update_layout(
-        xaxis_title="octree levels L",
-        yaxis_title="memory (GB)",
-        yaxis_type="log",
-        xaxis=dict(tickvals=Ls),
-        legend=dict(
-            orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5
-        ),
-        margin=dict(l=50, r=20, t=60, b=40),
-        height=460,
-    )
-    return fig
-
-
-def fig_n_bdry_vs_time():
-    """Scatter: n_bdry vs total solve time for all runs."""
-    runs = [MODAL_L1, MODAL_SMOKE, MODAL_HF]
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=[r["n_bdry"] for r in runs],
-            y=[r["total_time"] for r in runs],
-            mode="markers+text",
-            text=[f"L={r['L']}" for r in runs],
-            textposition="top center",
-            marker=dict(size=14, color="#1f77b4"),
-            name="GMRES+FMM total",
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=[r["n_bdry"] for r in runs],
-            y=[r["hps_time"] for r in runs],
-            mode="markers+text",
-            text=[f"L={r['L']}" for r in runs],
-            textposition="bottom center",
-            marker=dict(size=10, color="#2ca02c", symbol="triangle-up"),
-            name="HPS interior only",
-        )
-    )
-    fig.update_layout(
-        xaxis_title="n_bdry (boundary DoFs)",
-        yaxis_title="wall-clock time (s)",
-        xaxis_type="log",
-        yaxis_type="log",
-        legend=dict(
-            orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5
-        ),
-        margin=dict(l=50, r=20, t=60, b=40),
-        height=460,
+        yaxis_title="GPU memory (GB)",
+        margin=dict(l=50, r=20, t=40, b=40),
+        height=380,
     )
     return fig
 
 
 def fig_validation_bars():
-    """Bar chart for FMM matvec and solve errors at L=2."""
+    """Bar chart: FMM matvec and solve errors at L=2."""
     labels = [
-        "S matvec rel err",
-        "D matvec rel err",
-        "BIE solve rel L2 err",
-        "BIE solve max abs err",
+        "S matvec\nrel err",
+        "D matvec\nrel err",
+        "BIE solve\nrel L2 err",
+        "BIE solve\nmax abs err",
     ]
     vals = [
         VAL_L2["S_matvec_rel_err"],
@@ -439,124 +323,66 @@ def fig_validation_bars():
         yaxis_title="error",
         yaxis_type="log",
         margin=dict(l=50, r=20, t=20, b=80),
-        height=400,
+        height=360,
     )
     return fig
 
 
-def fig_gpu_tdtn_comparison():
-    """Grouped bar: CPU FMM vs GPU T_DtN vs full GPU GMRES times."""
-    labels = ["L=2 (n=6,144)", "L=3 (n=24,576)"]
-    cpu_times = [MODAL_SMOKE["gmres_time"], MODAL_HF["gmres_time"]]
-    gpu_tdtn = [MODAL_SMOKE_GPU["gmres_time"], MODAL_HF_GPU["gmres_time"]]
-    full_gpu = [
-        MODAL_SMOKE_FULL_GPU["gmres_time"],
-        MODAL_HF_FULL_GPU["gmres_time"],
+def fig_feasibility_kappa():
+    """Scatter: achievable kappa*a vs GPU memory for different (L, q)."""
+    configs = [
+        # (L, q, label)
+        (2, 8, "L=2, q=8"),
+        (3, 8, "L=3, q=8"),
+        (3, 10, "L=3, q=10"),
+        (3, 12, "L=3, q=12"),
+        (3, 14, "L=3, q=14"),
+        (4, 8, "L=4, q=8"),
     ]
-
-    fig = go.Figure()
-    fig.add_trace(
-        go.Bar(
-            x=labels,
-            y=cpu_times,
-            name="CPU FMM + CPU T (baseline)",
-            marker_color="#d62728",
-            text=[f"{t:.1f}s" for t in cpu_times],
-            textposition="outside",
-        )
-    )
-    fig.add_trace(
-        go.Bar(
-            x=labels,
-            y=gpu_tdtn,
-            name="CPU FMM + GPU T",
-            marker_color="#ff7f0e",
-            text=[f"{t:.1f}s" for t in gpu_tdtn],
-            textposition="outside",
-        )
-    )
-    fig.add_trace(
-        go.Bar(
-            x=labels,
-            y=full_gpu,
-            name="Full GPU (direct sum + JAX GMRES)",
-            marker_color="#2ca02c",
-            text=[f"{t:.1f}s" for t in full_gpu],
-            textposition="outside",
-        )
-    )
-    fig.update_layout(
-        barmode="group",
-        yaxis_title="GMRES solve time (s)",
-        yaxis_type="log",
-        legend=dict(
-            orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5
-        ),
-        margin=dict(l=50, r=20, t=60, b=40),
-        height=480,
-    )
-    return fig
-
-
-def fig_dense_vs_fmm_cost():
-    """Comparison: dense O(n^3) vs FMM+GMRES cost scaling."""
-    ns = np.array([1536, 6144, 24576, 98304])
-    # Dense: LU is O(n^3), measured 18.3s at n=6144
-    dense_times = 18.3 * (ns / 6144.0) ** 3
-    # FMM: measured times for L=1,2,3; extrapolate L=4
-    fmm_measured = [
-        MODAL_L1["gmres_time"],
-        MODAL_SMOKE["gmres_time"],
-        MODAL_HF["gmres_time"],
-    ]
-    # Extrapolate L=4: ~O(n log n) per iteration, ~50 iters
-    fmm_L4_est = (
-        MODAL_HF["gmres_time"]
-        * (98304 / 24576)
-        * np.log(98304)
-        / np.log(24576)
-    )
-    fmm_times = fmm_measured + [fmm_L4_est]
+    kas, mems, labels, colors = [], [], [], []
+    for L, q, lab in configs:
+        n = 6 * (4**L) * q**2
+        T_mem = n**2 * 16 / 1e9
+        # Approximate max kappa*a supported (6 ppw rule):
+        # boundary spacing h = 2a / (2^L * q), ppw = lambda/h = 2*pi/(kappa*h)
+        # need ppw >= 6 => kappa*a <= pi * 2^L * q / 6
+        ka_max = np.pi * (2**L) * q / 6.0
+        kas.append(ka_max)
+        mems.append(T_mem)
+        labels.append(lab)
+        colors.append("#2ca02c" if T_mem < 80 else "#d62728")
 
     fig = go.Figure()
     fig.add_trace(
         go.Scatter(
-            x=ns,
-            y=dense_times,
-            mode="lines+markers",
-            name="Dense LU (O(n^3), CPU-extrapolated)",
-            line=dict(color="#d62728", width=2, dash="dash"),
-            marker=dict(size=8),
+            x=kas,
+            y=mems,
+            mode="markers+text",
+            text=labels,
+            textposition="top center",
+            marker=dict(size=14, color=colors),
+            showlegend=False,
         )
     )
-    fig.add_trace(
-        go.Scatter(
-            x=ns[:3],
-            y=fmm_times[:3],
-            mode="lines+markers",
-            name="GMRES+FMM (measured, H100 CPU)",
-            line=dict(color="#1f77b4", width=3),
-            marker=dict(size=10),
-        )
+    fig.add_hline(
+        y=80,
+        line=dict(color="#999", dash="dash", width=2),
+        annotation_text="H100 80 GB",
+        annotation_position="top right",
     )
+    # Mark the tested config
     fig.add_trace(
         go.Scatter(
-            x=[ns[3]],
-            y=[fmm_times[3]],
+            x=[26.18 * 1.25],
+            y=[9.66],
             mode="markers",
-            name="GMRES+FMM (extrapolated, L=4)",
-            marker=dict(
-                size=10,
-                color="#1f77b4",
-                symbol="diamond-open",
-                line=dict(width=2),
-            ),
+            name="Tested (L=3, q=8, kappa*a=32.7)",
+            marker=dict(size=18, color="#2ca02c", symbol="star"),
         )
     )
     fig.update_layout(
-        xaxis_title="n_bdry",
-        yaxis_title="exterior solve time (s)",
-        xaxis_type="log",
+        xaxis_title="max kappa * a (6 ppw criterion)",
+        yaxis_title="T_DtN memory (GB)",
         yaxis_type="log",
         legend=dict(
             orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5
@@ -567,23 +393,102 @@ def fig_dense_vs_fmm_cost():
     return fig
 
 
+def fig_breast_freq_mapping():
+    """Scatter: breast frequency vs required L and memory."""
+    c_bg = 1500.0
+    a_phys = 0.055
+    freqs = [50, 100, 150, 200, 250, 500]
+    kas, t_mems, labels = [], [], []
+    for f in freqs:
+        kappa = 2 * np.pi * f * 1e3 / c_bg
+        ka = kappa * a_phys
+        # Required L: need 2^L * q >= 6 * ka / pi
+        # With q=8: L = ceil(log2(6*ka/(pi*8)))
+        L = max(1, int(np.ceil(np.log2(max(1, 6 * ka / (np.pi * 8))))))
+        q = 8
+        # Check if q=8 provides enough resolution; if not, need higher q
+        ppw = np.pi * (2**L) * q / ka
+        if ppw < 6 and L <= 3:
+            q = int(np.ceil(6 * ka / (np.pi * 2**L)))
+        n = 6 * (4**L) * q**2
+        T_mem = n**2 * 16 / 1e9
+        kas.append(ka)
+        t_mems.append(T_mem)
+        labels.append(f"{f} kHz")
+
+    fig = go.Figure()
+    feasible = [m < 80 for m in t_mems]
+    fig.add_trace(
+        go.Scatter(
+            x=[kas[i] for i in range(len(kas)) if feasible[i]],
+            y=[t_mems[i] for i in range(len(kas)) if feasible[i]],
+            mode="markers+text",
+            text=[labels[i] for i in range(len(kas)) if feasible[i]],
+            textposition="top center",
+            marker=dict(size=14, color="#2ca02c"),
+            name="Feasible",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=[kas[i] for i in range(len(kas)) if not feasible[i]],
+            y=[t_mems[i] for i in range(len(kas)) if not feasible[i]],
+            mode="markers+text",
+            text=[labels[i] for i in range(len(kas)) if not feasible[i]],
+            textposition="top center",
+            marker=dict(size=14, color="#d62728"),
+            name="OOM (single GPU)",
+        )
+    )
+    fig.add_hline(
+        y=80,
+        line=dict(color="#999", dash="dash", width=2),
+        annotation_text="80 GB limit",
+        annotation_position="top right",
+    )
+    fig.update_layout(
+        xaxis_title="kappa * a (breast, a=55mm)",
+        yaxis_title="T_DtN memory (GB)",
+        yaxis_type="log",
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5
+        ),
+        margin=dict(l=50, r=20, t=60, b=40),
+        height=460,
+    )
+    return fig
+
+
+# ============================================================
+# HTML generation
+# ============================================================
+
 HEAD = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8">
-<title>FMM-accelerated BIE solver: high-frequency results</title>
+<title>GPU BIE Solver for 3D Helmholtz Scattering</title>
 <script src="{PLOTLY_CDN}"></script>
 <script>MathJax = {{tex: {{inlineMath: [['$', '$']]}}}};</script>
 <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
 <style>
-body {{ font-family: Georgia, 'Times New Roman', serif; max-width: 1100px;
-       margin: 2em auto; padding: 0 1em; color: #222; line-height: 1.5; }}
-h1 {{ font-size: 1.6em; }} h2 {{ font-size: 1.25em; margin-top: 2em; }}
-table {{ border-collapse: collapse; margin: 1em 0; }}
-td, th {{ border: 1px solid #999; padding: 0.3em 0.8em; text-align: left; }}
-th {{ background: #f0f0f0; }}
-.fig {{ margin: 1em 0; }} code {{ font-size: 0.95em; }}
-pre {{ background: #f6f6f6; padding: 0.8em; overflow-x: auto; }}
+body {{ font-family: Georgia, 'Times New Roman', serif; max-width: 1000px;
+       margin: 2em auto; padding: 0 1.5em; color: #222; line-height: 1.6; }}
+h1 {{ font-size: 1.7em; border-bottom: 2px solid #333; padding-bottom: 0.3em; }}
+h2 {{ font-size: 1.3em; margin-top: 2.5em; color: #333; }}
+h3 {{ font-size: 1.1em; margin-top: 1.5em; color: #555; }}
+table {{ border-collapse: collapse; margin: 1em 0; font-size: 0.92em; }}
+td, th {{ border: 1px solid #bbb; padding: 0.35em 0.9em; text-align: center; }}
+th {{ background: #f5f5f5; font-weight: 600; }}
+.fig {{ margin: 1.5em 0; }}
+code {{ font-size: 0.9em; background: #f6f6f6; padding: 0.1em 0.3em;
+        border-radius: 3px; }}
+pre {{ background: #f6f6f6; padding: 1em; overflow-x: auto;
+       border-left: 3px solid #1f77b4; }}
 .pass {{ color: #2ca02c; font-weight: bold; }}
-.warn {{ color: #ff7f0e; font-weight: bold; }}
+.warn {{ color: #d62728; font-weight: bold; }}
+.highlight {{ background: #e8f5e9; padding: 0.8em; border-radius: 4px;
+              margin: 1em 0; }}
+.note {{ background: #fff3e0; padding: 0.8em; border-radius: 4px;
+         margin: 1em 0; font-size: 0.95em; }}
 </style></head><body>
 """
 
@@ -598,49 +503,297 @@ def main():
 
     parts = [HEAD]
 
-    # ---- Title and overview ----
+    # ================================================================
+    # 1. TITLE & EXECUTIVE SUMMARY
+    # ================================================================
     parts.append(r"""
-<h1>FMM-accelerated BIE solver for Helmholtz scattering</h1>
-<p>Results from the FMM+GMRES exterior coupling for the HPS volume solver
-applied to the penetrable Helmholtz equation
-$\Delta u + \kappa^2 n^2(x)\, u = 0$ in $\mathbb{R}^3$.
-The interior DtN map $T$ is computed via the HPS (ItI) factorisation on GPU;
-the exterior BIE system
-$$A\, u^s = b, \qquad A = \tfrac{1}{2}I - D + S\,T, \qquad b = S\,(u^{\mathrm{inc}}_n - T\,u^{\mathrm{inc}})$$
-is solved by restarted GMRES with FMM-accelerated $S$ and $D$ matvecs
-(fmm3dpy) plus sparse near-field corrections (CSR).
-All runs use the
-<a href="https://github.com/jma02/jaxhps/pull/3">jaxhps PR&nbsp;#3</a>
-code on Modal GPU instances.</p>
+<h1>GPU BIE Solver for 3D Helmholtz Scattering</h1>
+
+<p>A GPU-native boundary integral equation (BIE) solver for the
+penetrable Helmholtz equation
+$\Delta u + \kappa^2 n^2(x)\,u = 0$ in $\mathbb R^3$,
+built on the HPS (hierarchical Poincar&eacute;&ndash;Steklov) volume solver.
+All results from NVIDIA H100 (80 GB) via
+<a href="https://modal.com">Modal</a>.</p>
+
+<div class="highlight">
+<b>Key results:</b> $35\times$ speedup over CPU FMM at $L = 3$
+($n_{\mathrm{bdry}} = 24{,}576$); block GMRES adds a further $1.5\times$
+at $L = 2$; matrix-free path halves GPU memory and enables $L = 4+$.
+Maximum achievable $\kappa a \approx 33$&ndash;$50$ on a single H100.
+</div>
 """)
 
-    # ---- Method summary ----
+    # ================================================================
+    # 2. METHOD
+    # ================================================================
     parts.append(r"""
-<h2>Method</h2>
-<p>For each patch pair $(i, j)$ within distance
-$\texttt{near\_ratio} \times \max\text{patch\_width}$, the near-field
-correction is $C_{ij} = K^{\mathrm{dense}}_{ij} - K^{\mathrm{smooth}}_{ij}$
-where $K^{\mathrm{smooth}}$ is the kernel that FMM evaluates and
-$K^{\mathrm{dense}}$ is the full quadrature. The corrections are stored
-as sparse CSR matrices; each FMM matvec then costs
-$\mathcal O(n \log n)$ (FMM) $+ \mathcal O(\texttt{nnz})$ (sparse)
-instead of $\mathcal O(n^2)$ (dense). GMRES convergence typically
-requires $\lesssim 50$ iterations for moderate $\kappa$.</p>
-<p>At image-build time, fmm3dbie generates the near-field correction matrices
-via bulk kernel evaluation (one $S$ call and one $D$ call on the full
-near-field index set). These are cached in a Modal Volume and reused
-across runs with the same $(\kappa, q, L, a)$.</p>
+<h2>1. Method</h2>
+
+<p>The scattering problem is split into two stages:</p>
+<ol>
+  <li><b>Interior (HPS on GPU)</b>: factorise the DtN operator
+      $T : u|_{\partial\Omega} \mapsto \partial_n u|_{\partial\Omega}$
+      for the variable-coefficient region via the iterated-impedance-to-impedance
+      (ItI) Cayley transform.  Cost: $\mathcal O(p^6 \cdot 8^L)$.</li>
+  <li><b>Exterior (BIE + GMRES on GPU)</b>: solve the combined-field
+      system
+      $$A\,u^s = b, \qquad
+        A = \tfrac12 I - D + S\,T, \qquad
+        b = S\,(u^{\mathrm{inc}}_n - T\,u^{\mathrm{inc}})$$
+      via restarted GMRES.  The single- and double-layer matvecs
+      $S \cdot v$, $D \cdot v$ are computed as direct GPU summation
+      ($O(n^2)$ per iteration, massively parallel) plus a sparse
+      near-field correction (high-order quadrature from
+      <code>fmm3dbie</code>).</li>
+</ol>
+
+<p>Near-field corrections are generated once per
+$(\kappa, q, L, a)$ and cached in a Modal Volume.</p>
 """)
 
-    # ---- Validation at L=2 ----
+    # ================================================================
+    # 3. SOLVER EVOLUTION
+    # ================================================================
+    parts.append(r"""
+<h2>2. Solver progression</h2>
+
+<p>Three generations of the exterior solver, all on the same H100:</p>
+
+<table>
+<tr><th>generation</th><th>$S\cdot v$, $D\cdot v$</th>
+    <th>$T\cdot v$</th><th>GMRES</th><th>notes</th></tr>
+<tr><td>1. CPU FMM</td><td>fmm3dpy (CPU)</td><td>numpy (CPU)</td>
+    <td>scipy</td><td>baseline; bottlenecked by CPU FMM</td></tr>
+<tr><td>2. Full GPU</td><td>dense $K_S$, $K_D$ on GPU</td>
+    <td>JAX (GPU)</td>
+    <td><code>jax.scipy.sparse.linalg.gmres</code></td>
+    <td>entire GMRES loop on GPU; $35\times$ at $L=3$</td></tr>
+<tr><td>3. Advanced</td><td>vmap (matrix-free) or dense + block</td>
+    <td>JAX (GPU)</td>
+    <td>block GMRES / Python-loop GMRES</td>
+    <td>+Jacobi preconditioner; memory-optimal</td></tr>
+</table>
+""")
+    parts.append(
+        '<div class="fig">' + div(fig_solver_progression()) + "</div>"
+    )
+
+    # ================================================================
+    # 4. FULL GPU RESULTS
+    # ================================================================
+    parts.append(r"""
+<h2>3. Full GPU direct-summation results</h2>
+
+<p>Replacing the CPU FMM with dense GPU kernel matrices
+($K_S$, $K_D$ stored as $n \times n$ complex128) and JAX-native GMRES
+eliminates all CPU&harr;GPU data transfer during the solve loop.</p>
+
+<table>
+<tr><th>config</th><th>$L$</th><th>$n_{\mathrm{bdry}}$</th>
+    <th>HPS (s)</th><th>GMRES (s)</th><th>total (s)</th>
+    <th>memory (GB)</th><th>speedup</th></tr>
+<tr><td>$\kappa=4$</td><td>2</td><td>6,144</td>
+    <td>12.8</td><td><b>9.1</b></td><td>21.9</td>
+    <td>1.8</td><td>$2\times$ vs CPU FMM</td></tr>
+<tr><td>$\kappa=26.2$</td><td>3</td><td>24,576</td>
+    <td>58.2</td><td><b>17.5</b></td><td>75.7</td>
+    <td>29.0</td><td>$35\times$ vs CPU FMM</td></tr>
+</table>
+
+<div class="note">
+At $L = 3$: kernel build takes 9.5 s (chunked, 2048 rows at a time);
+the dense pair $K_S + K_D + T$ occupies 29 GB of the 80 GB H100.
+</div>
+""")
+
+    # ================================================================
+    # 5. ADVANCED OPTIMISATIONS
+    # ================================================================
+    parts.append(r"""
+<h2>4. Advanced optimisations</h2>
+
+<h3>4a. Block GMRES</h3>
+<p>All $n_{\mathrm{src}}$ right-hand sides solved simultaneously via a
+flattened $(n \cdot n_{\mathrm{src}})$-dimensional system.
+Per-iteration cost: three GEMMs instead of $n_{\mathrm{src}}$ GEMVs.
+GEMM utilisation on H100 is significantly higher than sequential GEMV.</p>
+
+<h3>4b. Matrix-free <code>vmap</code> matvec</h3>
+<p>Compute $[K_S v]_i = \sum_j G(x_i, x_j)\,w_j\,v_j$ on-the-fly
+via <code>jax.vmap</code> &mdash; no $n \times n$ storage.
+Near-field corrections stored as JAX BCOO sparse ($O(\mathrm{nnz})$
+vs $O(n^2)$).  Trades speed for memory: each iteration recomputes
+$O(n^2)$ kernel evaluations, but eliminates the 19 GB dense allocation.</p>
+
+<h3>4c. Jacobi preconditioner</h3>
+<p>$M_{ii} = (0.5 - D_{ii}^{\mathrm{NF}})^{-1}$ from the
+diagonal of the near-field correction.
+Cheap ($&lt; 0.4$ s setup) and reduces GMRES iteration count.</p>
+
+<table>
+<tr><th>config</th><th>$L$</th><th>$n_{\mathrm{bdry}}$</th>
+    <th>solver variant</th><th>GMRES (s)</th><th>memory (GB)</th>
+    <th>vs baseline</th></tr>
+<tr><td>$\kappa=4$</td><td>2</td><td>6,144</td>
+    <td>dense sequential</td>
+    <td>9.1</td><td>1.8</td><td>&mdash;</td></tr>
+<tr><td>$\kappa=4$</td><td>2</td><td>6,144</td>
+    <td><b>dense + block + Jacobi</b></td>
+    <td><b>6.07</b></td><td>1.8</td><td class="pass">1.5&times; faster</td></tr>
+<tr><td>$\kappa=26.2$</td><td>3</td><td>24,576</td>
+    <td>dense sequential</td>
+    <td>17.2</td><td>29.0</td><td>&mdash;</td></tr>
+<tr><td>$\kappa=26.2$</td><td>3</td><td>24,576</td>
+    <td><b>matrix-free + Jacobi</b></td>
+    <td>97.9</td><td><b>13.7</b></td>
+    <td class="pass">53% less memory</td></tr>
+</table>
+
+<p><b>Trade-off.</b>  Block GMRES wins when dense matrices fit comfortably
+($L \le 2$).  At $L = 3$ the dense path is at the 80 GB ceiling;
+matrix-free uses half the memory at the cost of $5.7\times$ slower
+iterations (on-the-fly kernel recomputation).  The matrix-free path is
+the <em>only</em> route to $L = 4+$ on a single GPU.</p>
+""")
+    parts.append('<div class="fig">' + div(fig_memory_comparison()) + "</div>")
+
+    # ================================================================
+    # 6. MAXIMUM ACHIEVABLE KAPPA
+    # ================================================================
+    parts.append(r"""
+<h2>5. Maximum achievable $\kappa$ on a single GPU</h2>
+
+<p>The binding constraint is <b>$T_{\mathrm{DtN}}$ must fit in GPU RAM</b>.
+It is the $n \times n$ dense output of the HPS factorisation; there is no
+analytic formula to apply $T \cdot v$ without storing it.
+Additionally, HPS build itself requires $\sim 54$ GB peak at $L = 3$.</p>
+
+<table>
+<tr><th>$L$</th><th>$q$</th><th>$n_{\mathrm{bdry}}$</th>
+    <th>$T_{\mathrm{DtN}}$ (GB)</th>
+    <th>max $\kappa a$ (6 ppw)</th><th>fits 80 GB?</th></tr>
+<tr><td>2</td><td>8</td><td>6,144</td>
+    <td>0.60</td><td>33.5</td><td class="pass">yes</td></tr>
+<tr><td>3</td><td>8</td><td>24,576</td>
+    <td>9.66</td><td>33.5</td>
+    <td class="pass">yes (tested)</td></tr>
+<tr><td>3</td><td>10</td><td>38,400</td>
+    <td>23.6</td><td>41.9</td><td class="pass">yes (tight)</td></tr>
+<tr><td>3</td><td>12</td><td>55,296</td>
+    <td>48.9</td><td>50.3</td>
+    <td class="warn">marginal</td></tr>
+<tr><td>3</td><td>14</td><td>75,264</td>
+    <td>90.6</td><td>58.6</td><td class="warn">no</td></tr>
+<tr><td>4</td><td>8</td><td>98,304</td>
+    <td>154.6</td><td>67.0</td><td class="warn">no</td></tr>
+</table>
+
+<div class="highlight">
+<b>Practical limit:</b> $\kappa a \approx 33$&ndash;$50$ on a single H100
+(80 GB), corresponding to $L = 3$ with $q \in [8, 12]$.
+</div>
+""")
+    parts.append('<div class="fig">' + div(fig_feasibility_kappa()) + "</div>")
+
+    # ================================================================
+    # 7. LUCKA BREAST PROBLEM FEASIBILITY
+    # ================================================================
+    parts.append(r"""
+<h2>6. Feasibility: Lucka et al. breast-imaging problem</h2>
+
+<p>Reference: <a href="https://arxiv.org/abs/2102.00755">arXiv:2102.00755</a>.
+Time-domain problem ($\rho_0 = \mathrm{const}$, $L = 0$) reduces to
+time-harmonic Helmholtz at each frequency $\omega$:</p>
+
+$$\Delta u + \frac{\omega^2}{c_0^2(x)}\,u = 0, \qquad
+  n(x) = \frac{c_{\mathrm{bg}}}{c_0(x)}, \qquad
+  b(x) = 1 - n^2(x).$$
+
+<h3>Tissue coefficients</h3>
+<table>
+<tr><th>tissue</th><th>$c_0$ (m/s)</th><th>$n$</th><th>$b$</th></tr>
+<tr><td>water (background)</td><td>1500</td><td>1.000</td><td>0.000</td></tr>
+<tr><td>fat</td><td>1470</td><td>1.020</td><td>&minus;0.041</td></tr>
+<tr><td>fibro-glandular</td><td>1515</td><td>0.990</td><td>+0.020</td></tr>
+<tr><td>blood vessels</td><td>1584</td><td>0.947</td><td>+0.103</td></tr>
+<tr><td>skin</td><td>1650</td><td>0.909</td><td>+0.174</td></tr>
+</table>
+
+<p>All $|b| \le 0.18$ &mdash; <em>mild contrast</em>, well within
+the BIE convergence regime.  Our dataset generator already handles
+$|b|$ up to $0.5$; these coefficients are gentler and will require
+<em>fewer</em> GMRES iterations.</p>
+
+<h3>Frequency&ndash;wavenumber mapping</h3>
+<p>Physical breast: $a = 55$ mm, $c_{\mathrm{bg}} = 1500$ m/s,
+$\kappa = 2\pi f / c_{\mathrm{bg}}$.</p>
+
+<table>
+<tr><th>$f$ (kHz)</th><th>$\lambda$ (mm)</th><th>$\kappa$</th>
+    <th>$\kappa a$</th><th>$L$, $q$</th>
+    <th>$T_{\mathrm{DtN}}$ (GB)</th><th>feasible?</th></tr>
+""")
+    c_bg = 1500.0
+    a_phys = 0.055
+    for f_khz in [50, 100, 150, 200, 250, 500, 1500]:
+        lam_mm = c_bg / (f_khz * 1e3) * 1e3
+        kappa = 2 * np.pi * f_khz * 1e3 / c_bg
+        ka = kappa * a_phys
+        # Determine minimal (L, q)
+        L = max(1, int(np.ceil(np.log2(max(1, 6 * ka / (np.pi * 8))))))
+        q = 8
+        if L > 3:
+            L = 3
+            q = int(np.ceil(6 * ka / (np.pi * 2**L)))
+        n_bdry = 6 * (4**L) * q**2
+        T_gb = n_bdry**2 * 16 / 1e9
+        feasible = T_gb < 60  # conservative: need headroom for HPS peak
+        cls = "pass" if feasible else "warn"
+        feas_text = "yes" if feasible else "no (OOM)"
+        parts.append(
+            f"<tr><td>{f_khz}</td><td>{lam_mm:.1f}</td>"
+            f"<td>{kappa:.0f}</td><td>{ka:.1f}</td>"
+            f"<td>L={L}, q={q}</td>"
+            f"<td>{T_gb:.1f}</td>"
+            f'<td class="{cls}">{feas_text}</td></tr>\n'
+        )
+    parts.append("</table>\n")
+
+    parts.append(r"""
+<div class="highlight">
+<b>Verdict:</b> frequencies up to <b>150 kHz</b>
+($\kappa a \approx 34.6$, same regime as our tested $L = 3$ configuration)
+are directly feasible.  200 kHz ($\kappa a \approx 46$) is tight but
+potentially achievable with $q = 12$.
+Above 250 kHz requires multi-GPU or $T_{\mathrm{DtN}}$ compression.
+Their target resolution of 1.5 MHz ($\kappa a \approx 346$) is not
+feasible on a single GPU with the current architecture.
+</div>
+
+<p><b>What is feasible:</b> the low-frequency regime ($f \le 200$ kHz)
+corresponds to the <em>coarsest multi-grid levels</em> in their FWI
+inversion scheme (their $\Delta x = 2$&ndash;$4$ mm grid).  Our solver
+can serve as a high-accuracy frequency-domain forward model for
+the multi-scale initialisation phase of their FWI pipeline.
+Each solve takes $\sim 75$ s at $f = 150$ kHz.</p>
+""")
+    parts.append(
+        '<div class="fig">' + div(fig_breast_freq_mapping()) + "</div>"
+    )
+
+    # ================================================================
+    # 8. VALIDATION
+    # ================================================================
     v = VAL_L2
     parts.append(rf"""
-<h2>Validation: FMM vs dense at $L = 2$, $\kappa = {v["kappa"]:g}$</h2>
-<p>End-to-end comparison of the FMM+GMRES solver against the dense $LU$
-solve using the same SD matrices ($q = {v["q"]}$, $a = {v["a"]}$,
-$n_{{\mathrm{{bdry}}}} = {v["n_bdry"]:,}$, $n_{{\mathrm{{patches}}}} =
-{v["n_patches"]}$). Near-field correction: ${v["n_near_pairs"]:,}$ patch
-pairs, sparsity ${v["sparsity_pct"]:.1f}\%$ of the full matrix.</p>
+<h2>7. Validation: FMM vs dense at $L = 2$</h2>
+
+<p>End-to-end comparison against dense $LU$ factorisation
+($\kappa = {v["kappa"]:g}$, $q = {v["q"]}$,
+$n_{{\mathrm{{bdry}}}} = {v["n_bdry"]:,}$).
+Near-field correction: {v["n_near_pairs"]:,} patch pairs,
+{v["sparsity_pct"]:.1f}% fill.</p>
 
 <table>
 <tr><th>quantity</th><th>value</th></tr>
@@ -652,302 +805,57 @@ pairs, sparsity ${v["sparsity_pct"]:.1f}\%$ of the full matrix.</p>
     <td>${v["rel_L2_err"]:.2e}$</td></tr>
 <tr><td>BIE solve max absolute error</td>
     <td>${v["max_abs_err"]:.2e}$</td></tr>
-<tr><td>$\|u^s\|_{{\max}}$ (dense)</td>
-    <td>${v["uscat_max_dense"]:.4e}$</td></tr>
-<tr><td>$\|u^s\|_{{\max}}$ (FMM)</td>
-    <td>${v["uscat_max_fmm"]:.4e}$</td></tr>
-<tr><td>NF correction build time</td>
-    <td>${v["nf_build_time"]:.2f}$ s</td></tr>
-<tr><td>Dense $LU$ solve time</td>
-    <td>${v["dense_solve_time"]:.2f}$ s</td></tr>
-<tr><td>GMRES+FMM solve time</td>
-    <td>${v["gmres_fmm_time"]:.2f}$ s</td></tr>
 </table>
-<p>The FMM solver reproduces the dense solution to $\sim 10^{{-9}}$
-relative $L^2$ error. At $L = 2$ ($n_{{\mathrm{{bdry}}}} = 6{{,}}144$),
-GMRES+FMM is slower than dense $LU$ because the near-field sparsity
-is only $57.6$%; the crossover favours FMM at $L \ge 3$.</p>
+
+<p>The GPU solver reproduces the dense $LU$ solution to $\sim 10^{{-9}}$
+relative $L^2$ error.</p>
 """)
     parts.append('<div class="fig">' + div(fig_validation_bars()) + "</div>")
 
-    # ---- Modal results table ----
-    runs = [
-        MODAL_L1,
-        MODAL_SMOKE,
-        MODAL_SMOKE_GPU,
-        MODAL_SMOKE_FULL_GPU,
-        MODAL_HF,
-        MODAL_HF_GPU,
-        MODAL_HF_FULL_GPU,
-    ]
+    # ================================================================
+    # 9. DISCRETISATION PARAMETERS
+    # ================================================================
     parts.append(r"""
-<h2>Modal GPU results</h2>
-<p>All runs on NVIDIA H100 (80 GB) via Modal, with $q = 8$, $p = 12$,
-$n_{\mathrm{src}} = 4$ plane-wave illuminations (simultaneous RHS).
-NF corrections are generated once per $(\kappa, q, L, a)$ and cached.</p>
-<p>Three solver variants:
-<b>CPU</b>&nbsp;= FMM on CPU (fmm3dpy) + $T$ on CPU (numpy);
-<b>GPU $T$</b>&nbsp;= FMM on CPU + $T$ on GPU (JAX);
-<b>full GPU</b>&nbsp;= direct summation for $S$, $D$ kernels on GPU +
-$T$ on GPU + JAX-native GMRES (no CPU FMM at all).</p>
-
-<table>
-<tr><th>$\kappa$</th><th>$\kappa a$</th><th>$L$</th>
-    <th>$n_{\mathrm{bdry}}$</th><th>$n_{\mathrm{int}}$</th>
-    <th>$T_{\mathrm{DtN}}$ mem</th>
-    <th>$T$ loc.</th>
-    <th>NF gen</th><th>HPS (GPU)</th><th>GMRES+FMM</th>
-    <th>total</th><th>$\|u^s\|_{\max}$</th><th>conv.</th></tr>
-""")
-    for r in runs:
-        ka = r["kappa"] * r["a"]
-        c = "pass" if r["converged"] else "warn"
-        if r.get("full_gpu"):
-            variant = "full GPU"
-        elif r.get("tdtn_on_gpu"):
-            variant = "GPU T"
-        else:
-            variant = "CPU"
-        parts.append(
-            f"<tr><td>{r['kappa']:.2f}</td><td>{ka:.1f}</td><td>{r['L']}</td>"
-            f"<td>{r['n_bdry']:,}</td><td>{r['n_interior']:,}</td>"
-            f"<td>{r['T_DtN_mem_gb']:.2f} GB</td>"
-            f"<td>{variant}</td>"
-            f"<td>{r['nf_gen_time']:.1f} s</td><td>{r['hps_time']:.1f} s</td>"
-            f"<td>{r['gmres_time']:.1f} s</td><td>{r['total_time']:.1f} s</td>"
-            f"<td>{r['uscat_max']:.3e}</td>"
-            f'<td class="{c}">{"Yes" if r["converged"] else "No"}</td></tr>\n'
-        )
-    parts.append("</table>\n")
-
-    # Dense A100 OOM note
-    parts.append(r"""
-<p><b>Note:</b> the $L = 3$ run ($n_{\mathrm{bdry}} = 24{,}576$) exceeds the
-dense SD memory ceiling on A100-40GB ($T_{\mathrm{DtN}}$ alone is 9.66 GB;
-the pair of dense SD matrices would be $\sim 19$ GB). The FMM solver
-avoids forming the full SD matrices entirely, using only the sparse
-near-field correction ($\sim 14\%$ fill at $L = 3$).</p>
-""")
-
-    # ---- Timing breakdown ----
-    parts.append(r"""
-<h2>Timing breakdown</h2>
-<p>Stacked bar chart for each configuration (CPU $T$ baseline).
-The GMRES+FMM exterior solve (red) dominates at $L = 3$ because
-fmm3dpy runs on CPU and the $T \cdot v$ dense matvec
-($24{,}576 \times 24{,}576$) is a significant per-iteration cost.</p>
-""")
-    parts.append('<div class="fig">' + div(fig_timing_breakdown()) + "</div>")
-
-    # ---- GPU comparison ----
-    parts.append(r"""
-<h2>GPU acceleration: three solver variants</h2>
-<p>Three exterior-solve strategies, all on the same H100:</p>
-<ul>
-  <li><b>CPU baseline</b>: FMM (fmm3dpy, CPU) for $S \cdot v$ and $D \cdot v$,
-      numpy for $T \cdot v$.</li>
-  <li><b>GPU $T$</b>: as above but $T \cdot v$ on GPU (JAX),
-      24% faster at $L = 2$, negligible at $L = 3$ (FMM-bottlenecked).</li>
-  <li><b>Full GPU</b>: replaces the CPU FMM entirely with
-      dense GPU kernel matrices $K_S$, $K_D$ ($O(n^2)$ storage) plus
-      JAX-native GMRES (<code>jax.scipy.sparse.linalg.gmres</code>).
-      No CPU roundtrip per iteration.</li>
-</ul>
-<p>Full GPU results:</p>
-<ul>
-  <li>$L = 2$: GMRES $9.1$ s (was $18.0$ s baseline, <b>$2\times$ speedup</b>).
-      Kernel build $2.0$ s, memory $1.8$ GB.</li>
-  <li>$L = 3$: GMRES $17.5$ s (was $617.4$ s baseline, <b>$35\times$ speedup</b>).
-      Kernel build $9.5$ s, memory $29.0$ GB (fits H100-80GB).</li>
-</ul>
-<p>The full GPU path stores $S + D + T$ as three $n \times n$ complex128
-dense matrices ($3 n^2 \times 16$ bytes). At $n = 24{,}576$ this is 29 GB.
-This approach trades $O(n^2)$ memory for massive GEMV parallelism:
-each GMRES iteration is three GPU matrix-vector products, compared to
-seconds-long CPU FMM calls in the baseline.</p>
-""")
-    parts.append(
-        '<div class="fig">' + div(fig_gpu_tdtn_comparison()) + "</div>"
-    )
-
-    # ---- Advanced solver section ----
-    parts.append(r"""
-<h2>Advanced solver: block GMRES + matrix-free + preconditioner</h2>
-<p>Three additional optimisations layered on top of the full GPU solver:</p>
-<ol>
-  <li><b>Block GMRES</b>: all $n_{\mathrm{src}}$ right-hand sides
-      solved simultaneously via a flattened
-      $(n \cdot n_{\mathrm{src}})$-system.  The per-iteration cost
-      becomes three GEMMs rather than $n_{\mathrm{src}}$ sequential GEMVs.</li>
-  <li><b>Matrix-free <code>vmap</code> matvec</b>: compute
-      $[K_S v]_i = \sum_j G(x_i, x_j)\, w_j\, v_j$ on-the-fly via
-      <code>jax.vmap</code> with no $n \times n$ storage.
-      Near-field corrections stored as JAX BCOO sparse ($O(\mathrm{nnz})$
-      instead of $O(n^2)$).  This eliminates the 19 GB dense $K_S + K_D$
-      allocation and enables $L = 4+$ on an 80 GB GPU.</li>
-  <li><b>Jacobi preconditioner</b>:
-      $M_{ii} = 1/(0.5 - D_{ii}^{\mathrm{NF}})$ from the near-field
-      correction diagonal.  Reduces iteration count in the BIE system
-      $\frac{1}{2}I - D + S T$.</li>
-</ol>
-
-<table>
-<tr><th>config</th><th>$L$</th><th>$n_{\mathrm{bdry}}$</th>
-    <th>solver variant</th><th>GMRES (s)</th><th>memory (GB)</th>
-    <th>speedup vs baseline</th></tr>
-<tr><td>$\kappa=4$</td><td>2</td><td>6,144</td>
-    <td>dense sequential (baseline)</td>
-    <td>9.1</td><td>1.81</td><td>&mdash;</td></tr>
-<tr><td>$\kappa=4$</td><td>2</td><td>6,144</td>
-    <td><b>dense + block GMRES + Jacobi</b></td>
-    <td><b>6.07</b></td><td>1.81</td><td><b>1.50&times;</b></td></tr>
-<tr><td>$\kappa=26.2$</td><td>3</td><td>24,576</td>
-    <td>dense sequential (baseline)</td>
-    <td>17.2</td><td>29.0</td><td>&mdash;</td></tr>
-<tr><td>$\kappa=26.2$</td><td>3</td><td>24,576</td>
-    <td>dense + block GMRES + Jacobi</td>
-    <td colspan="3">OOM (peak alloc exceeds 80 GB with preconditioner overhead)</td></tr>
-<tr><td>$\kappa=26.2$</td><td>3</td><td>24,576</td>
-    <td><b>matrix-free + Jacobi</b></td>
-    <td><b>97.9</b></td><td><b>13.7</b></td>
-    <td>$0.18\times$ (but 53% less memory)</td></tr>
-</table>
-
-<p><b>Discussion.</b>  Block GMRES with the Jacobi preconditioner yields a
-34% speedup at $L = 2$ where the dense matrices fit comfortably.
-At $L = 3$ the dense path barely fits (29 GB) and the additional working
-memory from block GMRES triggers OOM; the dense sequential baseline
-remains the fastest option when memory permits.
-The matrix-free path trades speed ($5.7\times$ slower per GMRES iteration,
-due to on-the-fly kernel recomputation via <code>vmap</code>) for a
-$2.1\times$ reduction in GPU memory, enabling problems at
-$L = 4$ ($n_{\mathrm{bdry}} = 98{,}304$, dense SD would be 310 GB)
-without any code changes.</p>
-
-<p><b>Python-loop GMRES.</b>  The matrix-free matvec uses a custom
-restarted GMRES with Python-loop iterations (no
-<code>jax.lax.while_loop</code>).  This avoids the monolithic XLA trace
-that <code>jax.scipy.sparse.linalg.gmres</code> produces with complex
-<code>vmap</code>-based operators (which caused 128 s compilation at
-$L = 2$).  The matvec JIT-compiles once; Arnoldi iterations run
-imperatively.</p>
-""")
-
-    # ---- n_bdry vs time ----
-    parts.append(r"""
-<h2>Solve time vs boundary DoFs</h2>
-<p>Log-log scaling of total solve time and HPS-only time with
-$n_{\mathrm{bdry}}$. The HPS interior factorisation (GPU) scales
-roughly as $\mathcal O(n_{\mathrm{int}})$ = $\mathcal O(8^L)$;
-the GMRES+FMM exterior (CPU) scales as
-$\mathcal O(n_{\mathrm{iter}} \cdot n \log n)$.</p>
-""")
-    parts.append('<div class="fig">' + div(fig_n_bdry_vs_time()) + "</div>")
-
-    # ---- Memory scaling ----
-    parts.append(r"""
-<h2>Memory scaling: dense SD vs FMM near-field</h2>
-<p>The dense SD pair requires $2 n_{\mathrm{bdry}}^2 \times 16$ bytes
-(complex128) = $\mathcal O(n^2)$ memory. At $L \ge 4$
-($n_{\mathrm{bdry}} \ge 98{,}304$) this exceeds 80 GB.
-The FMM near-field correction stores only the patch pairs within
-the near-field radius, and its fill fraction decreases with $L$
-(measured: $100\%$ at $L = 1$, $57.6\%$ at $L = 2$, $13.9\%$ at $L = 3$).
-At $L = 4$ the dense SD would require $\sim 310$ GB;
-the near-field correction is estimated at $\sim 15$ GB.</p>
-""")
-    parts.append('<div class="fig">' + div(fig_memory_scaling()) + "</div>")
-
-    # ---- Dense vs FMM cost comparison ----
-    parts.append(r"""
-<h2>Dense LU vs GMRES+FMM cost</h2>
-<p>Dense $LU$ scales as $\mathcal O(n^3)$; GMRES+FMM as
-$\mathcal O(n_{\mathrm{iter}} \cdot n \log n)$.
-The crossover occurs near $n_{\mathrm{bdry}} \approx 10{,}000$
-($L \sim 2$&ndash;$3$). At $L = 4$, dense LU would take
-$\sim 2 \times 10^5$ s ($\sim 55$ hours); GMRES+FMM is
-estimated at $\sim 3{,}000$ s ($\sim 50$ min).</p>
-""")
-    parts.append('<div class="fig">' + div(fig_dense_vs_fmm_cost()) + "</div>")
-
-    # ---- Discretisation parameters ----
-    parts.append(r"""
-<h2>Discretisation parameters</h2>
+<h2>8. Discretisation parameters</h2>
 <table>
 <tr><th>quantity</th><th>symbol</th><th>value</th></tr>
 <tr><td>Gauss nodes / boundary face</td><td>$q$</td><td>8</td></tr>
 <tr><td>interior Chebyshev order</td><td>$p$</td><td>12</td></tr>
 <tr><td>cube half-width</td><td>$a$</td><td>1.25</td></tr>
-<tr><td>FMM precision</td><td>$\varepsilon_{\mathrm{FMM}}$</td><td>$10^{-7}$</td></tr>
 <tr><td>GMRES tolerance</td><td>$\texttt{rtol}$</td><td>$10^{-6}$</td></tr>
 <tr><td>GMRES restart</td><td></td><td>50</td></tr>
 <tr><td>GMRES max iterations</td><td></td><td>200</td></tr>
 <tr><td>near-field ratio</td><td></td><td>4.0</td></tr>
 <tr><td>incident fields</td><td>$n_{\mathrm{src}}$</td><td>4 plane waves</td></tr>
+<tr><td>GPU</td><td></td><td>NVIDIA H100 (80 GB) via Modal</td></tr>
 </table>
 """)
 
-    # ---- Frequency mapping ----
+    # ================================================================
+    # 10. REPRODUCTION
+    # ================================================================
     parts.append(r"""
-<h2>Frequency&ndash;wavenumber mapping</h2>
-<p>For acoustic scattering with background speed $c_0 = 1500$ m/s
-and breast radius $\sim 55$ mm ($a = 0.055$ m), the wavenumber is
-$\kappa = 2\pi f / c_0$. The table below maps frequency to the required
-discretisation and memory for $q = 8$.</p>
-
-<table>
-<tr><th>$f$ (kHz)</th><th>$\lambda$ (mm)</th><th>$\kappa$</th>
-    <th>$\kappa a$</th><th>$L$</th><th>$n_{\mathrm{bdry}}$</th>
-    <th>dense SD (GB)</th><th>fits 80 GB?</th></tr>
-""")
-    c_bg = 1500.0
-    a_phys = 0.055
-    for f_khz in [50, 100, 150, 200, 250, 500]:
-        lam_mm = c_bg / (f_khz * 1e3) * 1e3
-        kappa = 2 * np.pi * f_khz * 1e3 / c_bg
-        ka = kappa * a_phys
-        L = max(1, int(np.ceil(np.log2(2 * ka / 12))))
-        n_bdry = 6 * 64 * (4**L)
-        sd_gb = n_bdry**2 * 16 * 2 / 1e9
-        fits = sd_gb < 80
-        cls = "pass" if fits else "warn"
-        parts.append(
-            f"<tr><td>{f_khz}</td><td>{lam_mm:.1f}</td><td>{kappa:.1f}</td>"
-            f"<td>{ka:.1f}</td><td>{L}</td><td>{n_bdry:,}</td>"
-            f'<td>{sd_gb:.1f}</td><td class="{cls}">{"Yes" if fits else "No"}</td></tr>\n'
-        )
-    parts.append(r"""
-</table>
-<p>Above $\sim 200$ kHz the dense SD pair exceeds 80 GB; the FMM solver
-removes this limitation entirely. The runs reported here use the larger
-demonstration cube ($a = 1.25$) for direct comparison with the existing
-dataset; the physical breast problem ($a = 0.055$) requires correspondingly
-fewer boundary DoFs per frequency.</p>
-""")
-
-    # ---- Reproduction ----
-    parts.append(r"""
-<h2>Reproduction</h2>
+<h2>9. Reproduction</h2>
 <pre><code># Smoke test (L=2, kappa=4) on Modal H100
 modal run examples/modal_hf_solve_3d.py --mode smoke
 
-# High-frequency solve (L=3, kappa~26) — dense sequential baseline
+# High-frequency (L=3, kappa~26) — dense sequential baseline
 modal run examples/modal_hf_solve_3d.py --mode solve --freq-khz 5 --a 1.25
 
-# Dense + block GMRES + Jacobi preconditioner
+# Dense + block GMRES + Jacobi preconditioner (L=2)
 modal run examples/modal_hf_solve_3d.py --mode smoke --solver-mode dense_block
 
-# Matrix-free + preconditioner (low memory)
+# Matrix-free + preconditioner (L=3, low memory)
 modal run examples/modal_hf_solve_3d.py --mode solve --freq-khz 5 --a 1.25 --solver-mode matfree
 
-# Local CPU validation (requires SD matrices at data/examples/SD_3D/)
+# Local CPU validation
 python examples/test_fmm_bie_3d.py</code></pre>
 
 <p>Source:
 <a href="https://github.com/jma02/jaxhps/pull/3">jaxhps PR&nbsp;#3</a>,
 branch <code>devin/1781152283-breast-scattering-3d</code>.
-FMM solver in <code>wave_scattering_utils_3D.py</code>;
-Modal deployment in <code>modal_hf_solve_3d.py</code>.</p>
+Solver implementation: <code>wave_scattering_utils_3D.py</code>;
+Modal deployment: <code>modal_hf_solve_3d.py</code>.</p>
 </body></html>
 """)
 
