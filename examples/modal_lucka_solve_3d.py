@@ -174,8 +174,9 @@ def run_lucka_solve(
     p: int = 12,
     n_src: int = 4,
     near_ratio: float = 4.0,
-    gmres_tol: float = 1e-6,
-    solver_mode: str = "dense_block",
+    gmres_tol: float = 1e-5,
+    maxiter: int = 500,
+    solver_mode: str = "matfree",
 ):
     import sys
     import time
@@ -463,10 +464,12 @@ def run_lucka_solve(
     T_DtN = get_DtN_from_ItI_3D(R, float(kappa))
     jax.block_until_ready(T_DtN)
     T_DtN_np = np.asarray(T_DtN)
-    del T_ItI, R
+    del T_ItI, R, T_DtN
     import gc
 
     gc.collect()
+    # Free JAX compilation caches to reclaim fragmented GPU memory
+    jax.clear_caches()
     dt_hps = time.perf_counter() - t0
     print(f"  HPS build+Cayley: {dt_hps:.2f}s")
     print(f"  T_DtN: {T_DtN_np.shape}, {T_DtN_np.nbytes / 1e9:.2f} GB")
@@ -485,11 +488,10 @@ def run_lucka_solve(
         _, perm = tree_nf.query(bp)
         perm_inv = np.argsort(perm)
         T_DtN_np = T_DtN_np[np.ix_(perm_inv, perm_inv)]
-        del T_DtN
         T_DtN_gpu = jax.device_put(jnp.asarray(T_DtN_np), dev)
         print("  Permuted T_DtN to fmm3dbie ordering")
     else:
-        T_DtN_gpu = T_DtN
+        T_DtN_gpu = jax.device_put(jnp.asarray(T_DtN_np), dev)
         bdry_pts_nf = bp
         normals_nf = nrm
 
@@ -517,8 +519,8 @@ def run_lucka_solve(
             np.asarray(uin_dn),
             nf,
             tol=gmres_tol,
-            maxiter=200,
-            restart=50,
+            maxiter=maxiter,
+            restart=200,
             matrix_free=False,
             use_preconditioner=True,
             block_rhs=True,
@@ -535,8 +537,8 @@ def run_lucka_solve(
             np.asarray(uin_dn),
             nf,
             tol=gmres_tol,
-            maxiter=200,
-            restart=50,
+            maxiter=maxiter,
+            restart=200,
             matrix_free=True,
             use_preconditioner=True,
             block_rhs=False,
@@ -555,8 +557,8 @@ def run_lucka_solve(
             np.asarray(uin_dn),
             nf,
             tol=gmres_tol,
-            maxiter=200,
-            restart=50,
+            maxiter=maxiter,
+            restart=200,
         )
     dt_gmres = time.perf_counter() - t0
 
@@ -604,18 +606,22 @@ def main(
     kappa: float = 30.0,
     a: float = 1.25,
     q: int = 8,
-    L: int = 3,
+    levels: int = 3,
     p: int = 12,
     n_src: int = 4,
-    solver_mode: str = "dense_block",
+    solver_mode: str = "matfree",
+    gmres_tol: float = 1e-5,
+    maxiter: int = 500,
 ):
     result = run_lucka_solve.remote(
         kappa=kappa,
         a=a,
         q=q,
-        L=L,
+        L=levels,
         p=p,
         n_src=n_src,
         solver_mode=solver_mode,
+        gmres_tol=gmres_tol,
+        maxiter=maxiter,
     )
     print(f"\nResult: {result}")
