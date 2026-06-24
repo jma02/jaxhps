@@ -172,6 +172,30 @@ MODAL_ADV_L3_MATFREE = dict(
     solver_mode="matfree",
 )
 
+# --- Lucka breast forward solve at kappa=30 ---
+LUCKA_SOLVE = dict(
+    kappa=30.0,
+    kappa_a=37.5,
+    a=1.25,
+    L=3,
+    q=8,
+    p=12,
+    n_src=4,
+    n_bdry=24576,
+    gpu="H100",
+    hps_time=63.55,
+    gmres_time=315.28,
+    total_time=378.83,
+    converged=True,
+    uscat_max=1.894,
+    T_DtN_mem_gb=9.66,
+    total_mem_gb=13.69,
+    solver_mode="matfree",
+    restart=200,
+    b_min=-0.041,
+    b_max=0.174,
+)
+
 
 # ============================================================
 # Plotly figures
@@ -447,6 +471,226 @@ def fig_breast_freq_mapping():
         ),
         margin=dict(l=50, r=20, t=60, b=40),
         height=460,
+    )
+    return fig
+
+
+def _build_lucka_phantom_grid(a, N=128):
+    """Generate the Lucka breast phantom b(x) on a uniform 3D grid."""
+    x = np.linspace(-a, a, N)
+    pts = np.stack(np.meshgrid(x, x, x, indexing="ij"), axis=-1).reshape(-1, 3)
+    r = np.linalg.norm(pts, axis=-1)
+
+    b_fat, b_fibro, b_vessel, b_skin = -0.041, 0.020, 0.103, 0.174
+
+    def radial_bump(r_vals, r_centre, width):
+        t = np.abs(r_vals - r_centre) / width
+        return np.where(t < 1.0, (1.0 - t**2) ** 4, 0.0)
+
+    skin_mask = radial_bump(r, 0.9 * a, 0.08 * a)
+    fat_mask = np.where(r < 0.75 * a, 1.0, 0.0)
+    trans = np.clip((r - 0.75 * a) / (0.10 * a), 0, 1)
+    fat_mask = np.where(
+        (r >= 0.75 * a) & (r < 0.85 * a), (1.0 - trans**2) ** 4, fat_mask
+    )
+    fibro_mask = np.where(r < 0.30 * a, 1.0, 0.0)
+    trans_f = np.clip((r - 0.30 * a) / (0.10 * a), 0, 1)
+    fibro_mask = np.where(
+        (r >= 0.30 * a) & (r < 0.40 * a), (1.0 - trans_f**2) ** 4, fibro_mask
+    )
+    vessel_radius = 0.05 * a
+    d1 = np.sqrt((pts[:, 0] - 0.2 * a) ** 2 + (pts[:, 1] - 0.15 * a) ** 2)
+    v1 = np.where(
+        d1 < vessel_radius, (1.0 - (d1 / vessel_radius) ** 2) ** 4, 0.0
+    )
+    v1 *= (r < 0.8 * a).astype(float)
+    d2 = np.sqrt((pts[:, 1] + 0.1 * a) ** 2 + (pts[:, 2] - 0.2 * a) ** 2)
+    v2 = np.where(
+        d2 < vessel_radius, (1.0 - (d2 / vessel_radius) ** 2) ** 4, 0.0
+    )
+    v2 *= (r < 0.8 * a).astype(float)
+    d3 = np.sqrt((pts[:, 0] + 0.15 * a) ** 2 + (pts[:, 2] + 0.1 * a) ** 2)
+    v3 = np.where(
+        d3 < vessel_radius, (1.0 - (d3 / vessel_radius) ** 2) ** 4, 0.0
+    )
+    v3 *= (r < 0.8 * a).astype(float)
+    vessel_mask = np.maximum(np.maximum(v1, v2), v3)
+
+    b = fat_mask * b_fat
+    b = np.where(fibro_mask > 0.5, fibro_mask * b_fibro, b)
+    b = np.where(vessel_mask > 0.5, vessel_mask * b_vessel, b)
+    b = b * (1.0 - skin_mask) + skin_mask * b_skin
+    b *= (r < 0.98 * a).astype(float)
+    return b.reshape(N, N, N), x
+
+
+def fig_lucka_slices():
+    """Three orthogonal slices through the Lucka breast phantom."""
+    from plotly.subplots import make_subplots
+
+    a = LUCKA_SOLVE["a"]
+    b_vol, x = _build_lucka_phantom_grid(a, N=128)
+    N = len(x)
+    mid = N // 2
+
+    fig = make_subplots(
+        rows=1,
+        cols=3,
+        subplot_titles=["z = 0 slice", "y = 0 slice", "x = 0 slice"],
+        horizontal_spacing=0.06,
+    )
+    colorscale = [
+        [0.0, "#2166ac"],
+        [0.35, "#67a9cf"],
+        [0.5, "#f7f7f7"],
+        [0.65, "#ef8a62"],
+        [0.85, "#b2182b"],
+        [1.0, "#67001f"],
+    ]
+    zmin, zmax = -0.05, 0.18
+
+    # z=0 slice (xy plane)
+    fig.add_trace(
+        go.Heatmap(
+            z=b_vol[:, :, mid].T,
+            x=x,
+            y=x,
+            colorscale=colorscale,
+            zmin=zmin,
+            zmax=zmax,
+            showscale=False,
+        ),
+        row=1,
+        col=1,
+    )
+    # y=0 slice (xz plane)
+    fig.add_trace(
+        go.Heatmap(
+            z=b_vol[:, mid, :].T,
+            x=x,
+            y=x,
+            colorscale=colorscale,
+            zmin=zmin,
+            zmax=zmax,
+            showscale=False,
+        ),
+        row=1,
+        col=2,
+    )
+    # x=0 slice (yz plane)
+    fig.add_trace(
+        go.Heatmap(
+            z=b_vol[mid, :, :].T,
+            x=x,
+            y=x,
+            colorscale=colorscale,
+            zmin=zmin,
+            zmax=zmax,
+            colorbar=dict(title="b(x)", len=0.9),
+        ),
+        row=1,
+        col=3,
+    )
+
+    fig.update_layout(
+        height=350,
+        margin=dict(l=40, r=20, t=50, b=40),
+    )
+    for i in range(1, 4):
+        fig.update_xaxes(title_text="", row=1, col=i, scaleanchor=f"y{i}")
+        fig.update_yaxes(title_text="", row=1, col=i)
+    return fig
+
+
+def fig_lucka_volume():
+    """3D isosurface volume rendering of the Lucka breast phantom."""
+    a = LUCKA_SOLVE["a"]
+    b_vol, x = _build_lucka_phantom_grid(a, N=64)
+    X, Y, Z = np.meshgrid(x, x, x, indexing="ij")
+
+    fig = go.Figure()
+
+    # Skin shell (b ≈ 0.174)
+    fig.add_trace(
+        go.Isosurface(
+            x=X.ravel(),
+            y=Y.ravel(),
+            z=Z.ravel(),
+            value=b_vol.ravel(),
+            isomin=0.12,
+            isomax=0.18,
+            surface_count=2,
+            colorscale=[[0, "#d62728"], [1, "#8c1515"]],
+            showscale=False,
+            opacity=0.3,
+            caps=dict(x_show=False, y_show=False, z_show=False),
+            name="Skin (b ≈ 0.17)",
+        )
+    )
+    # Blood vessels (b ≈ 0.103)
+    fig.add_trace(
+        go.Isosurface(
+            x=X.ravel(),
+            y=Y.ravel(),
+            z=Z.ravel(),
+            value=b_vol.ravel(),
+            isomin=0.07,
+            isomax=0.11,
+            surface_count=2,
+            colorscale=[[0, "#ff7f0e"], [1, "#cc6600"]],
+            showscale=False,
+            opacity=0.5,
+            caps=dict(x_show=False, y_show=False, z_show=False),
+            name="Vessels (b ≈ 0.10)",
+        )
+    )
+    # Fibroglandular core (b ≈ 0.020)
+    fig.add_trace(
+        go.Isosurface(
+            x=X.ravel(),
+            y=Y.ravel(),
+            z=Z.ravel(),
+            value=b_vol.ravel(),
+            isomin=0.015,
+            isomax=0.025,
+            surface_count=2,
+            colorscale=[[0, "#2ca02c"], [1, "#1a6b1a"]],
+            showscale=False,
+            opacity=0.4,
+            caps=dict(x_show=False, y_show=False, z_show=False),
+            name="Fibroglandular (b ≈ 0.02)",
+        )
+    )
+    # Fat (b ≈ -0.041)
+    fig.add_trace(
+        go.Isosurface(
+            x=X.ravel(),
+            y=Y.ravel(),
+            z=Z.ravel(),
+            value=b_vol.ravel(),
+            isomin=-0.045,
+            isomax=-0.035,
+            surface_count=2,
+            colorscale=[[0, "#1f77b4"], [1, "#0d4a8a"]],
+            showscale=False,
+            opacity=0.15,
+            caps=dict(x_show=False, y_show=False, z_show=False),
+            name="Fat (b ≈ −0.04)",
+        )
+    )
+
+    fig.update_layout(
+        scene=dict(
+            xaxis_title="x",
+            yaxis_title="y",
+            zaxis_title="z",
+            aspectmode="cube",
+        ),
+        height=550,
+        margin=dict(l=10, r=10, t=40, b=10),
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.0, xanchor="center", x=0.5
+        ),
     )
     return fig
 
@@ -960,6 +1204,80 @@ the total compute would be approximately 25 minutes on a single H100.</p>
     )
 
     # ================================================================
+    # 8.5 LUCKA FORWARD SOLVE DEMONSTRATION
+    # ================================================================
+    s = LUCKA_SOLVE
+    parts.append(rf"""
+<h3>7.4 Forward solve demonstration: $\kappa = {s["kappa"]:g}$</h3>
+
+<p>We demonstrate the full forward solve with a multi-tissue breast
+phantom at $\kappa = {s["kappa"]:g}$ ($\kappa a = {s["kappa_a"]}$),
+using the tissue coefficients from Table&nbsp;7.1.
+The phantom is constructed from smooth $C^4$ radial bump
+functions: a skin shell at $|x| \approx 0.9a$, a fat layer
+filling $|x| < 0.85a$, a fibroglandular core at $|x| < 0.4a$,
+and three blood-vessel cylinders (radius $0.05a$) at
+various orientations inside the breast.</p>
+
+<h4>Scattering potential $b(x)$: orthogonal slices</h4>
+
+<p>Three mutually orthogonal slices through the centre of the
+computational cube $[-a,a]^3$, showing the scattering potential
+$b(x) = 1 - n^2(x)$:</p>
+""")
+    parts.append('<div class="fig">' + div(fig_lucka_slices()) + "</div>")
+    parts.append(r"""
+<p>Blue regions ($b < 0$): fat (sound speed lower than background).
+Red regions ($b > 0$): skin, blood vessels, fibroglandular tissue
+(sound speed higher than background).  White: background medium
+($b = 0$).</p>
+
+<h4>3D volume rendering</h4>
+
+<p>Isosurface rendering showing the spatial arrangement of tissue
+layers.  Semi-transparent outer shell = skin; orange tubes =
+blood vessels; green core = fibroglandular tissue; blue fill = fat.</p>
+""")
+    parts.append('<div class="fig">' + div(fig_lucka_volume()) + "</div>")
+    parts.append(rf"""
+<h4>Solve results</h4>
+
+<table>
+<tr><th>parameter</th><th>value</th></tr>
+<tr><td>$\kappa$</td><td>{s["kappa"]:g}</td></tr>
+<tr><td>$\kappa a$</td><td>{s["kappa_a"]}</td></tr>
+<tr><td>$L$, $q$, $p$</td><td>{s["L"]}, {s["q"]}, {s["p"]}</td></tr>
+<tr><td>$n_{{\mathrm{{bdry}}}}$</td><td>{s["n_bdry"]:,}</td></tr>
+<tr><td>tissue contrast $b(x)$</td>
+    <td>$[{s["b_min"]:.3f},\; +{s["b_max"]:.3f}]$</td></tr>
+<tr><td>incident fields</td><td>{s["n_src"]} plane waves (Fibonacci $S^2$)</td></tr>
+<tr><td>solver</td><td>matrix-free + Jacobi, restart = {s["restart"]}</td></tr>
+<tr><td>HPS time</td><td>{s["hps_time"]:.1f} s</td></tr>
+<tr><td>GMRES time</td><td>{s["gmres_time"]:.1f} s</td></tr>
+<tr><td><b>total wall time</b></td><td><b>{s["total_time"]:.1f} s</b></td></tr>
+<tr><td>converged</td><td class="pass">yes (all {s["n_src"]} RHS)</td></tr>
+<tr><td>$\|u^s\|_{{\infty}}$</td><td>{s["uscat_max"]:.3f}</td></tr>
+<tr><td>GPU memory</td><td>{s["total_mem_gb"]:.2f} GB</td></tr>
+</table>
+
+<div class="highlight">
+<b>Key finding:</b> the Lucka breast problem at $\kappa = {s["kappa"]:g}$
+($\kappa a = {s["kappa_a"]}$, equivalent to $f \approx 150$ kHz for a
+55 mm breast) is <em>directly solvable</em> on a single H100 in
+<b>{s["total_time"]:.0f} s</b> using the matrix-free solver with
+Jacobi preconditioning.  The mild tissue contrast ($|b| \le 0.18$)
+ensures rapid GMRES convergence once a sufficiently large Krylov
+subspace (restart = {s["restart"]}) is used.
+</div>
+
+<p class="note"><b>Note:</b> the dense BIE solver
+(which is 18&times; faster per-iteration) cannot be used at this
+configuration due to GPU memory fragmentation after the HPS
+factorisation phase (peak 54 GB).  The matrix-free path avoids
+storing $K_S$, $K_D$ entirely, requiring only 13.7 GB total.</p>
+""")
+
+    # ================================================================
     # 9. VALIDATION
     # ================================================================
     v = VAL_L2
@@ -1025,7 +1343,10 @@ modal run examples/modal_hf_solve_3d.py --mode smoke --solver-mode dense_block
 
 # Matrix-free + Jacobi (L=3, low memory)
 modal run examples/modal_hf_solve_3d.py --mode solve --freq-khz 5 --a 1.25 \
-    --solver-mode matfree</code></pre>
+    --solver-mode matfree
+
+# Lucka breast forward solve (kappa=30, tissue phantom, ~6 min)
+modal run examples/modal_lucka_solve_3d.py</code></pre>
 
 <p>Source:
 <a href="https://github.com/jma02/jaxhps/pull/3">jaxhps PR&nbsp;#3</a>,
