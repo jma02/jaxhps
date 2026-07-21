@@ -160,6 +160,106 @@ def build_lucka_phantom(int_pts, a):
     return b.reshape(shape[:-1])
 
 
+def build_lucka_phantom_hemisphere(int_pts, a):
+    """Pendant hemispherical breast phantom b(x) on interior points.
+
+    Models the Lucka et al. geometry: a pendant breast hanging below a
+    chest-wall plane at z = z0.  Tissue layers are functions of the
+    distance r from the hemisphere centre c = (0, 0, z0), restricted to
+    the lower half-space z < z0, with a smooth C^4 cutoff ramp at the
+    flat face so that b remains smooth and compactly supported.
+
+    Layers (same b-values as the spherical phantom):
+      - Skin shell on the curved surface: |x-c| ~ 0.9R, width 0.08R
+      - Fat bulk:                          |x-c| < 0.85R
+      - Fibroglandular core: sphere of radius 0.35R centred at
+        c - (0, 0, 0.45R)
+      - Blood vessels: 3 thin cylinders (radius 0.05R), masked to the
+        breast interior
+    """
+    import numpy as np
+
+    b_fat = -0.041
+    b_fibro = 0.020
+    b_vessel = 0.103
+    b_skin = 0.174
+
+    shape = int_pts.shape
+    pts = int_pts.reshape(-1, 3)
+
+    # Hemisphere: radius R, centred on the chest-wall plane z = z0
+    R = 0.80 * a
+    z0 = 0.55 * a
+    c = np.array([0.0, 0.0, z0])
+    d = pts - c[None, :]
+    r = np.linalg.norm(d, axis=-1)
+    z = pts[:, 2]
+
+    def radial_bump(r_vals, r_centre, width):
+        t = np.abs(r_vals - r_centre) / width
+        return np.where(t < 1.0, (1.0 - t**2) ** 4, 0.0)
+
+    def smooth_step_down(x, x0, w):
+        """1 for x < x0 - w, C^4 rolloff to 0 at x0."""
+        t = np.clip((x - (x0 - w)) / w, 0.0, 1.0)
+        return (1.0 - t**2) ** 4
+
+    # Flat-face cutoff: full tissue for z < z0 - 0.1R, smooth to 0 at z0
+    zcut = smooth_step_down(z, z0, 0.10 * R)
+
+    # Skin shell on the curved surface
+    skin_mask = radial_bump(r, 0.9 * R, 0.08 * R) * zcut
+
+    # Fat bulk with smooth radial cutoff 0.75R -> 0.85R
+    fat_mask = np.where(r < 0.75 * R, 1.0, 0.0)
+    trans = np.clip((r - 0.75 * R) / (0.10 * R), 0, 1)
+    fat_mask = np.where(
+        (r >= 0.75 * R) & (r < 0.85 * R), (1.0 - trans**2) ** 4, fat_mask
+    )
+    fat_mask = fat_mask * zcut
+
+    # Fibroglandular core: sphere centred below the chest wall
+    c_fib = c - np.array([0.0, 0.0, 0.45 * R])
+    r_fib = np.linalg.norm(pts - c_fib[None, :], axis=-1)
+    R_fib = 0.35 * R
+    fibro_mask = np.where(r_fib < 0.75 * R_fib, 1.0, 0.0)
+    trans_f = np.clip((r_fib - 0.75 * R_fib) / (0.25 * R_fib), 0, 1)
+    fibro_mask = np.where(
+        (r_fib >= 0.75 * R_fib) & (r_fib < R_fib),
+        (1.0 - trans_f**2) ** 4,
+        fibro_mask,
+    )
+
+    # Blood vessels: 3 thin cylinders, masked to the breast interior
+    vessel_radius = 0.05 * R
+    inside = np.where((r < 0.8 * R), 1.0, 0.0) * zcut
+    d1 = np.sqrt((pts[:, 0] - 0.2 * R) ** 2 + (pts[:, 1] - 0.15 * R) ** 2)
+    v1 = np.where(
+        d1 < vessel_radius, (1.0 - (d1 / vessel_radius) ** 2) ** 4, 0.0
+    )
+    d2 = np.sqrt((pts[:, 1] + 0.1 * R) ** 2 + (z - (z0 - 0.5 * R)) ** 2)
+    v2 = np.where(
+        d2 < vessel_radius, (1.0 - (d2 / vessel_radius) ** 2) ** 4, 0.0
+    )
+    d3 = np.sqrt((pts[:, 0] + 0.15 * R) ** 2 + (z - (z0 - 0.6 * R)) ** 2)
+    v3 = np.where(
+        d3 < vessel_radius, (1.0 - (d3 / vessel_radius) ** 2) ** 4, 0.0
+    )
+    vessel_mask = np.maximum(np.maximum(v1, v2), v3) * inside
+
+    # Layered combination (outer layers take priority)
+    b = fat_mask * b_fat
+    b = np.where(fibro_mask > 0.5, fibro_mask * b_fibro, b)
+    b = np.where(vessel_mask > 0.5, vessel_mask * b_vessel, b)
+    b = b * (1.0 - skin_mask) + skin_mask * b_skin
+
+    # Compact support safety margin inside the cube
+    rad_all = np.linalg.norm(pts, axis=-1)
+    b *= np.where(rad_all < 0.98 * np.sqrt(3) * a, 1.0, 0.0)
+
+    return b.reshape(shape[:-1])
+
+
 @app.function(
     image=fmm_image,
     gpu="H100",
@@ -177,6 +277,7 @@ def run_lucka_solve(
     gmres_tol: float = 1e-5,
     maxiter: int = 500,
     solver_mode: str = "matfree",
+    geometry: str = "hemisphere",
 ):
     import sys
     import time
@@ -193,7 +294,7 @@ def run_lucka_solve(
     print("=== Lucka breast forward problem ===")
     print(f"  kappa={kappa}, a={a}, kappa*a={kappa * a:.1f}")
     print(f"  L={L}, q={q}, p={p}, n_src={n_src}")
-    print(f"  solver_mode={solver_mode}")
+    print(f"  solver_mode={solver_mode}, geometry={geometry}")
 
     n_bdry = 6 * (4**L) * q**2
     T_mem_gb = n_bdry**2 * 16 / 1e9
@@ -419,7 +520,10 @@ def run_lucka_solve(
     nrm = outward_normals_for_cube_boundary(bp, root)
 
     # Build Lucka breast phantom
-    b_int = build_lucka_phantom(int_pts, a)
+    if geometry == "hemisphere":
+        b_int = build_lucka_phantom_hemisphere(int_pts, a)
+    else:
+        b_int = build_lucka_phantom(int_pts, a)
     print(f"  Phantom b(x): min={b_int.min():.4f}, max={b_int.max():.4f}")
     print(f"  Non-zero fraction: {(np.abs(b_int) > 1e-10).mean():.1%}")
 
@@ -597,6 +701,7 @@ def run_lucka_solve(
         converged=info["converged"],
         gmres_info=info["gmres_info"],
         solver_mode=solver_mode,
+        geometry=geometry,
         T_DtN_gb=float(T_DtN_np.nbytes / 1e9),
     )
 
@@ -612,6 +717,7 @@ def main(
     solver_mode: str = "matfree",
     gmres_tol: float = 1e-5,
     maxiter: int = 500,
+    geometry: str = "hemisphere",
 ):
     result = run_lucka_solve.remote(
         kappa=kappa,
@@ -623,5 +729,6 @@ def main(
         solver_mode=solver_mode,
         gmres_tol=gmres_tol,
         maxiter=maxiter,
+        geometry=geometry,
     )
     print(f"\nResult: {result}")
