@@ -183,11 +183,12 @@ LUCKA_SOLVE = dict(
     n_src=4,
     n_bdry=24576,
     gpu="H100",
-    hps_time=63.55,
-    gmres_time=315.28,
-    total_time=378.83,
+    hps_time=56.00,
+    gmres_time=138.55,
+    total_time=194.55,
     converged=True,
-    uscat_max=1.894,
+    uscat_max=0.873,
+    geometry="hemisphere",
     T_DtN_mem_gb=9.66,
     total_mem_gb=13.69,
     solver_mode="matfree",
@@ -476,51 +477,70 @@ def fig_breast_freq_mapping():
 
 
 def _build_lucka_phantom_grid(a, N=128):
-    """Generate the Lucka breast phantom b(x) on a uniform 3D grid."""
+    """Generate the pendant hemispherical Lucka breast phantom b(x)
+    on a uniform 3D grid.  Mirrors build_lucka_phantom_hemisphere in
+    modal_lucka_solve_3d.py."""
     x = np.linspace(-a, a, N)
     pts = np.stack(np.meshgrid(x, x, x, indexing="ij"), axis=-1).reshape(-1, 3)
-    r = np.linalg.norm(pts, axis=-1)
 
     b_fat, b_fibro, b_vessel, b_skin = -0.041, 0.020, 0.103, 0.174
+
+    R = 0.80 * a
+    z0 = 0.55 * a
+    c = np.array([0.0, 0.0, z0])
+    r = np.linalg.norm(pts - c[None, :], axis=-1)
+    z = pts[:, 2]
 
     def radial_bump(r_vals, r_centre, width):
         t = np.abs(r_vals - r_centre) / width
         return np.where(t < 1.0, (1.0 - t**2) ** 4, 0.0)
 
-    skin_mask = radial_bump(r, 0.9 * a, 0.08 * a)
-    fat_mask = np.where(r < 0.75 * a, 1.0, 0.0)
-    trans = np.clip((r - 0.75 * a) / (0.10 * a), 0, 1)
+    def smooth_step_down(xv, x0, w):
+        t = np.clip((xv - (x0 - w)) / w, 0.0, 1.0)
+        return (1.0 - t**2) ** 4
+
+    zcut = smooth_step_down(z, z0, 0.10 * R)
+
+    skin_mask = radial_bump(r, 0.9 * R, 0.08 * R) * zcut
+
+    fat_mask = np.where(r < 0.75 * R, 1.0, 0.0)
+    trans = np.clip((r - 0.75 * R) / (0.10 * R), 0, 1)
     fat_mask = np.where(
-        (r >= 0.75 * a) & (r < 0.85 * a), (1.0 - trans**2) ** 4, fat_mask
+        (r >= 0.75 * R) & (r < 0.85 * R), (1.0 - trans**2) ** 4, fat_mask
     )
-    fibro_mask = np.where(r < 0.30 * a, 1.0, 0.0)
-    trans_f = np.clip((r - 0.30 * a) / (0.10 * a), 0, 1)
+    fat_mask = fat_mask * zcut
+
+    c_fib = c - np.array([0.0, 0.0, 0.45 * R])
+    r_fib = np.linalg.norm(pts - c_fib[None, :], axis=-1)
+    R_fib = 0.35 * R
+    fibro_mask = np.where(r_fib < 0.75 * R_fib, 1.0, 0.0)
+    trans_f = np.clip((r_fib - 0.75 * R_fib) / (0.25 * R_fib), 0, 1)
     fibro_mask = np.where(
-        (r >= 0.30 * a) & (r < 0.40 * a), (1.0 - trans_f**2) ** 4, fibro_mask
+        (r_fib >= 0.75 * R_fib) & (r_fib < R_fib),
+        (1.0 - trans_f**2) ** 4,
+        fibro_mask,
     )
-    vessel_radius = 0.05 * a
-    d1 = np.sqrt((pts[:, 0] - 0.2 * a) ** 2 + (pts[:, 1] - 0.15 * a) ** 2)
+
+    vessel_radius = 0.05 * R
+    inside = np.where(r < 0.8 * R, 1.0, 0.0) * zcut
+    d1 = np.sqrt((pts[:, 0] - 0.2 * R) ** 2 + (pts[:, 1] - 0.15 * R) ** 2)
     v1 = np.where(
         d1 < vessel_radius, (1.0 - (d1 / vessel_radius) ** 2) ** 4, 0.0
     )
-    v1 *= (r < 0.8 * a).astype(float)
-    d2 = np.sqrt((pts[:, 1] + 0.1 * a) ** 2 + (pts[:, 2] - 0.2 * a) ** 2)
+    d2 = np.sqrt((pts[:, 1] + 0.1 * R) ** 2 + (z - (z0 - 0.5 * R)) ** 2)
     v2 = np.where(
         d2 < vessel_radius, (1.0 - (d2 / vessel_radius) ** 2) ** 4, 0.0
     )
-    v2 *= (r < 0.8 * a).astype(float)
-    d3 = np.sqrt((pts[:, 0] + 0.15 * a) ** 2 + (pts[:, 2] + 0.1 * a) ** 2)
+    d3 = np.sqrt((pts[:, 0] + 0.15 * R) ** 2 + (z - (z0 - 0.6 * R)) ** 2)
     v3 = np.where(
         d3 < vessel_radius, (1.0 - (d3 / vessel_radius) ** 2) ** 4, 0.0
     )
-    v3 *= (r < 0.8 * a).astype(float)
-    vessel_mask = np.maximum(np.maximum(v1, v2), v3)
+    vessel_mask = np.maximum(np.maximum(v1, v2), v3) * inside
 
     b = fat_mask * b_fat
     b = np.where(fibro_mask > 0.5, fibro_mask * b_fibro, b)
     b = np.where(vessel_mask > 0.5, vessel_mask * b_vessel, b)
     b = b * (1.0 - skin_mask) + skin_mask * b_skin
-    b *= (r < 0.98 * a).astype(float)
     return b.reshape(N, N, N), x
 
 
@@ -536,7 +556,7 @@ def fig_lucka_slices():
     fig = make_subplots(
         rows=1,
         cols=3,
-        subplot_titles=["z = 0 slice", "y = 0 slice", "x = 0 slice"],
+        subplot_titles=["z = 0.15a slice", "y = 0 slice", "x = 0 slice"],
         horizontal_spacing=0.06,
     )
     colorscale = [
@@ -549,10 +569,11 @@ def fig_lucka_slices():
     ]
     zmin, zmax = -0.05, 0.18
 
-    # z=0 slice (xy plane)
+    # z = 0.15a slice (xy plane, through the fibroglandular core)
+    idx_z = int(round((0.15 + 1.0) / 2.0 * (N - 1)))
     fig.add_trace(
         go.Heatmap(
-            z=b_vol[:, :, mid].T,
+            z=b_vol[:, :, idx_z].T,
             x=x,
             y=x,
             colorscale=colorscale,
@@ -1213,11 +1234,16 @@ the total compute would be approximately 25 minutes on a single H100.</p>
 <p>We demonstrate the full forward solve with a multi-tissue breast
 phantom at $\kappa = {s["kappa"]:g}$ ($\kappa a = {s["kappa_a"]}$),
 using the tissue coefficients from Table&nbsp;7.1.
-The phantom is constructed from smooth $C^4$ radial bump
-functions: a skin shell at $|x| \approx 0.9a$, a fat layer
-filling $|x| < 0.85a$, a fibroglandular core at $|x| < 0.4a$,
-and three blood-vessel cylinders (radius $0.05a$) at
-various orientations inside the breast.</p>
+The phantom is a <em>pendant hemispherical breast</em>, matching the
+Lucka et al.\ scanner geometry: a hemisphere of radius $R = 0.8a$
+hanging below a chest-wall plane at $z_0 = 0.55a$, built from smooth
+$C^4$ bump functions with a smooth cutoff ramp at the flat face.
+A skin shell wraps the curved surface at $|x - c| \approx 0.9R$
+(hemisphere centre $c = (0,0,z_0)$), a fat bulk fills
+$|x - c| < 0.85R$, a fibroglandular sphere of radius $0.35R$ sits
+below the chest wall, and three blood-vessel cylinders
+(radius $0.05R$) thread the interior.  The scattering potential
+$b(x)$ remains smooth and compactly supported inside the cube.</p>
 
 <h4>Scattering potential $b(x)$: orthogonal slices</h4>
 
@@ -1248,6 +1274,7 @@ blood vessels; green core = fibroglandular tissue; blue fill = fat.</p>
 <tr><td>$\kappa a$</td><td>{s["kappa_a"]}</td></tr>
 <tr><td>$L$, $q$, $p$</td><td>{s["L"]}, {s["q"]}, {s["p"]}</td></tr>
 <tr><td>$n_{{\mathrm{{bdry}}}}$</td><td>{s["n_bdry"]:,}</td></tr>
+<tr><td>geometry</td><td>pendant hemisphere ($R = 0.8a$, chest wall $z_0 = 0.55a$)</td></tr>
 <tr><td>tissue contrast $b(x)$</td>
     <td>$[{s["b_min"]:.3f},\; +{s["b_max"]:.3f}]$</td></tr>
 <tr><td>incident fields</td><td>{s["n_src"]} plane waves (Fibonacci $S^2$)</td></tr>
@@ -1263,7 +1290,8 @@ blood vessels; green core = fibroglandular tissue; blue fill = fat.</p>
 <div class="highlight">
 <b>Key finding:</b> the Lucka breast problem at $\kappa = {s["kappa"]:g}$
 ($\kappa a = {s["kappa_a"]}$, equivalent to $f \approx 150$ kHz for a
-55 mm breast) is <em>directly solvable</em> on a single H100 in
+55 mm breast), posed on the pendant hemispherical geometry of the
+scanner, is <em>directly solvable</em> on a single H100 in
 <b>{s["total_time"]:.0f} s</b> using the matrix-free solver with
 Jacobi preconditioning.  The mild tissue contrast ($|b| \le 0.18$)
 ensures rapid GMRES convergence once a sufficiently large Krylov
