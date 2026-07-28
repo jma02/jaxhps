@@ -807,6 +807,43 @@ def solve_bie_gpu_advanced(
 
             return jax.vmap(row_i)(bp) + D_corr_sp @ v
 
+        @jax.jit
+        def _S_matmat(V):
+            """Block single-layer: [SV]_i = sum_j G(x_i,x_j) w_j V_j + C_S V.
+
+            The kernel row is evaluated once per target point and applied
+            to all columns of ``V`` at once (a vector-matrix product), so
+            the marginal cost of extra right-hand sides is a small GEMM.
+            """
+
+            def row_i(xi):
+                diff = xi - bp
+                r = jnp.sqrt(jnp.sum(diff**2, axis=-1))
+                safe_r = jnp.where(r > 0, r, 1.0)
+                G = jnp.exp(1j * kappa * r) / (4.0 * jnp.pi * safe_r)
+                G = jnp.where(r > 0, G, 0j)
+                return (G * w) @ V
+
+            return jax.vmap(row_i)(bp) + S_corr_sp @ V
+
+        @jax.jit
+        def _D_matmat(V):
+            """Block double-layer matvec over all columns of ``V``."""
+
+            def row_i(xi):
+                diff = xi - bp
+                r2 = jnp.sum(diff**2, axis=-1)
+                r = jnp.sqrt(r2)
+                safe_r = jnp.where(r > 0, r, 1.0)
+                G = jnp.exp(1j * kappa * r) / (4.0 * jnp.pi * safe_r)
+                G = jnp.where(r > 0, G, 0j)
+                nd = jnp.sum(diff * nrm, axis=-1)
+                dG = (1.0 / safe_r - 1j * kappa) / safe_r * G * nd
+                dG = jnp.where(r > 0, dG, 0j)
+                return (dG * w) @ V
+
+            return jax.vmap(row_i)(bp) + D_corr_sp @ V
+
         dt_build = time.perf_counter() - t0
         s_mem = S_corr_sp.data.nbytes + S_corr_sp.indices.nbytes
         d_mem = D_corr_sp.data.nbytes + D_corr_sp.indices.nbytes
@@ -888,24 +925,33 @@ def solve_bie_gpu_advanced(
 
     n_restart_cycles = max(1, maxiter // restart)
 
-    # Block GMRES only benefits the dense path (GEMMs vs GEMVs).
-    # Matrix-free path: sequential GMRES reuses JIT-cached matvec.
-    use_block = block_rhs and n_src > 1 and not matrix_free
+    # Block GMRES: all RHS share one Krylov space.  For the dense path the
+    # matvec is 3 GEMMs; for the matrix-free path the kernel is evaluated
+    # once per iteration and applied to all columns at once.
+    use_block = block_rhs and n_src > 1
 
     if use_block:
         # ---- Block GMRES: all RHS via flattened (n*n_src,) system ----
-        # Dense matvec A @ X is 3 GEMMs (efficient on GPU).
         uin_j = jnp.asarray(uin_np)
         udn_j = jnp.asarray(uin_dn_np)
-        rhs_block = jnp.zeros((n, n_src), dtype=jnp.complex128)
-        for s in range(n_src):
-            rhs_col = _S_apply(udn_j[:, s] - T @ uin_j[:, s])
-            rhs_block = rhs_block.at[:, s].set(rhs_col)
+        if matrix_free:
+            rhs_block = _S_matmat(udn_j - T @ uin_j)
 
-        def _flat_matvec(x_flat):
-            X = x_flat.reshape(n, n_src)
-            Y = 0.5 * X - K_D @ X + K_S @ (T @ X)
-            return Y.ravel()
+            def _flat_matvec(x_flat):
+                X = x_flat.reshape(n, n_src)
+                Y = 0.5 * X - _D_matmat(X) + _S_matmat(T @ X)
+                return Y.ravel()
+
+        else:
+            rhs_block = jnp.zeros((n, n_src), dtype=jnp.complex128)
+            for s in range(n_src):
+                rhs_col = _S_apply(udn_j[:, s] - T @ uin_j[:, s])
+                rhs_block = rhs_block.at[:, s].set(rhs_col)
+
+            def _flat_matvec(x_flat):
+                X = x_flat.reshape(n, n_src)
+                Y = 0.5 * X - K_D @ X + K_S @ (T @ X)
+                return Y.ravel()
 
         def _flat_precond(x_flat):
             if M_precond is not None:
@@ -914,15 +960,25 @@ def solve_bie_gpu_advanced(
             return x_flat
 
         rhs_flat = rhs_block.ravel()
-        sol_flat, info_code = jax.scipy.sparse.linalg.gmres(
-            _flat_matvec,
-            rhs_flat,
-            tol=tol,
-            atol=0.0,
-            restart=restart,
-            maxiter=n_restart_cycles,
-            M=_flat_precond if M_precond is not None else None,
-        )
+        if matrix_free:
+            sol_flat, info_code = _gmres_python_loop(
+                _flat_matvec,
+                rhs_flat,
+                tol=tol,
+                restart=restart,
+                maxiter=maxiter,
+                M=_flat_precond if M_precond is not None else None,
+            )
+        else:
+            sol_flat, info_code = jax.scipy.sparse.linalg.gmres(
+                _flat_matvec,
+                rhs_flat,
+                tol=tol,
+                atol=0.0,
+                restart=restart,
+                maxiter=n_restart_cycles,
+                M=_flat_precond if M_precond is not None else None,
+            )
         jax.block_until_ready(sol_flat)
         uscat_b = np.array(sol_flat.reshape(n, n_src))
         gmres_info_list = [int(info_code)] * n_src

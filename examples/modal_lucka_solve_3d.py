@@ -629,7 +629,7 @@ def run_lucka_solve(
             use_preconditioner=True,
             block_rhs=True,
         )
-    elif solver_mode == "matfree":
+    elif solver_mode in ("matfree", "matfree_block"):
         imp, uscat_b, uscat_dn_b, info = solve_bie_gpu_advanced(
             T_DtN_gpu,
             bdry_pts_nf,
@@ -645,7 +645,7 @@ def run_lucka_solve(
             restart=200,
             matrix_free=True,
             use_preconditioner=True,
-            block_rhs=False,
+            block_rhs=(solver_mode == "matfree_block"),
         )
     else:
         from wave_scattering_utils_3D import solve_bie_gmres_gpu
