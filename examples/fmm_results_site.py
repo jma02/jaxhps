@@ -183,15 +183,17 @@ LUCKA_SOLVE = dict(
     n_src=4,
     n_bdry=24576,
     gpu="H100",
-    hps_time=56.00,
-    gmres_time=138.55,
-    total_time=194.55,
+    hps_time=47.26,
+    gmres_time=91.56,
+    total_time=138.83,
     converged=True,
     uscat_max=0.873,
     geometry="hemisphere",
     T_DtN_mem_gb=9.66,
     total_mem_gb=13.69,
-    solver_mode="matfree",
+    solver_mode="matfree_block",
+    gmres_time_seq=138.55,
+    total_time_seq=194.55,
     restart=200,
     b_min=-0.041,
     b_max=0.174,
@@ -905,7 +907,7 @@ $$S \cdot v = K^{\mathrm{smooth}}_S \cdot v + C_S \cdot v.$$
     parts.append(r"""
 <h2>4. Types of exterior solver</h2>
 
-<p>We implement three approaches to evaluating the matvec
+<p>We implement several approaches to evaluating the matvec
 $A \cdot v = (\tfrac12 I - D + S\,T)\,v$ within GMRES, each with
 different computational and memory trade-offs:</p>
 
@@ -979,6 +981,23 @@ per iteration.  However, memory drops from $3 \times 16\,n^2$ to
 $16\,n^2$ (for $T$ alone) plus $\mathcal O(\text{nnz})$ for the
 sparse corrections &mdash; enabling problems that would otherwise be
 infeasible on a single GPU.</p>
+
+<h3>4.5 GPU matrix-free + block GMRES (recommended at $L \ge 3$)</h3>
+
+<p>The block-Krylov strategy of &sect;4.3 combines naturally with the
+matrix-free matvec: for a block of $n_{\mathrm{src}}$ right-hand sides,
+each kernel row $G(x_i, \cdot)\,w$ is evaluated <em>once</em> per
+iteration and applied to all columns simultaneously (a vector&ndash;matrix
+product), so the dominant transcendental-evaluation cost is amortised
+across the block.  All right-hand sides also share a single Krylov
+space, which typically reduces the total iteration count relative to
+the worst individual system.  Extra memory is only
+$\mathcal O(\mathrm{restart} \cdot n \cdot n_{\mathrm{src}})$ for the
+Krylov basis ($\approx 0.3$ GB at $n = 24{,}576$, restart $= 200$,
+$n_{\mathrm{src}} = 4$), so unlike the dense block path (&sect;4.3) it
+does not risk OOM at $L = 3$.  At $\kappa = 30$ this cut the exterior
+solve from 138.6 s (sequential matrix-free) to <b>91.6 s</b>, with
+identical solutions to the GMRES tolerance.</p>
 """)
 
     # ================================================================
@@ -1048,11 +1067,13 @@ $2.1\times$ reduction.</p>
 <div class="note">
 <b>When to use which solver.</b>  The dense path is fastest whenever the
 kernel matrices fit in GPU memory ($n \lesssim 25{,}000$ on 80 GB).
-Block GMRES provides an additional $1.5\times$ when GEMMs are more
-efficient than GEMVs (always true for $n_{\mathrm{src}} > 1$).
+Block GMRES provides an additional $1.5\times$ for multiple right-hand
+sides, in both the dense and matrix-free paths.
 The matrix-free path is slower per iteration but is the only option
 for $n > 25{,}000$ without multi-GPU, and it remains faster than the
-CPU FMM for all tested configurations.
+CPU FMM for all tested configurations.  <b>Recommended defaults:</b>
+dense + block GMRES at $L \le 2$; matrix-free + block GMRES
+(&sect;4.5) at $L \ge 3$.
 </div>
 """)
 
@@ -1278,10 +1299,12 @@ blood vessels; green core = fibroglandular tissue; blue fill = fat.</p>
 <tr><td>tissue contrast $b(x)$</td>
     <td>$[{s["b_min"]:.3f},\; +{s["b_max"]:.3f}]$</td></tr>
 <tr><td>incident fields</td><td>{s["n_src"]} plane waves (Fibonacci $S^2$)</td></tr>
-<tr><td>solver</td><td>matrix-free + Jacobi, restart = {s["restart"]}</td></tr>
+<tr><td>solver</td><td>matrix-free + <b>block GMRES</b> + Jacobi, restart = {s["restart"]}</td></tr>
 <tr><td>HPS time</td><td>{s["hps_time"]:.1f} s</td></tr>
-<tr><td>GMRES time</td><td>{s["gmres_time"]:.1f} s</td></tr>
-<tr><td><b>total wall time</b></td><td><b>{s["total_time"]:.1f} s</b></td></tr>
+<tr><td>GMRES time</td><td>{s["gmres_time"]:.1f} s
+    (sequential GMRES: {s["gmres_time_seq"]:.1f} s, $1.5\times$ slower)</td></tr>
+<tr><td><b>total wall time</b></td><td><b>{s["total_time"]:.1f} s</b>
+    (sequential: {s["total_time_seq"]:.1f} s)</td></tr>
 <tr><td>converged</td><td class="pass">yes (all {s["n_src"]} RHS)</td></tr>
 <tr><td>$\|u^s\|_{{\infty}}$</td><td>{s["uscat_max"]:.3f}</td></tr>
 <tr><td>GPU memory</td><td>{s["total_mem_gb"]:.2f} GB</td></tr>
