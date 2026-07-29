@@ -15,6 +15,9 @@ outward-normal requirement of fmm3dbie's quad patches.  The
 matching 3D positions, so callers can work entirely in the domain's ordering.
 """
 
+import os
+import time
+
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -26,6 +29,20 @@ from jaxhps import (
     PDEProblem,
     build_solver,
 )
+
+_TIMING = bool(os.environ.get("JAXHPS_TIMING"))
+
+
+def _tic():
+    return time.perf_counter()
+
+
+def _toc(label, t0):
+    if _TIMING:
+        print(
+            f"  [timing] {label}: {time.perf_counter() - t0:.2f}s", flush=True
+        )
+    return time.perf_counter()
 
 
 def load_SD_matrices_3D(
@@ -126,6 +143,902 @@ def outward_normals_for_cube_boundary(
 
 
 # ---------------------------------------------------------------------------
+# FMM-accelerated BIE -- replaces dense S, D with FMM + near-field correction
+# ---------------------------------------------------------------------------
+
+
+def _patch_indices(n_bdry: int, q: int, L: int) -> np.ndarray:
+    """Return (n_patches, q^2) array of node indices grouped by patch."""
+    q2 = q * q
+    n_patches = n_bdry // q2
+    return np.arange(n_bdry).reshape(n_patches, q2)
+
+
+def build_nearfield_correction(
+    sd: dict,
+    bdry_pts: np.ndarray,
+    normals: np.ndarray,
+    wts: np.ndarray,
+    q: int,
+    L: int,
+    kappa: float,
+    fmm_eps: float = 1e-7,
+    near_ratio: float = 4.0,
+) -> dict:
+    """Precompute additive near-field correction for FMM layer potentials.
+
+    The dense matrices S, D from ``sd`` include accurate singular quadrature.
+    The FMM evaluates the smooth kernel everywhere (excluding self) but is
+    inaccurate for near interactions and misses the self-interaction entirely.
+
+    The correction matrix C satisfies  S @ v = FMM_S(v) + C_S @ v  for each
+    layer, where the correction is nonzero only in near-field blocks.
+
+    Parameters
+    ----------
+    sd : dict from ``load_SD_matrices_3D`` (permuted to domain order).
+    bdry_pts, normals, wts : (n_bdry, 3), (n_bdry, 3), (n_bdry,).
+    q, L : boundary quadrature order and octree levels.
+    kappa : wavenumber.
+    fmm_eps : FMM tolerance (must match what will be used at solve time).
+    near_ratio : patch pairs within ``near_ratio * patch_width`` are "near".
+
+    Returns a dict with sparse CSR correction matrices and metadata.
+    """
+    from scipy.sparse import csr_matrix
+
+    n_bdry = bdry_pts.shape[0]
+    q2 = q * q
+    patches = _patch_indices(n_bdry, q, L)
+    n_patches = patches.shape[0]
+
+    # Patch centers and widths for near-field detection
+    patch_centers = np.array(
+        [bdry_pts[patches[ip]].mean(axis=0) for ip in range(n_patches)]
+    )
+    patch_widths = np.array(
+        [
+            np.max(np.ptp(bdry_pts[patches[ip]], axis=0))
+            for ip in range(n_patches)
+        ]
+    )
+    max_pw = patch_widths.max()
+    threshold = near_ratio * max_pw
+
+    # Identify near patch pairs
+    from scipy.spatial import cKDTree
+
+    tree = cKDTree(patch_centers)
+    near_pairs = []  # (i, j) patch-level
+    for ip in range(n_patches):
+        neighbors = tree.query_ball_point(patch_centers[ip], threshold)
+        for jp in neighbors:
+            near_pairs.append((ip, jp))
+
+    S_dense = np.asarray(sd["S"])
+    D_dense = np.asarray(sd["D"])
+
+    # Smooth kernel blocks (what FMM would give for these pairs)
+    def _smooth_kernel_block(row_idx, col_idx):
+        """G(x_i, y_j) * w_j for the single layer; dG/dn_y * w_j for double."""
+        xi = bdry_pts[row_idx][:, None, :]  # (ni, 1, 3)
+        yj = bdry_pts[col_idx][None, :, :]  # (1, nj, 3)
+        diff = xi - yj  # (ni, nj, 3)
+        r = np.linalg.norm(diff, axis=-1)  # (ni, nj)
+        wj = wts[col_idx]
+
+        # Single layer: G * w_j
+        with np.errstate(divide="ignore", invalid="ignore"):
+            G = np.exp(1j * kappa * r) / (4.0 * np.pi * r)
+        S_smooth = G * wj[None, :]
+        # Self-interaction (r=0): FMM skips these, so smooth contribution = 0
+        S_smooth[r == 0] = 0.0
+
+        # Double layer: dG/dn_y * w_j
+        # diff = x_i - y_j; dG/dn_y = (1/r - ik)(n_y . diff)/r * G
+        nj = normals[col_idx]  # (nj, 3)
+        n_dot_diff = np.einsum("ijk,jk->ij", diff, nj)  # (ni, nj)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            dGdny = (1.0 / r - 1j * kappa) / r * G * n_dot_diff
+        D_smooth = dGdny * wj[None, :]
+        D_smooth[r == 0] = 0.0
+
+        return S_smooth, D_smooth
+
+    # Build sparse correction: C = exact_near - smooth_near (block-wise)
+    n_pairs = len(near_pairs)
+    rows_arr = np.empty(n_pairs * q2 * q2, dtype=np.int64)
+    cols_arr = np.empty(n_pairs * q2 * q2, dtype=np.int64)
+    S_vals = np.empty(n_pairs * q2 * q2, dtype=np.complex128)
+    D_vals = np.empty(n_pairs * q2 * q2, dtype=np.complex128)
+
+    idx = 0
+    for ip, jp in near_pairs:
+        ri = patches[ip]
+        ci = patches[jp]
+        S_exact = S_dense[np.ix_(ri, ci)]
+        D_exact = D_dense[np.ix_(ri, ci)]
+        S_smooth, D_smooth = _smooth_kernel_block(ri, ci)
+
+        block_size = q2 * q2
+        rr, cc = np.meshgrid(ri, ci, indexing="ij")
+        rows_arr[idx : idx + block_size] = rr.ravel()
+        cols_arr[idx : idx + block_size] = cc.ravel()
+        S_vals[idx : idx + block_size] = (S_exact - S_smooth).ravel()
+        D_vals[idx : idx + block_size] = (D_exact - D_smooth).ravel()
+        idx += block_size
+
+    S_corr_csr = csr_matrix(
+        (S_vals[:idx], (rows_arr[:idx], cols_arr[:idx])),
+        shape=(n_bdry, n_bdry),
+    )
+    D_corr_csr = csr_matrix(
+        (D_vals[:idx], (rows_arr[:idx], cols_arr[:idx])),
+        shape=(n_bdry, n_bdry),
+    )
+
+    return dict(
+        S_corr=S_corr_csr,
+        D_corr=D_corr_csr,
+        n_near_pairs=len(near_pairs),
+        n_patches=n_patches,
+        nnz_S=S_corr_csr.nnz,
+        nnz_D=D_corr_csr.nnz,
+        kappa=kappa,
+        fmm_eps=fmm_eps,
+    )
+
+
+def load_nearfield_correction(fp: str, fmm_eps: float = 1e-7) -> dict:
+    """Load near-field correction from .npz (generated by gen_nearfield_3D.py).
+
+    Returns a dict compatible with :func:`solve_bie_gmres_fmm`.
+    """
+    from scipy.sparse import csr_matrix
+
+    d = np.load(fp, allow_pickle=False)
+    shape = tuple(d["shape"])
+    S_corr = csr_matrix(
+        (d["S_corr_data"], d["S_corr_indices"], d["S_corr_indptr"]),
+        shape=shape,
+    )
+    D_corr = csr_matrix(
+        (d["D_corr_data"], d["D_corr_indices"], d["D_corr_indptr"]),
+        shape=shape,
+    )
+    return dict(
+        S_corr=S_corr,
+        D_corr=D_corr,
+        boundary_points=d["boundary_points"],
+        normals=d["normals"],
+        wts=d["wts"],
+        n_near_pairs=int(d["n_near_pairs"]),
+        nnz_S=S_corr.nnz,
+        nnz_D=D_corr.nnz,
+        kappa=float(d["kappa"]),
+        fmm_eps=fmm_eps,
+        a=float(d["a"]),
+        q=int(d["q"]),
+        L=int(d["L"]),
+    )
+
+
+def _fmm_apply_S(
+    v: np.ndarray,
+    bdry_pts: np.ndarray,
+    wts: np.ndarray,
+    kappa: float,
+    eps: float,
+) -> np.ndarray:
+    """Apply single-layer operator via FMM: [Sv]_i = sum_{j!=i} G(x_i,x_j) w_j v_j."""
+    import fmm3dpy
+
+    src = np.asfortranarray(bdry_pts.T)  # (3, n)
+    if v.ndim == 1:
+        charges = (wts * v).astype(np.complex128)
+        out = fmm3dpy.hfmm3d(
+            eps=eps, zk=complex(kappa), sources=src, charges=charges, pg=1
+        )
+        return np.asarray(out.pot, dtype=np.complex128).ravel()
+    # Batched: v is (n_bdry, n_rhs)
+    n_rhs = v.shape[1]
+    result = np.empty_like(v, dtype=np.complex128)
+    for k in range(n_rhs):
+        charges = (wts * v[:, k]).astype(np.complex128)
+        out = fmm3dpy.hfmm3d(
+            eps=eps, zk=complex(kappa), sources=src, charges=charges, pg=1
+        )
+        result[:, k] = np.asarray(out.pot, dtype=np.complex128).ravel()
+    return result
+
+
+def _fmm_apply_D(
+    v: np.ndarray,
+    bdry_pts: np.ndarray,
+    normals: np.ndarray,
+    wts: np.ndarray,
+    kappa: float,
+    eps: float,
+) -> np.ndarray:
+    """Apply double-layer operator via FMM: [Dv]_i = sum_{j!=i} dG/dn_y(x_i,x_j) w_j v_j.
+
+    fmm3dpy evaluates  u(x) = sum_j -v_j . grad_x G(x, x_j).  Setting
+    v_j = n_j w_j sigma_j yields the double-layer potential because
+    -n_j . grad_x G = n_j . grad_y G = dG/dn_y.
+    """
+    import fmm3dpy
+
+    src = np.asfortranarray(bdry_pts.T)  # (3, n)
+    nrm_T = normals.T  # (3, n)
+    if v.ndim == 1:
+        scale = (wts * v).astype(np.complex128)  # (n,)
+        dipvec = np.asfortranarray(nrm_T * scale[None, :])  # (3, n)
+        out = fmm3dpy.hfmm3d(
+            eps=eps, zk=complex(kappa), sources=src, dipvec=dipvec, pg=1
+        )
+        return np.asarray(out.pot, dtype=np.complex128).ravel()
+    n_rhs = v.shape[1]
+    result = np.empty_like(v, dtype=np.complex128)
+    for k in range(n_rhs):
+        scale = (wts * v[:, k]).astype(np.complex128)
+        dipvec = np.asfortranarray(nrm_T * scale[None, :])
+        out = fmm3dpy.hfmm3d(
+            eps=eps, zk=complex(kappa), sources=src, dipvec=dipvec, pg=1
+        )
+        result[:, k] = np.asarray(out.pot, dtype=np.complex128).ravel()
+    return result
+
+
+def fmm_matvec_S(
+    v: np.ndarray,
+    bdry_pts: np.ndarray,
+    wts: np.ndarray,
+    kappa: float,
+    S_corr,
+    fmm_eps: float = 1e-7,
+) -> np.ndarray:
+    """FMM-accelerated single-layer matvec: S @ v = FMM(v) + S_corr @ v."""
+    fmm_part = _fmm_apply_S(v, bdry_pts, wts, kappa, fmm_eps)
+    if v.ndim == 1:
+        return fmm_part + S_corr @ v
+    return fmm_part + S_corr @ v
+
+
+def fmm_matvec_D(
+    v: np.ndarray,
+    bdry_pts: np.ndarray,
+    normals: np.ndarray,
+    wts: np.ndarray,
+    kappa: float,
+    D_corr,
+    fmm_eps: float = 1e-7,
+) -> np.ndarray:
+    """FMM-accelerated double-layer matvec: D @ v = FMM(v) + D_corr @ v."""
+    fmm_part = _fmm_apply_D(v, bdry_pts, normals, wts, kappa, fmm_eps)
+    if v.ndim == 1:
+        return fmm_part + D_corr @ v
+    return fmm_part + D_corr @ v
+
+
+def solve_bie_gmres_fmm(
+    T_DtN,
+    bdry_pts: np.ndarray,
+    normals: np.ndarray,
+    wts: np.ndarray,
+    kappa: float,
+    eta: float,
+    uin: np.ndarray,
+    uin_dn: np.ndarray,
+    nf_corr: dict,
+    tol: float = 1e-6,
+    maxiter: int = 200,
+    restart: int = 50,
+    use_gpu_tdtn: bool = False,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+    """Solve the exterior BIE via GMRES with FMM-accelerated matvecs.
+
+    Solves ``A u^s = b`` where ``A = 1/2 I - D + S T_DtN`` and
+    ``b = S (u^inc_n - T_DtN u^inc)`` using GMRES with FMM for S, D.
+
+    When ``use_gpu_tdtn=True``, the dense ``T_DtN @ v`` products are
+    dispatched to the GPU via JAX while FMM calls run concurrently on
+    CPU.  The GPU launch is asynchronous, so ``T_DtN @ x`` and
+    ``FMM_D(x)`` overlap within each GMRES iteration.
+
+    Returns ``(imp, uscat_b, uscat_dn_b, info)`` matching the dense solver.
+    """
+    from scipy.sparse.linalg import LinearOperator, gmres
+
+    S_corr = nf_corr["S_corr"]
+    D_corr = nf_corr["D_corr"]
+    fmm_eps = nf_corr["fmm_eps"]
+    n = bdry_pts.shape[0]
+
+    # ---- T_DtN matmul dispatch (GPU or CPU) ----
+    if use_gpu_tdtn:
+        T_gpu = jnp.asarray(T_DtN)
+        jax.block_until_ready(T_gpu)
+
+        def _tdtn_mv(v_np):
+            """T_DtN @ v on GPU; returns np.ndarray."""
+            result = T_gpu @ jax.device_put(jnp.asarray(v_np))
+            return np.asarray(result)
+
+        def _tdtn_mv_async(v_np):
+            """Launch T_DtN @ v on GPU; return a lazy JAX array (not blocked)."""
+            return T_gpu @ jax.device_put(jnp.asarray(v_np))
+
+        def _collect(jax_arr):
+            """Block + transfer a lazy JAX result to numpy."""
+            return np.asarray(jax_arr)
+
+    else:
+        T_cpu = np.asarray(T_DtN)
+
+        def _tdtn_mv(v_np):
+            return T_cpu @ v_np
+
+        def _tdtn_mv_async(v_np):
+            return T_cpu @ v_np
+
+        def _collect(arr):
+            return arr
+
+    def _apply_S(v):
+        return fmm_matvec_S(v, bdry_pts, wts, kappa, S_corr, fmm_eps)
+
+    def _apply_D(v):
+        return fmm_matvec_D(v, bdry_pts, normals, wts, kappa, D_corr, fmm_eps)
+
+    def matvec(x):
+        # T_DtN @ x on GPU (async) while FMM_D runs on CPU
+        Tx_lazy = _tdtn_mv_async(x)
+        Dx = _apply_D(x)
+        Tx = _collect(Tx_lazy)
+        return 0.5 * x - Dx + _apply_S(Tx)
+
+    A_op = LinearOperator((n, n), matvec=matvec, dtype=np.complex128)
+
+    # RHS: b = S @ (uin_dn - T_DtN @ uin)
+    uin_np = np.asarray(uin)
+    uin_dn_np = np.asarray(uin_dn)
+
+    n_src = uin_np.shape[1] if uin_np.ndim > 1 else 1
+    if uin_np.ndim == 1:
+        uin_np = uin_np[:, None]
+        uin_dn_np = uin_dn_np[:, None]
+
+    uscat_b_cols = []
+    gmres_info_list = []
+    for s in range(n_src):
+        rhs_s = _apply_S(uin_dn_np[:, s] - _tdtn_mv(uin_np[:, s]))
+        sol, info_code = gmres(
+            A_op, rhs_s, rtol=tol, restart=restart, maxiter=maxiter, atol=0
+        )
+        uscat_b_cols.append(sol)
+        gmres_info_list.append(info_code)
+
+    uscat_b = np.column_stack(uscat_b_cols)
+    uscat_dn_b = _tdtn_mv(uscat_b + uin_np) - uin_dn_np
+    imp = uscat_dn_b + 1j * eta * uscat_b
+
+    info = dict(
+        gmres_info=gmres_info_list,
+        n_src=n_src,
+        converged=all(c == 0 for c in gmres_info_list),
+    )
+    return imp, uscat_b, uscat_dn_b, info
+
+
+def solve_bie_gmres_gpu(
+    T_DtN,
+    bdry_pts: np.ndarray,
+    normals: np.ndarray,
+    wts: np.ndarray,
+    kappa: float,
+    eta: float,
+    uin: np.ndarray,
+    uin_dn: np.ndarray,
+    nf_corr: dict,
+    tol: float = 1e-6,
+    maxiter: int = 200,
+    restart: int = 50,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+    """Solve the exterior BIE entirely on GPU via JAX direct summation.
+
+    Replaces the CPU-side FMM with GPU kernel evaluation.  The smooth
+    Helmholtz kernels :math:`G` and :math:`\\partial G/\\partial n_y` are
+    built once as dense :math:`n \\times n` matrices on the GPU, the
+    near-field corrections are added, and each GMRES iteration reduces to
+    three GPU GEMVs (:math:`T \\cdot x`, :math:`D \\cdot x`, :math:`S \\cdot Tx`).
+    GMRES itself runs on GPU via :func:`jax.scipy.sparse.linalg.gmres`.
+
+    Memory: :math:`3n^2 \\times 16` bytes for the stored matrices
+    (S + D + T).  At :math:`n = 24{,}576` (L = 3) this is ~29 GB —
+    fits on an 80 GB GPU.
+
+    Returns ``(imp, uscat_b, uscat_dn_b, info)`` matching the dense solver.
+    """
+
+    n = bdry_pts.shape[0]
+
+    # ---- Build smooth kernel matrices on GPU (chunked for memory) ----
+    t0 = time.perf_counter()
+    bp = jnp.asarray(bdry_pts)
+    nrm = jnp.asarray(normals)
+    w = jnp.asarray(wts)
+    T = jnp.asarray(T_DtN)
+
+    chunk = min(2048, n)
+    S_blocks, D_blocks = [], []
+    for i0 in range(0, n, chunk):
+        i1 = min(i0 + chunk, n)
+        xi = bp[i0:i1]
+        diff = xi[:, None, :] - bp[None, :, :]
+        r2 = jnp.sum(diff**2, axis=-1)
+        r = jnp.sqrt(r2)
+        safe_r = jnp.where(r > 0, r, 1.0)
+        G = jnp.exp(1j * kappa * r) / (4.0 * jnp.pi * safe_r)
+        G = jnp.where(r > 0, G, 0j)
+        S_blocks.append(G * w[None, :])
+        nd = jnp.sum(diff * nrm[None, :, :], axis=-1)
+        dG = (1.0 / safe_r - 1j * kappa) / safe_r * G * nd
+        dG = jnp.where(r > 0, dG, 0j)
+        D_blocks.append(dG * w[None, :])
+        del diff, r2, r, safe_r, G, nd, dG
+    K_S = jnp.concatenate(S_blocks, axis=0)
+    K_D = jnp.concatenate(D_blocks, axis=0)
+    del S_blocks, D_blocks
+
+    # Add near-field corrections (exact quadrature minus smooth kernel)
+    K_S = K_S + jnp.asarray(nf_corr["S_corr"].toarray())
+    K_D = K_D + jnp.asarray(nf_corr["D_corr"].toarray())
+
+    jax.block_until_ready(K_S)
+    jax.block_until_ready(K_D)
+    dt_build = time.perf_counter() - t0
+    print(f"  GPU kernel build ({n // chunk} chunks): {dt_build:.2f}s")
+    mem_gb = (K_S.nbytes + K_D.nbytes + T.nbytes) / 1e9
+    print(f"  K_S + K_D + T memory: {mem_gb:.2f} GB")
+
+    # ---- GPU-native GMRES via JAX ----
+    def _matvec(x):
+        return 0.5 * x - K_D @ x + K_S @ (T @ x)
+
+    uin_np = np.asarray(uin)
+    uin_dn_np = np.asarray(uin_dn)
+    n_src = uin_np.shape[1] if uin_np.ndim > 1 else 1
+    if uin_np.ndim == 1:
+        uin_np = uin_np[:, None]
+        uin_dn_np = uin_dn_np[:, None]
+
+    n_restart_cycles = max(1, maxiter // restart)
+    uscat_b_cols = []
+    gmres_info_list = []
+    for s in range(n_src):
+        u_s = jnp.asarray(uin_np[:, s])
+        udn_s = jnp.asarray(uin_dn_np[:, s])
+        rhs = K_S @ (udn_s - T @ u_s)
+        sol, info_code = jax.scipy.sparse.linalg.gmres(
+            _matvec,
+            rhs,
+            tol=tol,
+            atol=0.0,
+            restart=restart,
+            maxiter=n_restart_cycles,
+        )
+        jax.block_until_ready(sol)
+        # info_code: 0 = converged in JAX gmres
+        uscat_b_cols.append(np.array(sol))
+        gmres_info_list.append(int(info_code))
+
+    uscat_b = np.column_stack(uscat_b_cols)
+    uscat_dn_b = np.array(
+        T @ jnp.asarray(uscat_b + uin_np) - jnp.asarray(uin_dn_np)
+    )
+    imp = uscat_dn_b + 1j * eta * uscat_b
+
+    info = dict(
+        gmres_info=gmres_info_list,
+        n_src=n_src,
+        converged=all(c == 0 for c in gmres_info_list),
+        kernel_build_time=dt_build,
+    )
+    return imp, uscat_b, uscat_dn_b, info
+
+
+def _gmres_python_loop(
+    A_matvec: Callable,
+    b: jnp.ndarray,
+    x0: jnp.ndarray = None,
+    tol: float = 1e-6,
+    restart: int = 50,
+    maxiter: int = 200,
+    M: Callable = None,
+) -> Tuple[jnp.ndarray, int]:
+    r"""Restarted GMRES with Python-loop iterations (no jax.lax.while_loop).
+
+    JIT-compiles the matvec once; runs Arnoldi iterations imperatively.
+    This avoids the monolithic XLA trace that jax.scipy.sparse.linalg.gmres
+    produces with complex (e.g. vmap-based) matvec operators.
+
+    Returns ``(x, info)`` where info=0 means converged.
+    """
+    if x0 is None:
+        x0 = jnp.zeros_like(b)
+    if M is None:
+        M = lambda x: x  # noqa: E731
+
+    b_norm = float(jnp.linalg.norm(b))
+    if b_norm == 0:
+        return jnp.zeros_like(b), 0
+
+    atol = tol * b_norm
+    x = x0
+    n_outer = max(1, maxiter // restart)
+
+    for _cycle in range(n_outer):
+        r = M(b - A_matvec(x))
+        beta = float(jnp.linalg.norm(r))
+        if beta < atol:
+            return x, 0
+
+        # Arnoldi process: build orthonormal basis V and Hessenberg H
+        V_list = [r / beta]
+        H = np.zeros((restart + 1, restart), dtype=np.complex128)
+
+        k = 0
+        for j in range(restart):
+            w = M(A_matvec(V_list[j]))
+            # Modified Gram-Schmidt
+            for i in range(j + 1):
+                H[i, j] = complex(jnp.vdot(V_list[i], w))
+                w = w - H[i, j] * V_list[i]
+            h_norm = float(jnp.linalg.norm(w))
+            H[j + 1, j] = h_norm
+            if h_norm > 1e-30:
+                V_list.append(w / h_norm)
+            else:
+                V_list.append(jnp.zeros_like(b))
+            k = j + 1
+
+            # Check convergence via least-squares residual norm
+            e1 = np.zeros(k + 1, dtype=np.complex128)
+            e1[0] = beta
+            y_ls, _, _, _ = np.linalg.lstsq(H[: k + 1, :k], e1, rcond=None)
+            ls_res = np.linalg.norm(H[: k + 1, :k] @ y_ls - e1)
+            if ls_res < atol:
+                break
+
+        # Update solution from Arnoldi basis
+        e1 = np.zeros(k + 1, dtype=np.complex128)
+        e1[0] = beta
+        y_ls, _, _, _ = np.linalg.lstsq(H[: k + 1, :k], e1, rcond=None)
+        V_arr = jnp.stack(V_list[:k], axis=0)
+        x = x + V_arr.T @ jnp.asarray(y_ls)
+
+    # Final residual check
+    r_final = float(jnp.linalg.norm(b - A_matvec(x)))
+    info = 0 if r_final < atol else 1
+    return x, info
+
+
+def solve_bie_gpu_advanced(
+    T_DtN,
+    bdry_pts: np.ndarray,
+    normals: np.ndarray,
+    wts: np.ndarray,
+    kappa: float,
+    eta: float,
+    uin: np.ndarray,
+    uin_dn: np.ndarray,
+    nf_corr: dict,
+    tol: float = 1e-6,
+    maxiter: int = 200,
+    restart: int = 50,
+    matrix_free: bool = True,
+    use_preconditioner: bool = True,
+    block_rhs: bool = True,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+    r"""Advanced GPU BIE solver: matrix-free + block GMRES + preconditioner.
+
+    Three optimisations over :func:`solve_bie_gmres_gpu`:
+
+    1. **Matrix-free** (``matrix_free=True``): compute :math:`S v` and
+       :math:`D v` on-the-fly via ``jax.vmap`` without storing the
+       :math:`n \times n` kernel matrices.  Memory drops from
+       :math:`3n^2 \times 16` to :math:`O(n)` (+ sparse NF correction).
+    2. **Block GMRES** (``block_rhs=True``): solve all RHS simultaneously
+       via batched matvec (GEMM-like), better GPU utilisation.
+    3. **Preconditioner** (``use_preconditioner=True``): near-field
+       block-diagonal preconditioner from the NF correction blocks.
+
+    Falls back to dense-matrix path when ``matrix_free=False`` (equivalent
+    to :func:`solve_bie_gmres_gpu`).
+
+    Returns ``(imp, uscat_b, uscat_dn_b, info)`` matching the dense solver.
+    """
+
+    from jax.experimental import sparse as jsparse
+
+    n = bdry_pts.shape[0]
+    t0 = time.perf_counter()
+
+    bp = jnp.asarray(bdry_pts)
+    nrm = jnp.asarray(normals)
+    w = jnp.asarray(wts)
+    T = jnp.asarray(T_DtN)
+
+    if matrix_free:
+        # ---- Matrix-free matvecs via vmap ----
+        # NF corrections as JAX sparse (BCOO): O(nnz) memory, not O(n^2).
+        S_corr_sp = jsparse.BCOO.from_scipy_sparse(nf_corr["S_corr"].tocsc())
+        D_corr_sp = jsparse.BCOO.from_scipy_sparse(nf_corr["D_corr"].tocsc())
+
+        @jax.jit
+        def _S_matvec(v):
+            """Single-layer matvec: [Sv]_i = sum_j G(x_i,x_j) w_j v_j + C_S v."""
+
+            def row_i(xi):
+                diff = xi - bp
+                r = jnp.sqrt(jnp.sum(diff**2, axis=-1))
+                safe_r = jnp.where(r > 0, r, 1.0)
+                G = jnp.exp(1j * kappa * r) / (4.0 * jnp.pi * safe_r)
+                G = jnp.where(r > 0, G, 0j)
+                return jnp.dot(G * w, v)
+
+            return jax.vmap(row_i)(bp) + S_corr_sp @ v
+
+        @jax.jit
+        def _D_matvec(v):
+            """Double-layer matvec: [Dv]_i = sum_j dG/dn_y w_j v_j + C_D v."""
+
+            def row_i(xi):
+                diff = xi - bp
+                r2 = jnp.sum(diff**2, axis=-1)
+                r = jnp.sqrt(r2)
+                safe_r = jnp.where(r > 0, r, 1.0)
+                G = jnp.exp(1j * kappa * r) / (4.0 * jnp.pi * safe_r)
+                G = jnp.where(r > 0, G, 0j)
+                nd = jnp.sum(diff * nrm, axis=-1)
+                dG = (1.0 / safe_r - 1j * kappa) / safe_r * G * nd
+                dG = jnp.where(r > 0, dG, 0j)
+                return jnp.dot(dG * w, v)
+
+            return jax.vmap(row_i)(bp) + D_corr_sp @ v
+
+        @jax.jit
+        def _S_matmat(V):
+            """Block single-layer: [SV]_i = sum_j G(x_i,x_j) w_j V_j + C_S V.
+
+            The kernel row is evaluated once per target point and applied
+            to all columns of ``V`` at once (a vector-matrix product), so
+            the marginal cost of extra right-hand sides is a small GEMM.
+            """
+
+            def row_i(xi):
+                diff = xi - bp
+                r = jnp.sqrt(jnp.sum(diff**2, axis=-1))
+                safe_r = jnp.where(r > 0, r, 1.0)
+                G = jnp.exp(1j * kappa * r) / (4.0 * jnp.pi * safe_r)
+                G = jnp.where(r > 0, G, 0j)
+                return (G * w) @ V
+
+            return jax.vmap(row_i)(bp) + S_corr_sp @ V
+
+        @jax.jit
+        def _D_matmat(V):
+            """Block double-layer matvec over all columns of ``V``."""
+
+            def row_i(xi):
+                diff = xi - bp
+                r2 = jnp.sum(diff**2, axis=-1)
+                r = jnp.sqrt(r2)
+                safe_r = jnp.where(r > 0, r, 1.0)
+                G = jnp.exp(1j * kappa * r) / (4.0 * jnp.pi * safe_r)
+                G = jnp.where(r > 0, G, 0j)
+                nd = jnp.sum(diff * nrm, axis=-1)
+                dG = (1.0 / safe_r - 1j * kappa) / safe_r * G * nd
+                dG = jnp.where(r > 0, dG, 0j)
+                return (dG * w) @ V
+
+            return jax.vmap(row_i)(bp) + D_corr_sp @ V
+
+        dt_build = time.perf_counter() - t0
+        s_mem = S_corr_sp.data.nbytes + S_corr_sp.indices.nbytes
+        d_mem = D_corr_sp.data.nbytes + D_corr_sp.indices.nbytes
+        mem_gb = (s_mem + d_mem + T.nbytes) / 1e9
+        print(f"  Matrix-free setup: {dt_build:.2f}s")
+        print(f"  NF corrections (sparse) + T memory: {mem_gb:.2f} GB")
+
+        def _matvec(x):
+            return 0.5 * x - _D_matvec(x) + _S_matvec(T @ x)
+
+        def _S_apply(v):
+            return _S_matvec(v)
+
+    else:
+        # Dense matrix path (same as solve_bie_gmres_gpu)
+        S_corr_dense = jnp.asarray(nf_corr["S_corr"].toarray())
+        D_corr_dense = jnp.asarray(nf_corr["D_corr"].toarray())
+        chunk = min(2048, n)
+        S_blocks, D_blocks = [], []
+        for i0 in range(0, n, chunk):
+            i1 = min(i0 + chunk, n)
+            xi = bp[i0:i1]
+            diff = xi[:, None, :] - bp[None, :, :]
+            r2 = jnp.sum(diff**2, axis=-1)
+            r = jnp.sqrt(r2)
+            safe_r = jnp.where(r > 0, r, 1.0)
+            G = jnp.exp(1j * kappa * r) / (4.0 * jnp.pi * safe_r)
+            G = jnp.where(r > 0, G, 0j)
+            S_blocks.append(G * w[None, :])
+            nd = jnp.sum(diff * nrm[None, :, :], axis=-1)
+            dG = (1.0 / safe_r - 1j * kappa) / safe_r * G * nd
+            dG = jnp.where(r > 0, dG, 0j)
+            D_blocks.append(dG * w[None, :])
+            del diff, r2, r, safe_r, G, nd, dG
+        K_S = jnp.concatenate(S_blocks, axis=0) + S_corr_dense
+        K_D = jnp.concatenate(D_blocks, axis=0) + D_corr_dense
+        del S_blocks, D_blocks, S_corr_dense, D_corr_dense
+        jax.block_until_ready(K_S)
+        jax.block_until_ready(K_D)
+        dt_build = time.perf_counter() - t0
+        mem_gb = (K_S.nbytes + K_D.nbytes + T.nbytes) / 1e9
+        print(f"  GPU kernel build ({n // chunk} chunks): {dt_build:.2f}s")
+        print(f"  K_S + K_D + T memory: {mem_gb:.2f} GB")
+
+        def _matvec(x):
+            return 0.5 * x - K_D @ x + K_S @ (T @ x)
+
+        def _S_apply(v):
+            return K_S @ v
+
+    # ---- Preconditioner: block-diagonal from NF correction ----
+    M_precond = None
+    if use_preconditioner:
+        # Build the diagonal of A = 0.5 I - D + S T restricted to NF blocks.
+        # Approximate: M ≈ (0.5 I - D_nf)^{-1} using the NF diagonal blocks.
+        # For simplicity use the dense NF D correction + 0.5 I diagonal.
+        t_prec = time.perf_counter()
+        # The NF correction for D gives us the near-singular part.
+        # Use the diagonal as a Jacobi preconditioner: M_ii = 1/(0.5 - D_ii)
+        D_diag = jnp.asarray(nf_corr["D_corr"].diagonal())
+        # A_ii ≈ 0.5 - D_ii (the S*T contribution is off-diagonal-dominated)
+        prec_diag = 1.0 / (0.5 - D_diag)
+        prec_diag = jnp.where(jnp.abs(0.5 - D_diag) > 1e-14, prec_diag, 1.0)
+
+        @jax.jit
+        def M_precond(x):
+            return prec_diag * x
+
+        dt_prec = time.perf_counter() - t_prec
+        print(f"  Preconditioner (Jacobi): {dt_prec:.3f}s")
+
+    # ---- Prepare RHS ----
+    uin_np = np.asarray(uin)
+    uin_dn_np = np.asarray(uin_dn)
+    n_src = uin_np.shape[1] if uin_np.ndim > 1 else 1
+    if uin_np.ndim == 1:
+        uin_np = uin_np[:, None]
+        uin_dn_np = uin_dn_np[:, None]
+
+    n_restart_cycles = max(1, maxiter // restart)
+
+    # Block GMRES: all RHS share one Krylov space.  For the dense path the
+    # matvec is 3 GEMMs; for the matrix-free path the kernel is evaluated
+    # once per iteration and applied to all columns at once.
+    use_block = block_rhs and n_src > 1
+
+    if use_block:
+        # ---- Block GMRES: all RHS via flattened (n*n_src,) system ----
+        uin_j = jnp.asarray(uin_np)
+        udn_j = jnp.asarray(uin_dn_np)
+        if matrix_free:
+            rhs_block = _S_matmat(udn_j - T @ uin_j)
+
+            def _flat_matvec(x_flat):
+                X = x_flat.reshape(n, n_src)
+                Y = 0.5 * X - _D_matmat(X) + _S_matmat(T @ X)
+                return Y.ravel()
+
+        else:
+            rhs_block = jnp.zeros((n, n_src), dtype=jnp.complex128)
+            for s in range(n_src):
+                rhs_col = _S_apply(udn_j[:, s] - T @ uin_j[:, s])
+                rhs_block = rhs_block.at[:, s].set(rhs_col)
+
+            def _flat_matvec(x_flat):
+                X = x_flat.reshape(n, n_src)
+                Y = 0.5 * X - K_D @ X + K_S @ (T @ X)
+                return Y.ravel()
+
+        def _flat_precond(x_flat):
+            if M_precond is not None:
+                X = x_flat.reshape(n, n_src)
+                return (prec_diag[:, None] * X).ravel()
+            return x_flat
+
+        rhs_flat = rhs_block.ravel()
+        if matrix_free:
+            sol_flat, info_code = _gmres_python_loop(
+                _flat_matvec,
+                rhs_flat,
+                tol=tol,
+                restart=restart,
+                maxiter=maxiter,
+                M=_flat_precond if M_precond is not None else None,
+            )
+        else:
+            sol_flat, info_code = jax.scipy.sparse.linalg.gmres(
+                _flat_matvec,
+                rhs_flat,
+                tol=tol,
+                atol=0.0,
+                restart=restart,
+                maxiter=n_restart_cycles,
+                M=_flat_precond if M_precond is not None else None,
+            )
+        jax.block_until_ready(sol_flat)
+        uscat_b = np.array(sol_flat.reshape(n, n_src))
+        gmres_info_list = [int(info_code)] * n_src
+
+    else:
+        # ---- Sequential GMRES per RHS ----
+        # Matrix-free: use Python-loop GMRES (avoids monolithic JIT).
+        # Dense: use JAX built-in (entire loop compiled = faster for small n).
+        uscat_b_cols = []
+        gmres_info_list = []
+        for s in range(n_src):
+            u_s = jnp.asarray(uin_np[:, s])
+            udn_s = jnp.asarray(uin_dn_np[:, s])
+            rhs = _S_apply(udn_s - T @ u_s)
+            if matrix_free:
+                sol, info_code = _gmres_python_loop(
+                    _matvec,
+                    rhs,
+                    tol=tol,
+                    restart=restart,
+                    maxiter=maxiter,
+                    M=M_precond,
+                )
+            else:
+                sol, info_code = jax.scipy.sparse.linalg.gmres(
+                    _matvec,
+                    rhs,
+                    tol=tol,
+                    atol=0.0,
+                    restart=restart,
+                    maxiter=n_restart_cycles,
+                    M=M_precond,
+                )
+            jax.block_until_ready(sol)
+            uscat_b_cols.append(np.array(sol))
+            gmres_info_list.append(int(info_code))
+        uscat_b = np.column_stack(uscat_b_cols)
+
+    dt_gmres = time.perf_counter() - t0
+    print(f"  GMRES total (incl. build): {dt_gmres:.2f}s")
+
+    uscat_dn_b = np.array(
+        T @ jnp.asarray(uscat_b + uin_np) - jnp.asarray(uin_dn_np)
+    )
+    imp = uscat_dn_b + 1j * eta * uscat_b
+
+    info = dict(
+        gmres_info=gmres_info_list,
+        n_src=n_src,
+        converged=all(c == 0 for c in gmres_info_list),
+        kernel_build_time=dt_build,
+        total_gmres_time=dt_gmres,
+        matrix_free=matrix_free,
+        block_rhs=block_rhs and n_src > 1,
+        preconditioned=use_preconditioner,
+    )
+    return imp, uscat_b, uscat_dn_b, info
+
+
+# ---------------------------------------------------------------------------
 # BIE coupling -- 3D analogue of examples/wave_scattering_utils.py
 # ---------------------------------------------------------------------------
 #
@@ -188,6 +1101,37 @@ def get_uin_and_dn_3D(
 
 
 @jax.jit
+def get_uin_and_dn_pointsource_3D(
+    k: float,
+    bdry_pts: jnp.ndarray,
+    normals: jnp.ndarray,
+    src_pts: jnp.ndarray,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Point-source incident traces and normal derivatives on ``bdry_pts``.
+
+    ``u^inc(x) = exp(i k |x - s|) / (4 pi |x - s|)`` (3D free-space Green's
+    function), so
+
+    ``d u^inc / dn = (i k - 1/r) ((x - s) . n / r) u^inc(x)``.
+
+    Args:
+        k:         wavenumber.
+        bdry_pts:  ``(n_bdry, 3)`` boundary nodes.
+        normals:   ``(n_bdry, 3)`` outward unit normals at the boundary nodes.
+        src_pts:   ``(n_src, 3)`` point-source locations (outside the cube).
+
+    Returns:
+        ``uin`` and ``uin_dn`` each of shape ``(n_bdry, n_src)``.
+    """
+    diff = bdry_pts[:, None, :] - src_pts[None, :, :]  # (n_bdry, n_src, 3)
+    r = jnp.linalg.norm(diff, axis=-1)
+    uin = jnp.exp(1j * k * r) / (4.0 * jnp.pi * r)
+    n_dot_diff = jnp.einsum("bj,bsj->bs", normals, diff)
+    uin_dn = (1j * k - 1.0 / r) * (n_dot_diff / r) * uin
+    return uin, uin_dn
+
+
+@jax.jit
 def setup_scattering_lin_system_3D(
     S: jnp.ndarray,
     D: jnp.ndarray,
@@ -234,6 +1178,36 @@ def get_scattering_uscat_impedance_3D(
         S, D, T_DtN, bdry_pts, normals, k, source_dirs
     )
     uin, uin_dn = get_uin_and_dn_3D(k, bdry_pts, normals, source_dirs)
+    uscat_b = jnp.linalg.solve(A, rhs)
+    uscat_dn_b = T_DtN @ (uscat_b + uin) - uin_dn
+    imp = uscat_dn_b + 1j * eta * uscat_b
+    return imp, uscat_b, uscat_dn_b
+
+
+@jax.jit
+def get_scattering_uscat_impedance_from_traces_3D(
+    S: jnp.ndarray,
+    D: jnp.ndarray,
+    T_DtN: jnp.ndarray,
+    uin: jnp.ndarray,
+    uin_dn: jnp.ndarray,
+    eta: float,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Same BIE solve as :func:`get_scattering_uscat_impedance_3D` but for
+    precomputed incident traces (e.g. from point sources).
+
+    Args:
+        S, D:     ``(n_bdry, n_bdry)`` single/double-layer matrices.
+        T_DtN:    ``(n_bdry, n_bdry)`` interior DtN map.
+        uin:      ``(n_bdry, n_src)`` incident Dirichlet trace.
+        uin_dn:   ``(n_bdry, n_src)`` incident Neumann trace.
+        eta:      ItI impedance parameter.
+
+    Returns ``(imp, uscat_b, uscat_dn_b)``, each ``(n_bdry, n_src)``.
+    """
+    n = uin.shape[0]
+    A = 0.5 * jnp.eye(n, dtype=S.dtype) - D + S @ T_DtN
+    rhs = S @ (uin_dn - T_DtN @ uin)
     uscat_b = jnp.linalg.solve(A, rhs)
     uscat_dn_b = T_DtN @ (uscat_b + uin) - uin_dn
     imp = uscat_dn_b + 1j * eta * uscat_b
@@ -378,6 +1352,234 @@ def solve_scattering_bie_3D(
         k=float(kappa),
         eta=eta,
         source_dirs=jnp.asarray(source_dirs),
+    )
+    return dict(
+        problem=problem,
+        boundary_points=bp,
+        normals=nrm,
+        sdp=sdp,
+        imp=imp,
+        uscat_b=np.asarray(uscat_b),
+        uscat_dn_b=np.asarray(uscat_dn_b),
+    )
+
+
+def build_cartesian_ctx(
+    sd: dict,
+    source_dirs: np.ndarray,
+    eta: float = None,
+    p: int = None,
+) -> dict:
+    """Precompute the ``b``-independent pieces shared by every solve.
+
+    The discretization ``Domain``, the boundary-point permutation of the
+    SD matrices, the outward normals, and the device-resident copies of
+    ``S``, ``D``, the boundary points/normals and source directions depend
+    only on ``(sd, source_dirs, p)`` -- not on the scattering potential.
+    Building them once and reusing the returned ``ctx`` across many samples
+    (see :func:`solve_scattering_bie_3D_cartesian`) removes the per-sample
+    k-d tree permutation (~2 s) and the 1.2 GB host->device copy of ``S, D``.
+    """
+    a, q, L, kappa = sd["a"], sd["q"], sd["L"], sd["kappa"]
+    eta = float(kappa if eta is None else eta)
+    p = q + 4 if p is None else p
+    source_dirs = np.asarray(source_dirs, dtype=np.float64)
+    dev = jax.devices()[0]
+
+    root = DiscretizationNode3D(
+        xmin=-a, xmax=a, ymin=-a, ymax=a, zmin=-a, zmax=a
+    )
+    domain = Domain(p=p, q=q, root=root, L=L)
+    int_pts = np.asarray(domain.interior_points)  # (n_leaves, p^3, 3)
+    bp = np.asarray(domain.boundary_points).reshape(-1, 3)
+    _, sdp = permute_to_domain(sd, bp)
+    nrm = outward_normals_for_cube_boundary(bp, root)
+    if not np.allclose(sdp["normals"], nrm):
+        bad = float(np.linalg.norm(sdp["normals"] - nrm, axis=-1).max())
+        raise RuntimeError(
+            f"normals don't agree after permutation: max diff {bad:.2e}"
+        )
+    return dict(
+        eta=eta,
+        kappa=float(kappa),
+        domain=domain,
+        int_pts=int_pts,
+        bp=bp,
+        sdp=sdp,
+        nrm=nrm,
+        source_dirs=source_dirs,
+        dev_S=jax.device_put(jnp.asarray(sdp["S"]), dev),
+        dev_D=jax.device_put(jnp.asarray(sdp["D"]), dev),
+        dev_bp=jax.device_put(jnp.asarray(bp), dev),
+        dev_nrm=jax.device_put(jnp.asarray(nrm), dev),
+        dev_src=jax.device_put(jnp.asarray(source_dirs), dev),
+    )
+
+
+def solve_scattering_bie_3D_cartesian(
+    sd: dict,
+    b_cartesian: Callable[[np.ndarray], np.ndarray],
+    source_dirs: np.ndarray,
+    eta: float = None,
+    p: int = None,
+    ctx: dict = None,
+) -> dict:
+    """Plane-wave variant of :func:`solve_scattering_bie_3D` with a cartesian ``b``.
+
+    Identical HPS+BIE coupling and plane-wave incidence as
+    :func:`solve_scattering_bie_3D`, but the scattering potential is an
+    arbitrary (smooth) cartesian function ``b_cartesian(pts)`` evaluated on
+    ``(..., 3)`` arrays rather than a radial profile.  Use this for
+    off-center or multi-bump scatterers.
+
+    ``ctx`` is an optional cache from :func:`build_cartesian_ctx`; when reused
+    across many samples it amortizes the ``b``-independent setup.  If omitted,
+    it is built on the fly (one-shot behaviour, unchanged results).
+
+    Returns the same dict as :func:`solve_scattering_bie_3D`.
+    """
+    if ctx is None:
+        ctx = build_cartesian_ctx(sd, source_dirs, eta=eta, p=p)
+    eta = ctx["eta"]
+    kappa = ctx["kappa"]
+    domain = ctx["domain"]
+    int_pts = ctx["int_pts"]
+    bp = ctx["bp"]
+    sdp = ctx["sdp"]
+    nrm = ctx["nrm"]
+    source_dirs = ctx["source_dirs"]
+    dev = jax.devices()[0]
+
+    t0 = _tic()
+    b_int = b_cartesian(int_pts)
+    I_coeffs = (kappa**2 * (1.0 - b_int)).astype(np.complex128)
+    phases = np.einsum("lpd,sd->lps", int_pts, source_dirs)
+    uin_int = np.exp(1j * kappa * phases)  # (n_leaves, p^3, n_src)
+    src = (kappa**2 * b_int[..., None] * uin_int).astype(np.complex128)
+
+    ones = np.ones_like(I_coeffs)
+    problem = PDEProblem(
+        domain=domain,
+        D_xx_coefficients=ones,
+        D_yy_coefficients=ones,
+        D_zz_coefficients=ones,
+        I_coefficients=I_coeffs,
+        source=src,
+        use_ItI=True,
+        eta=eta,
+    )
+    t0 = _toc("PDEProblem", t0)
+
+    # ``build_solver`` stores its outputs on ``host_device`` (CPU by default),
+    # so the returned ItI map lands on CPU.  Move it to the compute device so
+    # the Cayley transform and BIE solve below run there (a ~50x speedup on GPU).
+    T_ItI = build_solver(problem, return_top_T=True)
+    R = jax.device_put(jnp.asarray(T_ItI), dev)
+    jax.block_until_ready(R)
+    t0 = _toc("build_solver", t0)
+    T_DtN = get_DtN_from_ItI_3D(R, eta)
+    jax.block_until_ready(T_DtN)
+    t0 = _toc("get_DtN_from_ItI", t0)
+
+    imp, uscat_b, uscat_dn_b = get_scattering_uscat_impedance_3D(
+        S=ctx["dev_S"],
+        D=ctx["dev_D"],
+        T_DtN=T_DtN,
+        bdry_pts=ctx["dev_bp"],
+        normals=ctx["dev_nrm"],
+        k=kappa,
+        eta=eta,
+        source_dirs=ctx["dev_src"],
+    )
+    jax.block_until_ready(uscat_b)
+    t0 = _toc("get_scattering_uscat_impedance", t0)
+    return dict(
+        problem=problem,
+        boundary_points=bp,
+        normals=nrm,
+        sdp=sdp,
+        imp=imp,
+        uscat_b=np.asarray(uscat_b),
+        uscat_dn_b=np.asarray(uscat_dn_b),
+    )
+
+
+def solve_scattering_bie_3D_pointsource(
+    sd: dict,
+    b_cartesian: Callable[[np.ndarray], np.ndarray],
+    src_pts: np.ndarray,
+    eta: float = None,
+    p: int = None,
+) -> dict:
+    """Point-source variant of :func:`solve_scattering_bie_3D`.
+
+    Identical HPS+BIE coupling, with two generalizations:
+
+    * the scattering potential is an arbitrary (smooth) cartesian function
+      ``b_cartesian(pts)`` evaluated on ``(..., 3)`` arrays, rather than a
+      radial profile;
+    * the incident field is a point source ``exp(i k |x - s|) / (4 pi |x - s|)``
+      for each row ``s`` of ``src_pts`` (all sources must lie strictly outside
+      the cube), rather than a plane wave.
+
+    Returns the same dict as :func:`solve_scattering_bie_3D`.
+    """
+    a, q, L, kappa = sd["a"], sd["q"], sd["L"], sd["kappa"]
+    eta = float(kappa if eta is None else eta)
+    p = q + 2 if p is None else p
+    src_pts = np.asarray(src_pts, dtype=np.float64)
+    if np.max(np.abs(src_pts)) <= a:
+        raise ValueError(
+            "all point sources must lie strictly outside the cube"
+        )
+
+    root = DiscretizationNode3D(
+        xmin=-a, xmax=a, ymin=-a, ymax=a, zmin=-a, zmax=a
+    )
+    domain = Domain(p=p, q=q, root=root, L=L)
+
+    int_pts = np.asarray(domain.interior_points)  # (n_leaves, p^3, 3)
+    b_int = b_cartesian(int_pts)
+    I_coeffs = (kappa**2 * (1.0 - b_int)).astype(np.complex128)
+    diff = int_pts[:, :, None, :] - src_pts[None, None, :, :]
+    r = np.linalg.norm(diff, axis=-1)  # (n_leaves, p^3, n_src)
+    uin_int = np.exp(1j * kappa * r) / (4.0 * np.pi * r)
+    src = (kappa**2 * b_int[..., None] * uin_int).astype(np.complex128)
+
+    ones = np.ones_like(I_coeffs)
+    problem = PDEProblem(
+        domain=domain,
+        D_xx_coefficients=ones,
+        D_yy_coefficients=ones,
+        D_zz_coefficients=ones,
+        I_coefficients=I_coeffs,
+        source=src,
+        use_ItI=True,
+        eta=eta,
+    )
+
+    bp = np.asarray(domain.boundary_points).reshape(-1, 3)
+    _, sdp = permute_to_domain(sd, bp)
+    nrm = outward_normals_for_cube_boundary(bp, root)
+    if not np.allclose(sdp["normals"], nrm):
+        bad = float(np.linalg.norm(sdp["normals"] - nrm, axis=-1).max())
+        raise RuntimeError(
+            f"normals don't agree after permutation: max diff {bad:.2e}"
+        )
+
+    T_ItI = build_solver(problem, return_top_T=True)
+    T_DtN = get_DtN_from_ItI_3D(jnp.asarray(T_ItI), eta)
+
+    uin, uin_dn = get_uin_and_dn_pointsource_3D(
+        float(kappa), jnp.asarray(bp), jnp.asarray(nrm), jnp.asarray(src_pts)
+    )
+    imp, uscat_b, uscat_dn_b = get_scattering_uscat_impedance_from_traces_3D(
+        S=jnp.asarray(sdp["S"]),
+        D=jnp.asarray(sdp["D"]),
+        T_DtN=T_DtN,
+        uin=uin,
+        uin_dn=uin_dn,
+        eta=eta,
     )
     return dict(
         problem=problem,
