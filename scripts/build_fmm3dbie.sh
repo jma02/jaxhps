@@ -30,7 +30,7 @@ fi
 #    distutils.msvccompiler addressable; numpy<2 keeps numpy.distutils alive).
 echo ">>> creating env at ${ENV_DIR}"
 "${CONDA}" create -p "${ENV_DIR}" -c conda-forge -y \
-    python=3.10 "numpy<2" "setuptools<60" gfortran openblas pip charset_normalizer
+    python=3.10 "numpy<2" "setuptools<60" gfortran openblas pip charset-normalizer
 "${ENV_DIR}/bin/pip" install --quiet fmm3dpy
 
 # 2. fmm3dbie source (with FMM3D submodule).  Pinned to a known-working
