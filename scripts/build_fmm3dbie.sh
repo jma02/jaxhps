@@ -31,7 +31,13 @@ fi
 echo ">>> creating env at ${ENV_DIR}"
 "${CONDA}" create -p "${ENV_DIR}" -c conda-forge -y \
     python=3.10 "numpy<2" "setuptools<60" gfortran openblas pip charset-normalizer
-"${ENV_DIR}/bin/pip" install --quiet fmm3dpy
+# pytest is in fmm3dbie's tests_require, and setup.py install would otherwise
+# try to easy_install it from PyPI mid-build.
+"${ENV_DIR}/bin/pip" install --quiet fmm3dpy pytest
+
+# Keep ~/.local/lib out of the env's import path, so the build uses the
+# pinned numpy/setuptools installed above.
+export PYTHONNOUSERSITE=1
 
 # 2. fmm3dbie source (with FMM3D submodule).  Pinned to a known-working
 # commit; bump deliberately when fmm3dbie changes break this build.
@@ -50,10 +56,13 @@ echo ">>> building libfmm3dbie"
 cp "${BIE_DIR}/make.inc.linux.gnu.openblas" "${BIE_DIR}/make.inc"
 (
     cd "${BIE_DIR}"
-    PATH="${ENV_DIR}/bin:${PATH}" \
-    LIBRARY_PATH="${ENV_DIR}/lib" \
-    LD_LIBRARY_PATH="${ENV_DIR}/lib" \
-    CPATH="${ENV_DIR}/include" \
+    export PATH="${ENV_DIR}/bin:${PATH}"
+    export LIBRARY_PATH="${ENV_DIR}/lib"
+    export LD_LIBRARY_PATH="${ENV_DIR}/lib"
+    export CPATH="${ENV_DIR}/include"
+    # The FMM3D submodule library must exist before libfmm3dbie unpacks it;
+    # a single parallel `make lib` races on this, so build it first.
+    make -C FMM3D -j"$(nproc)" lib
     make -j"$(nproc)" lib
 )
 

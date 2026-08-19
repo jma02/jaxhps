@@ -693,6 +693,8 @@ def _gmres_python_loop(
             stats["n_cycles"] += 1
         beta = float(jnp.linalg.norm(r))
         if beta < atol:
+            if stats is not None:
+                stats["final_rel_res"] = beta / b_norm
             return x, 0
 
         # Arnoldi process: build orthonormal basis V and Hessenberg H
@@ -1841,6 +1843,7 @@ def solve_scattering_bie_3D_matfree(
     tol: float = 1e-8,
     maxiter: int = 400,
     restart: int = 100,
+    precond: str = "none",
     stats: dict = None,
 ) -> dict:
     """Matrix-free-interior counterpart of :func:`solve_scattering_bie_3D`.
@@ -1850,7 +1853,10 @@ def solve_scattering_bie_3D_matfree(
     interface system of :mod:`jaxhps._matfree_iti_3D`.
     """
     from jaxhps.local_solve import local_solve_stage_uniform_3D_ItI
-    from jaxhps._matfree_iti_3D import build_interface_maps
+    from jaxhps._matfree_iti_3D import (
+        build_interface_maps,
+        flat_bie_diagonal_approx,
+    )
 
     a, q, L, kappa = sd["a"], sd["q"], sd["L"], sd["kappa"]
     eta = float(kappa if eta is None else eta)
@@ -1895,6 +1901,22 @@ def solve_scattering_bie_3D_matfree(
         jnp.asarray(source_dirs),
     )
     apply_S, apply_D = make_dense_SD_apply(sdp["S"], sdp["D"])
+    if precond == "none":
+        M = None
+    elif precond == "jacobi":
+        d = flat_bie_diagonal_approx(
+            T_leaves,
+            maps,
+            eta,
+            jnp.diag(jnp.asarray(sdp["S"])),
+            jnp.diag(jnp.asarray(sdp["D"])),
+        )
+        d_inv = 1.0 / d
+
+        def M(v):
+            return d_inv * v if v.ndim == 1 else d_inv[:, None] * v
+    else:
+        raise ValueError(f"unknown preconditioner {precond!r}")
     uscat_b, uscat_dn_b, info = solve_bie_flat_matfree(
         T_leaves,
         h_leaves,
@@ -1909,8 +1931,10 @@ def solve_scattering_bie_3D_matfree(
         tol=tol,
         maxiter=maxiter,
         restart=restart,
+        precond=M,
         stats=stats,
     )
+    info["precond"] = precond
     return dict(
         problem=problem,
         boundary_points=bp,
