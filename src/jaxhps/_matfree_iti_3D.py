@@ -112,6 +112,31 @@ def leaf_boundary_normals(q: int) -> np.ndarray:
     return np.repeat(FACE_NORMALS, q**2, axis=0)
 
 
+def leaf_boundary_quad_weights(
+    root: DiscretizationNode3D, L: int, q: int
+) -> np.ndarray:
+    """Surface quadrature weights at the ``6 q**2`` nodes of one leaf.
+
+    Tensor-product Gauss-Legendre weights on each face, in the node ordering
+    of :func:`leaf_boundary_gauss_points`. All leaves of a uniform octree are
+    congruent, so one set of weights applies to every leaf.
+    """
+    gw = np.polynomial.legendre.leggauss(q)[1]
+    hx = (root.xmax - root.xmin) / 2**L
+    hy = (root.ymax - root.ymin) / 2**L
+    hz = (root.zmax - root.zmin) / 2**L
+    face_scales = [
+        (hy / 2) * (hz / 2),
+        (hy / 2) * (hz / 2),
+        (hx / 2) * (hz / 2),
+        (hx / 2) * (hz / 2),
+        (hx / 2) * (hy / 2),
+        (hx / 2) * (hy / 2),
+    ]
+    w_face = np.outer(gw, gw).ravel()
+    return np.concatenate([s * w_face for s in face_scales])
+
+
 @dataclass
 class InterfaceMaps:
     """Index bookkeeping for the flat (unmerged) leaf interface system.
@@ -425,6 +450,46 @@ def make_flat_bie_operator(
         return rows.at[maps.bdry_rows].set(bdry)
 
     return matvec
+
+
+def flat_bie_diagonal_approx(
+    T_leaves: jax.Array,
+    maps: InterfaceMaps,
+    eta: float,
+    S_diag: jax.Array,
+    D_diag: jax.Array,
+) -> jax.Array:
+    r"""Approximate diagonal of :func:`make_flat_bie_operator`.
+
+    Interior (gluing) rows are exact: their diagonal is 1, since the partner
+    term always belongs to a different leaf. On a boundary row, the terms kept
+    are those in which the node's own trace reaches its own row directly,
+
+    .. math::
+       \frac{\partial u}{\partial z_i} = \frac{1 - T_{ii}}{2 i \eta},
+       \qquad
+       \frac{\partial u_n}{\partial z_i} = \frac{1 + T_{ii}}{2},
+
+    giving :math:`(\tfrac12 - D_{kk})\partial_z u + S_{kk}\partial_z u_n`.
+    Dropped are the paths through the off-diagonal of the leaf ItI map, in
+    which :math:`z_i` moves the traces at the *other* boundary nodes of the
+    same leaf and those reach row :math:`k` through :math:`D_{kj}, S_{kj}`;
+    at ``p=6, q=4, kappa=4`` these amount to about 10% of the true diagonal.
+    The result is therefore a preconditioner, not the diagonal: it becomes
+    exact only when the leaf ItI blocks are diagonal.
+
+    ``S_diag`` and ``D_diag`` are the diagonals of the boundary operators in
+    ``Domain.boundary_points`` ordering, so this needs only the self-interaction
+    entries of the quadrature -- no dense operator.
+    """
+    T_diag_leafwise = jnp.diagonal(T_leaves, axis1=1, axis2=2)
+    T_diag = T_diag_leafwise.reshape(-1)
+    diag = jnp.ones(maps.n_flat, dtype=jnp.complex128)
+    t_b = T_diag[maps.bdry_rows]
+    du = (1.0 - t_b) / (2j * eta)
+    du_n = (1.0 + t_b) / 2.0
+    bdry = (0.5 - jnp.asarray(D_diag)) * du + jnp.asarray(S_diag) * du_n
+    return diag.at[maps.bdry_rows].set(bdry)
 
 
 def flat_bie_rhs(

@@ -321,8 +321,10 @@ def test_flat_bie_gmres_matches_dense_lu() -> None:
     The preconditioner here is an LU factorization of the materialized flat
     operator, so this checks the iterative path (matvec, right-hand side and
     trace recovery) against the direct one rather than the conditioning of
-    the flat system: restarted GMRES without a preconditioner stagnates on
-    this operator, which is what the spectral experiments investigate.
+    the flat system: with the random ``_synthetic_SD`` operators used here,
+    unpreconditioned restarted GMRES stagnates (with the real fmm3dbie S, D
+    of the experiments it does not), which is what the spectral experiments
+    investigate.
     """
     from scipy.linalg import lu_factor, lu_solve
 
@@ -375,6 +377,57 @@ def test_flat_bie_gmres_matches_dense_lu() -> None:
     rel_dn = np.linalg.norm(us_dn_it - us_dn_lu) / np.linalg.norm(us_dn_lu)
     assert rel < 1e-7, f"GMRES vs LU Dirichlet trace: {rel:.3e}"
     assert rel_dn < 1e-7, f"GMRES vs LU Neumann trace: {rel_dn:.3e}"
+    jax.clear_caches()
+
+
+def _diagonal_part(T_leaves):
+    """Leafwise ItI blocks with their off-diagonal entries removed."""
+    d = jnp.diagonal(T_leaves, axis1=1, axis2=2)
+    return jnp.einsum("li,ij->lij", d, jnp.eye(T_leaves.shape[1]))
+
+
+def test_flat_bie_diagonal_approx_vs_materialized() -> None:
+    """The Jacobi preconditioner against the true flat-operator diagonal.
+
+    Interior rows and the diagonal-leaf-ItI limit are reproduced exactly; with
+    the full leaf ItI blocks the boundary rows are only approximated, since the
+    paths in which a node's trace moves the other boundary nodes of its own
+    leaf through the ItI off-diagonal are dropped.
+    """
+    from jaxhps._matfree_iti_3D import (
+        flat_bie_diagonal_approx,
+        make_flat_bie_operator,
+        materialize,
+    )
+
+    p, q, L = 6, 4, 1
+    kappa, eta = 4.0, 4.0
+    domain, problem = _problem(p=p, q=q, L=L, kappa=kappa, eta=eta, bump=True)
+    _, T_leaves, _, _ = local_solve_stage_uniform_3D_ItI(problem)
+    maps = build_interface_maps(domain)
+    n_bdry = np.asarray(domain.boundary_points).reshape(-1, 3).shape[0]
+
+    S, D = _synthetic_SD(n_bdry)
+    apply_S, apply_D = make_dense_SD_apply(S, D)
+    S_diag, D_diag = jnp.diag(jnp.asarray(S)), jnp.diag(jnp.asarray(D))
+    br = np.asarray(maps.bdry_rows)
+    interior = np.setdiff1d(np.arange(maps.n_flat), br)
+
+    for name, T in (("full", T_leaves), ("diag", _diagonal_part(T_leaves))):
+        A_flat = np.asarray(
+            materialize(
+                make_flat_bie_operator(T, maps, eta, apply_S, apply_D),
+                maps.n_flat,
+            )
+        )
+        true_diag = np.diagonal(A_flat)
+        d = np.asarray(flat_bie_diagonal_approx(T, maps, eta, S_diag, D_diag))
+        assert np.abs(d[interior] - true_diag[interior]).max() == 0.0
+        rel = np.abs(d[br] - true_diag[br]).max() / np.abs(true_diag[br]).max()
+        if name == "full":
+            assert rel < 0.2, f"approximation unexpectedly poor: {rel:.3e}"
+        else:
+            assert rel < 1e-12, f"diagonal-ItI case not exact: {rel:.3e}"
     jax.clear_caches()
 
 
