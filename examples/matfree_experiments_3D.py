@@ -25,6 +25,12 @@ interface/BIE system of :mod:`jaxhps._matfree_iti_3D`:
     directions, solved one at a time versus all at once in a shared Krylov
     space, plus the memory used by the leaf blocks and the flat vectors.
 
+``precond``
+    Matvecs for each preconditioner of :mod:`jaxhps._matfree_precond_3D` over
+    a grid of cases, to separate mesh dependence (refine ``q`` at fixed
+    ``kappa``) from frequency dependence (raise ``kappa`` at fixed points per
+    wavelength).
+
 The (S, D) boundary matrices come from ``examples/gen_SD_3D.py`` fixtures;
 each experiment states which fixture it needs and skips cases whose fixture
 is missing rather than silently changing the discretization.
@@ -34,6 +40,8 @@ Usage:
     python examples/matfree_experiments_3D.py kappa
     python examples/matfree_experiments_3D.py contrast
     python examples/matfree_experiments_3D.py nsrc
+    python examples/matfree_experiments_3D.py precond \
+        --precond_list jacobi,sweep,shift:0.1
 """
 
 import argparse
@@ -382,6 +390,64 @@ def exp_nsrc(args) -> None:
     dump("nsrc", rows, args)
 
 
+def exp_precond(args) -> None:
+    """Matvecs per preconditioner, refining ``q`` and then raising ``kappa``."""
+    b_radial = b_poly(args.b_amp)
+    rows = []
+    cases = args.precond_cases
+    if args.cases:
+        cases = [
+            (
+                float(c.split(",")[0]),
+                int(c.split(",")[1]),
+                int(c.split(",")[2]),
+            )
+            for c in args.cases.split(";")
+        ]
+    for kappa, q, L in cases:
+        sd = load_or_skip(sd_path(kappa, q, L, 1.25))
+        if sd is None:
+            continue
+        for pc in args.precond_list:
+            out = run_matfree(
+                sd,
+                b_radial,
+                DEFAULT_DIR,
+                tol=args.tol,
+                maxiter=args.maxiter,
+                restart=args.restart,
+                precond=pc,
+            )
+            st = out["stats"]
+            cost = 1 + int(out["info"]["precond_cost_matvecs"])
+            row = dict(
+                precond=pc,
+                kappa=kappa,
+                q=q,
+                L=L,
+                n_flat=int(out["info"]["n_flat"]),
+                n_matvec=int(st["n_matvec"]),
+                n_matvec_equiv=int(st["n_matvec"]) * cost,
+                rel_res=float(st["final_rel_res"]),
+                converged=bool(out["info"]["converged"]),
+                err=mie_error(out, sd, b_radial, DEFAULT_DIR, args.rho),
+                time=out["wall_time"],
+                precond_setup_time=float(out["info"]["precond_setup_time"]),
+                precond_dense_setup=bool(out["info"]["precond_dense_setup"]),
+                peak_rss_GB=peak_rss_gb(),
+            )
+            rows.append(row)
+            dump("precond", rows, args)
+            print(
+                f"  kappa={kappa:5g} q={q:3d} {pc:10s} "
+                f"matvecs={row['n_matvec']:5d} "
+                f"equiv={row['n_matvec_equiv']:5d} "
+                f"err={row['err']:.3e} t={row['time']:.1f}s "
+                f"conv={row['converged']}"
+            )
+    dump("precond", rows, args)
+
+
 def fibonacci_dirs(n: int) -> np.ndarray:
     """``n`` roughly equidistributed unit directions."""
     i = np.arange(n) + 0.5
@@ -409,7 +475,7 @@ def dump(name: str, rows: list, args) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "experiment", choices=("mie", "kappa", "contrast", "nsrc")
+        "experiment", choices=("mie", "kappa", "contrast", "nsrc", "precond")
     )
     parser.add_argument("--tol", type=float, default=1e-10)
     parser.add_argument("--rho", type=float, default=2.5)
@@ -418,8 +484,10 @@ if __name__ == "__main__":
     parser.add_argument("--seq_max", type=int, default=16)
     parser.add_argument("--maxiter", type=int, default=600)
     parser.add_argument("--restart", type=int, default=200)
+    # "none", "jacobi", "sweep"/"sweep<n_dir>", "shift"/"shift:<eps>".
+    parser.add_argument("--precond", type=str, default="none")
     parser.add_argument(
-        "--precond", choices=("none", "jacobi"), default="none"
+        "--precond_list", type=str, default="none,jacobi,sweep,shift:0.1"
     )
     parser.add_argument("--cases", type=str, default=None)
     parser.add_argument("--tag", type=str, default="")
@@ -432,6 +500,16 @@ if __name__ == "__main__":
         (12.0, 14, 1),
         (16.0, 16, 1),
     ]
+    parsed.precond_list = parsed.precond_list.split(",")
+    # Refine q at fixed kappa, then raise kappa at fixed points/wavelength.
+    parsed.precond_cases = [
+        (4.0, 4, 1),
+        (4.0, 6, 1),
+        (4.0, 8, 1),
+        (4.0, 10, 1),
+        (2.0, 6, 1),
+        (8.0, 12, 1),
+    ]
     parsed.contrasts = [0.1, 0.25, 0.5, 0.75, 1.0]
     parsed.nsrc_list = [1, 4, 16, 64]
     {
@@ -439,4 +517,5 @@ if __name__ == "__main__":
         "kappa": exp_kappa,
         "contrast": exp_contrast,
         "nsrc": exp_nsrc,
+        "precond": exp_precond,
     }[parsed.experiment](parsed)

@@ -1856,6 +1856,13 @@ def solve_scattering_bie_3D_matfree(
     from jaxhps._matfree_iti_3D import (
         build_interface_maps,
         flat_bie_diagonal_approx,
+        make_flat_bie_operator,
+    )
+    from jaxhps._matfree_precond_3D import (
+        DIAGONAL_SIGNS,
+        make_shifted_operator_preconditioner,
+        make_sweep_preconditioner,
+        sweep_cost_matvecs,
     )
 
     a, q, L, kappa = sd["a"], sd["q"], sd["L"], sd["kappa"]
@@ -1901,6 +1908,7 @@ def solve_scattering_bie_3D_matfree(
         jnp.asarray(source_dirs),
     )
     apply_S, apply_D = make_dense_SD_apply(sdp["S"], sdp["D"])
+    t_precond = time.perf_counter()
     if precond == "none":
         M = None
     elif precond == "jacobi":
@@ -1915,8 +1923,49 @@ def solve_scattering_bie_3D_matfree(
 
         def M(v):
             return d_inv * v if v.ndim == 1 else d_inv[:, None] * v
+    elif precond.startswith("sweep"):
+        # "sweep" = forward + reverse diagonal sweep, "sweep8" = all eight.
+        n_dir = int(precond[len("sweep") :] or 2)
+        if n_dir == 2:
+            directions = [(1, 1, 1), (-1, -1, -1)]
+        else:
+            directions = DIAGONAL_SIGNS[:n_dir]
+        M = make_sweep_preconditioner(
+            T_leaves,
+            maps,
+            eta,
+            jnp.diag(jnp.asarray(sdp["S"])),
+            jnp.diag(jnp.asarray(sdp["D"])),
+            root,
+            L,
+            directions=directions,
+            A_matvec=make_flat_bie_operator(
+                T_leaves, maps, eta, apply_S, apply_D
+            ),
+        )
+    elif precond.startswith("shift"):
+        # "shift" or "shift:<eps>": invert the damped flat operator, built from
+        # leaf ItI maps of the problem with kappa^2 -> kappa^2 (1 + i eps).
+        eps = float(precond.split(":")[1]) if ":" in precond else 0.1
+        shifted = PDEProblem(
+            domain=domain,
+            D_xx_coefficients=ones,
+            D_yy_coefficients=ones,
+            D_zz_coefficients=ones,
+            I_coefficients=(I_coeffs * (1.0 + 1j * eps)).astype(np.complex128),
+            source=np.zeros_like(I_coeffs),
+            use_ItI=True,
+            eta=eta,
+        )
+        _, T_shift, _, _ = local_solve_stage_uniform_3D_ItI(shifted)
+        M = make_shifted_operator_preconditioner(
+            T_shift, maps, eta, apply_S, apply_D
+        )
     else:
         raise ValueError(f"unknown preconditioner {precond!r}")
+    if M is not None:
+        jax.block_until_ready(M(jnp.zeros(maps.n_flat, dtype=jnp.complex128)))
+    t_precond = time.perf_counter() - t_precond
     uscat_b, uscat_dn_b, info = solve_bie_flat_matfree(
         T_leaves,
         h_leaves,
@@ -1935,6 +1984,17 @@ def solve_scattering_bie_3D_matfree(
         stats=stats,
     )
     info["precond"] = precond
+    info["precond_cost_matvecs"] = (
+        sweep_cost_matvecs(len(directions))
+        if precond.startswith("sweep")
+        else 0
+    )
+    info["precond_setup_time"] = t_precond
+    # "shift" factors the damped flat operator densely, so its setup costs
+    # O(n_flat^3) work and O(n_flat^2) memory, not a few matvecs.
+    info["precond_dense_setup"] = precond.startswith("shift")
+    if precond.startswith("shift"):
+        info["shift_eps"] = eps
     return dict(
         problem=problem,
         boundary_points=bp,
