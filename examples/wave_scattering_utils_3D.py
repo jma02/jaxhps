@@ -655,6 +655,7 @@ def _gmres_python_loop(
     restart: int = 50,
     maxiter: int = 200,
     M: Callable = None,
+    stats: dict = None,
 ) -> Tuple[jnp.ndarray, int]:
     r"""Restarted GMRES with Python-loop iterations (no jax.lax.while_loop).
 
@@ -662,8 +663,16 @@ def _gmres_python_loop(
     This avoids the monolithic XLA trace that jax.scipy.sparse.linalg.gmres
     produces with complex (e.g. vmap-based) matvec operators.
 
+    If a dict is passed as ``stats``, it is filled with the number of
+    matvecs (``n_matvec``), restart cycles (``n_cycles``) and the relative
+    residual history (``res_history``, one entry per Arnoldi step).
+
     Returns ``(x, info)`` where info=0 means converged.
     """
+    if stats is not None:
+        stats.setdefault("n_matvec", 0)
+        stats.setdefault("n_cycles", 0)
+        stats.setdefault("res_history", [])
     if x0 is None:
         x0 = jnp.zeros_like(b)
     if M is None:
@@ -679,8 +688,13 @@ def _gmres_python_loop(
 
     for _cycle in range(n_outer):
         r = M(b - A_matvec(x))
+        if stats is not None:
+            stats["n_matvec"] += 1
+            stats["n_cycles"] += 1
         beta = float(jnp.linalg.norm(r))
         if beta < atol:
+            if stats is not None:
+                stats["final_rel_res"] = beta / b_norm
             return x, 0
 
         # Arnoldi process: build orthonormal basis V and Hessenberg H
@@ -690,6 +704,8 @@ def _gmres_python_loop(
         k = 0
         for j in range(restart):
             w = M(A_matvec(V_list[j]))
+            if stats is not None:
+                stats["n_matvec"] += 1
             # Modified Gram-Schmidt
             for i in range(j + 1):
                 H[i, j] = complex(jnp.vdot(V_list[i], w))
@@ -707,6 +723,8 @@ def _gmres_python_loop(
             e1[0] = beta
             y_ls, _, _, _ = np.linalg.lstsq(H[: k + 1, :k], e1, rcond=None)
             ls_res = np.linalg.norm(H[: k + 1, :k] @ y_ls - e1)
+            if stats is not None:
+                stats["res_history"].append(float(ls_res / b_norm))
             if ls_res < atol:
                 break
 
@@ -719,6 +737,9 @@ def _gmres_python_loop(
 
     # Final residual check
     r_final = float(jnp.linalg.norm(b - A_matvec(x)))
+    if stats is not None:
+        stats["n_matvec"] += 1
+        stats["final_rel_res"] = r_final / b_norm
     info = 0 if r_final < atol else 1
     return x, info
 
@@ -739,6 +760,7 @@ def solve_bie_gpu_advanced(
     matrix_free: bool = True,
     use_preconditioner: bool = True,
     block_rhs: bool = True,
+    stats: dict = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
     r"""Advanced GPU BIE solver: matrix-free + block GMRES + preconditioner.
 
@@ -968,6 +990,7 @@ def solve_bie_gpu_advanced(
                 restart=restart,
                 maxiter=maxiter,
                 M=_flat_precond if M_precond is not None else None,
+                stats=stats,
             )
         else:
             sol_flat, info_code = jax.scipy.sparse.linalg.gmres(
@@ -1001,6 +1024,7 @@ def solve_bie_gpu_advanced(
                     restart=restart,
                     maxiter=maxiter,
                     M=M_precond,
+                    stats=stats,
                 )
             else:
                 sol, info_code = jax.scipy.sparse.linalg.gmres(
@@ -1035,6 +1059,8 @@ def solve_bie_gpu_advanced(
         block_rhs=block_rhs and n_src > 1,
         preconditioned=use_preconditioner,
     )
+    if stats is not None:
+        info["gmres_stats"] = stats
     return imp, uscat_b, uscat_dn_b, info
 
 
@@ -1589,4 +1615,395 @@ def solve_scattering_bie_3D_pointsource(
         imp=imp,
         uscat_b=np.asarray(uscat_b),
         uscat_dn_b=np.asarray(uscat_dn_b),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Matrix-free interior coupling: the flat (unmerged) HPS + BIE system
+# ---------------------------------------------------------------------------
+#
+# The drivers above all build the dense root-level DtN map, which is what
+# limits the reachable frequency: its size grows like (6 * 4^L q^2)^2.  The
+# drivers below instead keep the leaf ItI maps unmerged and solve one flat
+# system in the per-leaf incoming impedance traces, coupling to the same
+# exterior BIE through the domain-boundary rows.  See
+# ``jaxhps._matfree_iti_3D`` for the formulation.
+
+
+def make_dense_SD_apply(
+    S: np.ndarray, D: np.ndarray
+) -> Tuple[Callable, Callable]:
+    """Wrap dense (S, D) matrices as apply functions for the flat system."""
+    S_j = jnp.asarray(S)
+    D_j = jnp.asarray(D)
+
+    def apply_S(v):
+        return S_j @ v
+
+    def apply_D(v):
+        return D_j @ v
+
+    return apply_S, apply_D
+
+
+def make_matfree_SD_apply(
+    bdry_pts: np.ndarray,
+    normals: np.ndarray,
+    wts: np.ndarray,
+    kappa: float,
+    nf_corr: dict,
+) -> Tuple[Callable, Callable]:
+    """Matrix-free single/double-layer applications with NF corrections.
+
+    Same kernels as :func:`solve_bie_gpu_advanced`, exposed as standalone
+    callables so the flat coupled system can reuse them.  Handles both a
+    single vector and a matrix of right-hand sides.
+    """
+    from jax.experimental import sparse as jsparse
+
+    bp = jnp.asarray(bdry_pts)
+    nrm = jnp.asarray(normals)
+    w = jnp.asarray(wts)
+    S_corr_sp = jsparse.BCOO.from_scipy_sparse(nf_corr["S_corr"].tocsc())
+    D_corr_sp = jsparse.BCOO.from_scipy_sparse(nf_corr["D_corr"].tocsc())
+
+    @jax.jit
+    def apply_S(v):
+        def row_i(xi):
+            diff = xi - bp
+            r = jnp.sqrt(jnp.sum(diff**2, axis=-1))
+            safe_r = jnp.where(r > 0, r, 1.0)
+            G = jnp.exp(1j * kappa * r) / (4.0 * jnp.pi * safe_r)
+            G = jnp.where(r > 0, G, 0j)
+            return (G * w) @ v
+
+        return jax.vmap(row_i)(bp) + S_corr_sp @ v
+
+    @jax.jit
+    def apply_D(v):
+        def row_i(xi):
+            diff = xi - bp
+            r = jnp.sqrt(jnp.sum(diff**2, axis=-1))
+            safe_r = jnp.where(r > 0, r, 1.0)
+            G = jnp.exp(1j * kappa * r) / (4.0 * jnp.pi * safe_r)
+            G = jnp.where(r > 0, G, 0j)
+            nd = jnp.sum(diff * nrm, axis=-1)
+            dG = (1.0 / safe_r - 1j * kappa) / safe_r * G * nd
+            dG = jnp.where(r > 0, dG, 0j)
+            return (dG * w) @ v
+
+        return jax.vmap(row_i)(bp) + D_corr_sp @ v
+
+    return apply_S, apply_D
+
+
+def solve_bie_flat_matfree(
+    T_leaves,
+    h_leaves,
+    maps,
+    eta: float,
+    apply_S: Callable,
+    apply_D: Callable,
+    uin: np.ndarray,
+    uin_dn: np.ndarray,
+    formulation: str = "total",
+    method: str = "dense",
+    tol: float = 1e-8,
+    maxiter: int = 400,
+    restart: int = 100,
+    precond: Callable = None,
+    stats: dict = None,
+) -> Tuple[np.ndarray, np.ndarray, dict]:
+    r"""Solve the coupled interior/exterior problem without a dense DtN map.
+
+    Parameters
+    ----------
+    T_leaves, h_leaves
+        Leaf ItI maps and outgoing particular impedance data from
+        :func:`jaxhps.local_solve.local_solve_stage_uniform_3D_ItI`.
+    maps
+        :class:`jaxhps._matfree_iti_3D.InterfaceMaps` for the same domain.
+    apply_S, apply_D
+        Boundary-integral operator applications, in the domain's boundary
+        node ordering (see :func:`make_dense_SD_apply` /
+        :func:`make_matfree_SD_apply`).
+    uin, uin_dn
+        Incident traces on the domain boundary, ``(n_bdry,)`` or
+        ``(n_bdry, n_src)``.
+    formulation
+        ``"total"`` makes the total field the interior unknown and subtracts
+        the incident traces on the boundary rows -- algebraically the same
+        system the dense-DtN drivers solve, with ``h_leaves`` unused.
+        ``"scattered"`` makes the scattered field the interior unknown, so
+        the incident field enters only through the volume source, via
+        ``h_leaves``.
+    method
+        ``"dense"`` materializes the flat operator and calls LU (verification
+        only, ``O(N^2)`` memory); ``"gmres"`` runs the restarted GMRES of
+        :func:`_gmres_python_loop` on the flat operator.
+    precond
+        Optional left preconditioner applied to the flat residual, used only
+        by ``method="gmres"``.
+
+    Returns ``(uscat_b, uscat_dn_b, info)`` with the scattered Dirichlet and
+    Neumann traces on the boundary, in the domain's ordering.
+    """
+    from jaxhps._matfree_iti_3D import (
+        boundary_traces_from_z,
+        dense_solve_flat,
+        flat_bie_rhs,
+        make_flat_bie_operator,
+    )
+
+    uin_j = jnp.asarray(uin)
+    uin_dn_j = jnp.asarray(uin_dn)
+    if formulation == "total":
+        h_used = None
+        rhs_kwargs = dict(uin=uin_j, uin_dn=uin_dn_j)
+    elif formulation == "scattered":
+        h_used = h_leaves
+        rhs_kwargs = dict(n_src=None if uin_j.ndim == 1 else uin_j.shape[-1])
+    else:
+        raise ValueError(f"unknown formulation {formulation!r}")
+
+    matvec = make_flat_bie_operator(T_leaves, maps, eta, apply_S, apply_D)
+    rhs = flat_bie_rhs(h_used, maps, eta, apply_S, apply_D, **rhs_kwargs)
+
+    t0 = time.perf_counter()
+    if method == "dense":
+        z = dense_solve_flat(matvec, rhs)
+        info_code = 0
+    elif method == "gmres":
+        squeeze = rhs.ndim == 1
+        if squeeze:
+            z, info_code = _gmres_python_loop(
+                matvec,
+                rhs,
+                tol=tol,
+                restart=restart,
+                maxiter=maxiter,
+                M=precond,
+                stats=stats,
+            )
+        else:
+            n_flat, n_src = rhs.shape
+
+            def flat_matvec(x):
+                return matvec(x.reshape(n_flat, n_src)).ravel()
+
+            if precond is None:
+                flat_precond = None
+            else:
+
+                def flat_precond(x):
+                    return precond(x.reshape(n_flat, n_src)).ravel()
+
+            z, info_code = _gmres_python_loop(
+                flat_matvec,
+                rhs.ravel(),
+                tol=tol,
+                restart=restart,
+                maxiter=maxiter,
+                M=flat_precond,
+                stats=stats,
+            )
+            z = z.reshape(n_flat, n_src)
+    else:
+        raise ValueError(f"unknown method {method!r}")
+    jax.block_until_ready(z)
+    dt = time.perf_counter() - t0
+
+    u, u_n = boundary_traces_from_z(T_leaves, h_used, maps, z, eta)
+    if formulation == "total":
+        u = u - uin_j
+        u_n = u_n - uin_dn_j
+    uscat_b = np.asarray(u)
+    uscat_dn_b = np.asarray(u_n)
+    info = dict(
+        method=method,
+        formulation=formulation,
+        gmres_info=int(info_code),
+        converged=int(info_code) == 0,
+        solve_time=dt,
+        n_flat=int(maps.n_flat),
+    )
+    if stats is not None:
+        info["gmres_stats"] = stats
+    return uscat_b, uscat_dn_b, info
+
+
+def solve_scattering_bie_3D_matfree(
+    sd: dict,
+    b_radial: Callable[[np.ndarray], np.ndarray],
+    source_dirs: np.ndarray,
+    eta: float = None,
+    p: int = None,
+    formulation: str = "total",
+    method: str = "dense",
+    tol: float = 1e-8,
+    maxiter: int = 400,
+    restart: int = 100,
+    precond: str = "none",
+    stats: dict = None,
+) -> dict:
+    """Matrix-free-interior counterpart of :func:`solve_scattering_bie_3D`.
+
+    Same problem setup and outputs, but the HPS hierarchy is never merged:
+    the leaf ItI maps are coupled to the exterior BIE through the flat
+    interface system of :mod:`jaxhps._matfree_iti_3D`.
+    """
+    from jaxhps.local_solve import local_solve_stage_uniform_3D_ItI
+    from jaxhps._matfree_iti_3D import (
+        build_interface_maps,
+        flat_bie_diagonal_approx,
+        make_flat_bie_operator,
+    )
+    from jaxhps._matfree_precond_3D import (
+        DIAGONAL_SIGNS,
+        make_shifted_operator_preconditioner,
+        make_sweep_preconditioner,
+        sweep_cost_matvecs,
+    )
+
+    a, q, L, kappa = sd["a"], sd["q"], sd["L"], sd["kappa"]
+    eta = float(kappa if eta is None else eta)
+    p = q + 4 if p is None else p
+    source_dirs = np.asarray(source_dirs, dtype=np.float64)
+
+    root = DiscretizationNode3D(
+        xmin=-a, xmax=a, ymin=-a, ymax=a, zmin=-a, zmax=a
+    )
+    domain = Domain(p=p, q=q, root=root, L=L)
+
+    int_pts = np.asarray(domain.interior_points)
+    b_int = b_radial(np.linalg.norm(int_pts, axis=-1))
+    I_coeffs = (kappa**2 * (1.0 - b_int)).astype(np.complex128)
+    phases = np.einsum("lpd,sd->lps", int_pts, source_dirs)
+    uin_int = np.exp(1j * kappa * phases)
+    src = (kappa**2 * b_int[..., None] * uin_int).astype(np.complex128)
+
+    ones = np.ones_like(I_coeffs)
+    problem = PDEProblem(
+        domain=domain,
+        D_xx_coefficients=ones,
+        D_yy_coefficients=ones,
+        D_zz_coefficients=ones,
+        I_coefficients=I_coeffs,
+        source=src,
+        use_ItI=True,
+        eta=eta,
+    )
+
+    bp = np.asarray(domain.boundary_points).reshape(-1, 3)
+    _, sdp = permute_to_domain(sd, bp)
+    nrm = outward_normals_for_cube_boundary(bp, root)
+
+    _, T_leaves, _, h_leaves = local_solve_stage_uniform_3D_ItI(problem)
+    maps = build_interface_maps(domain)
+
+    uin, uin_dn = get_uin_and_dn_3D(
+        float(kappa),
+        jnp.asarray(bp),
+        jnp.asarray(nrm),
+        jnp.asarray(source_dirs),
+    )
+    apply_S, apply_D = make_dense_SD_apply(sdp["S"], sdp["D"])
+    t_precond = time.perf_counter()
+    if precond == "none":
+        M = None
+    elif precond == "jacobi":
+        d = flat_bie_diagonal_approx(
+            T_leaves,
+            maps,
+            eta,
+            jnp.diag(jnp.asarray(sdp["S"])),
+            jnp.diag(jnp.asarray(sdp["D"])),
+        )
+        d_inv = 1.0 / d
+
+        def M(v):
+            return d_inv * v if v.ndim == 1 else d_inv[:, None] * v
+    elif precond.startswith("sweep"):
+        # "sweep" = forward + reverse diagonal sweep, "sweep8" = all eight.
+        n_dir = int(precond[len("sweep") :] or 2)
+        if n_dir == 2:
+            directions = [(1, 1, 1), (-1, -1, -1)]
+        else:
+            directions = DIAGONAL_SIGNS[:n_dir]
+        M = make_sweep_preconditioner(
+            T_leaves,
+            maps,
+            eta,
+            jnp.diag(jnp.asarray(sdp["S"])),
+            jnp.diag(jnp.asarray(sdp["D"])),
+            root,
+            L,
+            directions=directions,
+            A_matvec=make_flat_bie_operator(
+                T_leaves, maps, eta, apply_S, apply_D
+            ),
+        )
+    elif precond.startswith("shift"):
+        # "shift" or "shift:<eps>": invert the damped flat operator, built from
+        # leaf ItI maps of the problem with kappa^2 -> kappa^2 (1 + i eps).
+        eps = float(precond.split(":")[1]) if ":" in precond else 0.1
+        shifted = PDEProblem(
+            domain=domain,
+            D_xx_coefficients=ones,
+            D_yy_coefficients=ones,
+            D_zz_coefficients=ones,
+            I_coefficients=(I_coeffs * (1.0 + 1j * eps)).astype(np.complex128),
+            source=np.zeros_like(I_coeffs),
+            use_ItI=True,
+            eta=eta,
+        )
+        _, T_shift, _, _ = local_solve_stage_uniform_3D_ItI(shifted)
+        M = make_shifted_operator_preconditioner(
+            T_shift, maps, eta, apply_S, apply_D
+        )
+    else:
+        raise ValueError(f"unknown preconditioner {precond!r}")
+    if M is not None:
+        jax.block_until_ready(M(jnp.zeros(maps.n_flat, dtype=jnp.complex128)))
+    t_precond = time.perf_counter() - t_precond
+    uscat_b, uscat_dn_b, info = solve_bie_flat_matfree(
+        T_leaves,
+        h_leaves,
+        maps,
+        eta,
+        apply_S,
+        apply_D,
+        uin,
+        uin_dn,
+        formulation=formulation,
+        method=method,
+        tol=tol,
+        maxiter=maxiter,
+        restart=restart,
+        precond=M,
+        stats=stats,
+    )
+    info["precond"] = precond
+    info["precond_cost_matvecs"] = (
+        sweep_cost_matvecs(len(directions))
+        if precond.startswith("sweep")
+        else 0
+    )
+    info["precond_setup_time"] = t_precond
+    # "shift" factors the damped flat operator densely, so its setup costs
+    # O(n_flat^3) work and O(n_flat^2) memory, not a few matvecs.
+    info["precond_dense_setup"] = precond.startswith("shift")
+    if precond.startswith("shift"):
+        info["shift_eps"] = eps
+    return dict(
+        problem=problem,
+        boundary_points=bp,
+        normals=nrm,
+        sdp=sdp,
+        maps=maps,
+        T_leaves=T_leaves,
+        h_leaves=h_leaves,
+        uscat_b=uscat_b,
+        uscat_dn_b=uscat_dn_b,
+        info=info,
     )
