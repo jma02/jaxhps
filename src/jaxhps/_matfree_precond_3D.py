@@ -627,8 +627,8 @@ def make_coarse_correction_preconditioner(
         coarse_solves=0,
     )
 
-    def apply(r: jax.Array) -> jax.Array:
-        start = time.perf_counter()
+    @jax.jit
+    def correction(r: jax.Array) -> jax.Array:
         smooth = (
             smoother(r)
             if smoother is not None
@@ -637,12 +637,16 @@ def make_coarse_correction_preconditioner(
             else d_inv[:, None] * r
         )
         residual = r - operator(smooth)
-        stats["n_calls"] += 1
-        stats["n_matvec"] += 1
-        out = smooth + transfer.prolong(
+        return smooth + transfer.prolong(
             coarse_solve(transfer.restrict(residual))
         )
+
+    def apply(r: jax.Array) -> jax.Array:
+        start = time.perf_counter()
+        out = correction(r)
         jax.block_until_ready(out)
+        stats["n_calls"] += 1
+        stats["n_matvec"] += 1
         stats["apply_seconds"] += time.perf_counter() - start
         stats["coarse_solves"] += 1
         return out
@@ -797,9 +801,11 @@ def make_multilevel_shifted_preconditioner(
             else d_inv[:, None] * residual
         )
 
+    compiled_cycle = jax.jit(lambda r: cycle(0, r))
+
     def apply(r: jax.Array) -> jax.Array:
         start = time.perf_counter()
-        out = cycle(0, r)
+        out = compiled_cycle(r)
         jax.block_until_ready(out)
         stats["n_calls"] += 1
         stats["n_matvec"] += n_matvec_per_call
