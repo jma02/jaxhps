@@ -1733,6 +1733,7 @@ def solve_scattering_bie_3D_matfree(
     inner_restart: int = 30,
     inner_maxiter: int = 60,
     coarse_q: int = 2,
+    coarse_limit: int = 1024,
 ) -> dict:
     """Matrix-free-interior counterpart of :func:`solve_scattering_bie_3D`.
 
@@ -1749,7 +1750,7 @@ def solve_scattering_bie_3D_matfree(
     ``"shift-coarse:<eps>"`` adds a face-polynomial Galerkin correction;
     ``"shift-multilevel:<eps>"`` uses a recursive polynomial/octree V-cycle.
     Both use paired-face block smoothing and ``coarse_q`` polynomial modes
-    per face direction. The coarse LU is capped at 1024 unknowns.
+    per face direction. ``coarse_limit`` bounds the final dense LU size.
     """
     from jaxhps.local_solve import local_solve_stage_uniform_3D_ItI
     from jaxhps._matfree_iti_3D import (
@@ -1896,6 +1897,7 @@ def solve_scattering_bie_3D_matfree(
                 q,
                 coarse_q=coarse_q,
                 T_leaves=T_shift,
+                direct_limit=coarse_limit,
                 stats=inner_stats,
             )
         elif pc_kind == "shift-multilevel":
@@ -1908,6 +1910,7 @@ def solve_scattering_bie_3D_matfree(
                 L,
                 coarse_q=coarse_q,
                 T_leaves=T_shift,
+                direct_limit=coarse_limit,
                 stats=inner_stats,
             )
         elif pc_kind == "shift-sweep":
