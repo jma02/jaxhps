@@ -30,7 +30,11 @@ from jaxhps import (
     build_solver,
 )
 from jaxhps._krylov import fgmres
-from jaxhps._matfree_precond_3D import make_iterative_shifted_preconditioner
+from jaxhps._matfree_precond_3D import (
+    make_coarse_correction_preconditioner,
+    make_iterative_shifted_preconditioner,
+    make_multilevel_shifted_preconditioner,
+)
 
 
 def load_SD_matrices_3D(
@@ -1728,6 +1732,7 @@ def solve_scattering_bie_3D_matfree(
     inner_tol: float = 0.1,
     inner_restart: int = 30,
     inner_maxiter: int = 60,
+    coarse_q: int = 2,
 ) -> dict:
     """Matrix-free-interior counterpart of :func:`solve_scattering_bie_3D`.
 
@@ -1741,6 +1746,10 @@ def solve_scattering_bie_3D_matfree(
     sweeps of the shifted operator. ``"shift:<eps>"`` retains dense LU as a
     small-system reference. The exterior S/D matrices in this driver are
     still dense; the low-level operator accepts matrix-free callbacks.
+    ``"shift-coarse:<eps>"`` adds a face-polynomial Galerkin correction;
+    ``"shift-multilevel:<eps>"`` uses a recursive polynomial/octree V-cycle.
+    Both use paired-face block smoothing and ``coarse_q`` polynomial modes
+    per face direction. The coarse LU is capped at 1024 unknowns.
     """
     from jaxhps.local_solve import local_solve_stage_uniform_3D_ItI
     from jaxhps._matfree_iti_3D import (
@@ -1837,7 +1846,13 @@ def solve_scattering_bie_3D_matfree(
                 T_leaves, maps, eta, apply_S, apply_D
             ),
         )
-    elif pc_kind in ("shift", "shift-krylov", "shift-sweep"):
+    elif pc_kind in (
+        "shift",
+        "shift-coarse",
+        "shift-krylov",
+        "shift-multilevel",
+        "shift-sweep",
+    ):
         # "shift" or "shift:<eps>": invert the damped flat operator, built from
         # leaf ItI maps of the problem with kappa^2 -> kappa^2 (1 + i eps).
         eps = float(precond.split(":")[1]) if ":" in precond else 0.1
@@ -1852,6 +1867,13 @@ def solve_scattering_bie_3D_matfree(
             eta=eta,
         )
         _, T_shift, _, _ = local_solve_stage_uniform_3D_ItI(shifted)
+        shift_diagonal = flat_bie_diagonal_approx(
+            T_shift,
+            maps,
+            eta,
+            jnp.diag(jnp.asarray(sdp["S"])),
+            jnp.diag(jnp.asarray(sdp["D"])),
+        )
         if pc_kind == "shift-krylov":
             M = make_iterative_shifted_preconditioner(
                 T_shift,
@@ -1864,6 +1886,28 @@ def solve_scattering_bie_3D_matfree(
                 tol=inner_tol,
                 restart=inner_restart,
                 maxiter=inner_maxiter,
+                stats=inner_stats,
+            )
+        elif pc_kind == "shift-coarse":
+            M = make_coarse_correction_preconditioner(
+                make_flat_bie_operator(T_shift, maps, eta, apply_S, apply_D),
+                shift_diagonal,
+                maps,
+                q,
+                coarse_q=coarse_q,
+                T_leaves=T_shift,
+                stats=inner_stats,
+            )
+        elif pc_kind == "shift-multilevel":
+            M = make_multilevel_shifted_preconditioner(
+                make_flat_bie_operator(T_shift, maps, eta, apply_S, apply_D),
+                shift_diagonal,
+                maps,
+                q,
+                root,
+                L,
+                coarse_q=coarse_q,
+                T_leaves=T_shift,
                 stats=inner_stats,
             )
         elif pc_kind == "shift-sweep":
@@ -1891,6 +1935,11 @@ def solve_scattering_bie_3D_matfree(
         raise ValueError(f"unknown preconditioner {precond!r}")
     if M is not None and pc_kind != "shift-krylov":
         jax.block_until_ready(M(jnp.zeros(maps.n_flat, dtype=jnp.complex128)))
+        if pc_kind in ("shift-coarse", "shift-multilevel"):
+            inner_stats["n_calls"] = 0
+            inner_stats["n_matvec"] = 0
+            inner_stats["apply_seconds"] = 0.0
+            inner_stats["coarse_solves"] = 0
     if pc_kind.startswith("shift"):
         jax.block_until_ready(T_shift)
     t_precond = time.perf_counter() - t_precond
@@ -1924,7 +1973,7 @@ def solve_scattering_bie_3D_matfree(
     if pc_kind.startswith("shift"):
         info["shift_eps"] = eps
         info["shift_leaf_bytes"] = int(T_shift.nbytes)
-    if pc_kind == "shift-krylov":
+    if pc_kind in ("shift-coarse", "shift-krylov", "shift-multilevel"):
         info["inner_stats"] = inner_stats
     return dict(
         problem=problem,

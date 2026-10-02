@@ -27,8 +27,13 @@ from jaxhps._matfree_iti_3D import (
 )
 from jaxhps._matfree_precond_3D import (
     leaf_index_grid,
+    make_coarse_correction_preconditioner,
+    make_face_polynomial_transfer,
+    make_face_pair_smoother,
     make_gauss_seidel_sweep,
     make_iterative_shifted_preconditioner,
+    make_multilevel_shifted_preconditioner,
+    make_parent_face_transfer,
     make_shifted_operator_preconditioner,
     make_sweep_preconditioner,
     sweep_cost_matvecs,
@@ -131,6 +136,178 @@ def test_inexact_shifted_preconditioner_with_flexible_outer_solver():
     assert inner_stats["n_calls"] == stats["n_iter"]
     assert inner_stats["n_unconverged"] > 0
     assert inner_stats["n_iter"] <= 20 * inner_stats["n_calls"]
+    jax.clear_caches()
+
+
+@pytest.mark.parametrize("coarse_q", [1, 2])
+def test_face_polynomial_transfer_is_an_isometry(coarse_q):
+    transfer = make_face_polynomial_transfer(8, 4, coarse_q)
+    rng = np.random.default_rng(18)
+    x = jnp.asarray(rng.normal(size=transfer.n_fine))
+    y = jnp.asarray(rng.normal(size=transfer.n_coarse))
+    np.testing.assert_allclose(
+        jnp.vdot(x, transfer.prolong(y)),
+        jnp.vdot(transfer.restrict(x), y),
+        rtol=1e-13,
+        atol=1e-13,
+    )
+    np.testing.assert_allclose(
+        transfer.restrict(transfer.prolong(y)), y, rtol=1e-13, atol=1e-13
+    )
+
+
+def test_parent_face_transfer_is_an_isometry():
+    domain, *_ = _setup(L=2)
+    transfer = make_parent_face_transfer(domain.root, 2)
+    rng = np.random.default_rng(19)
+    y = jnp.asarray(rng.normal(size=transfer.n_coarse))
+    np.testing.assert_allclose(
+        transfer.restrict(transfer.prolong(y)), y, rtol=1e-13, atol=1e-13
+    )
+
+
+@pytest.mark.parametrize("kind", ["coarse", "multilevel"])
+def test_shifted_hierarchy_preconditions_without_flat_materialization(
+    monkeypatch, kind
+):
+    domain, T, _, maps, S, D, eta = _setup(p=6, q=2)
+    _, T_shift, _, _ = local_solve_stage_uniform_3D_ItI(
+        _shifted_problem(domain, 0.1, eta)
+    )
+    apply_S, apply_D = make_dense_SD_apply(S, D)
+    A = jax.jit(make_flat_bie_operator(T, maps, eta, apply_S, apply_D))
+    A_shift = make_flat_bie_operator(T_shift, maps, eta, apply_S, apply_D)
+    diagonal = flat_bie_diagonal_approx(
+        T_shift, maps, eta, jnp.diag(S), jnp.diag(D)
+    )
+    dense_sizes = []
+    original_materialize = materialize
+
+    def coarse_only(operator, n):
+        dense_sizes.append(n)
+        assert n < maps.n_flat
+        return original_materialize(operator, n)
+
+    monkeypatch.setattr("jaxhps._matfree_precond_3D.materialize", coarse_only)
+    stats = {}
+    if kind == "coarse":
+        M = make_coarse_correction_preconditioner(
+            A_shift,
+            diagonal,
+            maps,
+            2,
+            coarse_q=1,
+            T_leaves=T_shift,
+            stats=stats,
+        )
+    else:
+        M = make_multilevel_shifted_preconditioner(
+            A_shift,
+            diagonal,
+            maps,
+            2,
+            domain.root,
+            1,
+            coarse_q=1,
+            T_leaves=T_shift,
+            stats=stats,
+        )
+
+    assert dense_sizes == [stats["coarse_dim"]]
+    rng = np.random.default_rng(20)
+    exact = jnp.asarray(
+        rng.normal(size=maps.n_flat) + 1j * rng.normal(size=maps.n_flat)
+    )
+    b = A(exact)
+    x, info = fgmres(
+        A, b, precond=M, tol=1e-8, restart=maps.n_flat, maxiter=maps.n_flat
+    )
+    assert info == 0
+    assert float(jnp.linalg.norm(b - A(x)) / jnp.linalg.norm(b)) <= 1e-8
+    np.testing.assert_allclose(x, exact, rtol=2e-5, atol=2e-5)
+    assert stats["n_calls"] > 0
+    assert stats["coarse_dim"] < maps.n_flat
+    jax.clear_caches()
+
+
+def test_polynomial_levels_preserve_the_nested_coarse_space():
+    first = make_face_polynomial_transfer(8, 8, 4)
+    second = make_face_polynomial_transfer(8, 4, 2, coefficient_space=True)
+    direct = make_face_polynomial_transfer(8, 8, 2)
+    rng = np.random.default_rng(24)
+    y = jnp.asarray(rng.normal(size=(direct.n_coarse, 2)))
+    np.testing.assert_allclose(
+        first.prolong(second.prolong(y)), direct.prolong(y), atol=1e-13
+    )
+
+
+def test_face_pair_smoother_matches_the_block_diagonal_solve():
+    _, T, _, maps, S, D, eta = _setup(p=6, q=2, shift=0.1)
+    apply_S, apply_D = make_dense_SD_apply(S, D)
+    A = np.asarray(
+        materialize(
+            make_flat_bie_operator(T, maps, eta, apply_S, apply_D), maps.n_flat
+        )
+    )
+    diagonal = flat_bie_diagonal_approx(T, maps, eta, jnp.diag(S), jnp.diag(D))
+    blocks = np.diag(np.asarray(diagonal)).copy()
+    partner = np.asarray(maps.partner)
+    for face in range(maps.n_flat // 4):
+        first = np.arange(4 * face, 4 * face + 4)
+        if partner[first[0]] < 0 or first[0] > partner[first[0]]:
+            continue
+        rows = np.concatenate([first, partner[first]])
+        blocks[np.ix_(rows, rows)] = A[np.ix_(rows, rows)]
+    rng = np.random.default_rng(25)
+    r = jnp.asarray(
+        rng.normal(size=(maps.n_flat, 2))
+        + 1j * rng.normal(size=(maps.n_flat, 2))
+    )
+    smoother = make_face_pair_smoother(diagonal, T, maps.partner, omega=1)
+    np.testing.assert_allclose(
+        smoother(r), np.linalg.solve(blocks, r), rtol=1e-12, atol=1e-12
+    )
+    jax.clear_caches()
+
+
+def test_multilevel_octree_reduction_respects_the_dense_size_limit(
+    monkeypatch,
+):
+    root = DiscretizationNode3D(
+        xmin=-1, xmax=1, ymin=-1, ymax=1, zmin=-1, zmax=1
+    )
+    domain = Domain(p=4, q=2, root=root, L=2)
+    maps = build_interface_maps(domain)
+    d = jnp.linspace(2.0, 3.0, maps.n_flat).astype(jnp.complex128)
+
+    def operator(x):
+        diag_x = d * x if x.ndim == 1 else d[:, None] * x
+        return diag_x + 0.1 * (
+            jnp.roll(x, 1, axis=0) + jnp.roll(x, -1, axis=0)
+        )
+
+    dense_sizes = []
+
+    def coarse_only(op, n):
+        dense_sizes.append(n)
+        assert n <= 6
+        return materialize(op, n)
+
+    monkeypatch.setattr("jaxhps._matfree_precond_3D.materialize", coarse_only)
+    stats = {}
+    M = make_multilevel_shifted_preconditioner(
+        operator, d, maps, 2, root, 2, coarse_q=1, direct_limit=6, stats=stats
+    )
+    rng = np.random.default_rng(26)
+    exact = jnp.asarray(rng.normal(size=(maps.n_flat, 2)))
+    b = operator(exact)
+    solution, info = fgmres(
+        operator, b, precond=M, tol=1e-10, restart=30, maxiter=30
+    )
+    assert info == 0
+    np.testing.assert_allclose(solution, exact, rtol=1e-8, atol=1e-8)
+    assert dense_sizes == [6]
+    assert stats["n_levels"] == 4
     jax.clear_caches()
 
 
