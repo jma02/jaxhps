@@ -141,6 +141,9 @@ def run_matfree(
     restart=200,
     p=None,
     precond="none",
+    inner_tol=0.1,
+    inner_restart=30,
+    inner_maxiter=60,
 ):
     stats: dict = {}
     t0 = time.perf_counter()
@@ -155,6 +158,9 @@ def run_matfree(
         stats=stats,
         p=p,
         precond=precond,
+        inner_tol=inner_tol,
+        inner_restart=inner_restart,
+        inner_maxiter=inner_maxiter,
     )
     jax.block_until_ready(jnp.asarray(out["uscat_b"]))
     out["wall_time"] = time.perf_counter() - t0
@@ -422,9 +428,14 @@ def exp_precond(args) -> None:
                 maxiter=args.maxiter,
                 restart=args.restart,
                 precond=pc,
+                method=args.method,
+                inner_tol=args.inner_tol,
+                inner_restart=args.inner_restart,
+                inner_maxiter=args.inner_maxiter,
             )
             st = out["stats"]
-            cost = 1 + int(out["info"]["precond_cost_matvecs"])
+            cost = int(out["info"]["precond_cost_matvecs"])
+            inner = out["info"].get("inner_stats", {})
             row = dict(
                 precond=pc,
                 kappa=kappa,
@@ -432,7 +443,14 @@ def exp_precond(args) -> None:
                 L=L,
                 n_flat=int(out["info"]["n_flat"]),
                 n_matvec=int(st["n_matvec"]),
-                n_matvec_equiv=int(st["n_matvec"]) * cost,
+                n_precond=int(st.get("n_precond", 0)),
+                inner_matvec=int(inner.get("n_matvec", 0)),
+                inner_unconverged=int(inner.get("n_unconverged", 0)),
+                n_matvec_equiv=(
+                    int(st["n_matvec"])
+                    + int(st.get("n_precond", 0)) * cost
+                    + int(inner.get("n_matvec", 0))
+                ),
                 rel_res=float(st["final_rel_res"]),
                 converged=bool(out["info"]["converged"]),
                 err=mie_error(out, sd, b_radial, DEFAULT_DIR, args.rho),
@@ -440,6 +458,8 @@ def exp_precond(args) -> None:
                 precond_setup_time=float(out["info"]["precond_setup_time"]),
                 precond_dense_setup=bool(out["info"]["precond_dense_setup"]),
                 peak_rss_GB=peak_rss_gb(),
+                shift_leaf_bytes=out["info"].get("shift_leaf_bytes", 0),
+                dense_flat_bytes=16 * int(out["info"]["n_flat"]) ** 2,
             )
             rows.append(row)
             dump("precond", rows, args)
@@ -475,6 +495,12 @@ if __name__ == "__main__":
     parser.add_argument("--seq_max", type=int, default=16)
     parser.add_argument("--maxiter", type=int, default=600)
     parser.add_argument("--restart", type=int, default=200)
+    parser.add_argument(
+        "--method", choices=("gmres", "fgmres"), default="fgmres"
+    )
+    parser.add_argument("--inner_tol", type=float, default=0.1)
+    parser.add_argument("--inner_restart", type=int, default=30)
+    parser.add_argument("--inner_maxiter", type=int, default=60)
     # "none", "jacobi", "sweep"/"sweep<n_dir>", "shift"/"shift:<eps>".
     parser.add_argument("--precond", type=str, default="none")
     parser.add_argument(

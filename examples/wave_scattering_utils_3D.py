@@ -29,6 +29,8 @@ from jaxhps import (
     PDEProblem,
     build_solver,
 )
+from jaxhps._krylov import fgmres
+from jaxhps._matfree_precond_3D import make_iterative_shifted_preconditioner
 
 
 def load_SD_matrices_3D(
@@ -550,8 +552,10 @@ def _gmres_python_loop(
     """
     if stats is not None:
         stats.setdefault("n_matvec", 0)
+        stats.setdefault("n_precond", 0)
         stats.setdefault("n_cycles", 0)
         stats.setdefault("res_history", [])
+        stats.setdefault("true_res_history", [])
     if x0 is None:
         x0 = jnp.zeros_like(b)
     if M is None:
@@ -562,29 +566,42 @@ def _gmres_python_loop(
         return jnp.zeros_like(b), 0
 
     atol = tol * b_norm
+    precond_atol = tol * float(jnp.linalg.norm(M(b)))
+    if stats is not None:
+        stats["n_precond"] += 1
     x = x0
-    n_outer = max(1, maxiter // restart)
+    n_outer = (maxiter + restart - 1) // restart
 
     for _cycle in range(n_outer):
-        r = M(b - A_matvec(x))
+        r_true = b - A_matvec(x)
+        true_norm = float(jnp.linalg.norm(r_true))
         if stats is not None:
             stats["n_matvec"] += 1
             stats["n_cycles"] += 1
-        beta = float(jnp.linalg.norm(r))
-        if beta < atol:
+            stats["true_res_history"].append(true_norm / b_norm)
+        if true_norm <= atol:
             if stats is not None:
-                stats["final_rel_res"] = beta / b_norm
+                stats["final_rel_res"] = true_norm / b_norm
             return x, 0
+        r = M(r_true)
+        if stats is not None:
+            stats["n_precond"] += 1
+        beta = float(jnp.linalg.norm(r))
+        if beta == 0 or not np.isfinite(beta):
+            if stats is not None:
+                stats["final_rel_res"] = true_norm / b_norm
+            return x, 1
 
         # Arnoldi process: build orthonormal basis V and Hessenberg H
         V_list = [r / beta]
         H = np.zeros((restart + 1, restart), dtype=np.complex128)
 
         k = 0
-        for j in range(restart):
+        for j in range(min(restart, maxiter - _cycle * restart)):
             w = M(A_matvec(V_list[j]))
             if stats is not None:
                 stats["n_matvec"] += 1
+                stats["n_precond"] += 1
             # Modified Gram-Schmidt
             for i in range(j + 1):
                 H[i, j] = complex(jnp.vdot(V_list[i], w))
@@ -604,7 +621,7 @@ def _gmres_python_loop(
             ls_res = np.linalg.norm(H[: k + 1, :k] @ y_ls - e1)
             if stats is not None:
                 stats["res_history"].append(float(ls_res / b_norm))
-            if ls_res < atol:
+            if ls_res <= precond_atol or h_norm <= 1e-30:
                 break
 
         # Update solution from Arnoldi basis
@@ -619,6 +636,7 @@ def _gmres_python_loop(
     if stats is not None:
         stats["n_matvec"] += 1
         stats["final_rel_res"] = r_final / b_norm
+        stats["true_res_history"].append(r_final / b_norm)
     info = 0 if r_final < atol else 1
     return x, info
 
@@ -1618,10 +1636,11 @@ def solve_bie_flat_matfree(
     method
         ``"dense"`` materializes the flat operator and calls LU (verification
         only, ``O(N^2)`` memory); ``"gmres"`` runs the restarted GMRES of
-        :func:`_gmres_python_loop` on the flat operator.
+        :func:`_gmres_python_loop` on the flat operator. ``"fgmres"`` uses
+        flexible right preconditioning, required for inner Krylov solves.
     precond
-        Optional left preconditioner applied to the flat residual, used only
-        by ``method="gmres"``.
+        Optional left preconditioner for ``"gmres"`` or right preconditioner
+        for ``"fgmres"``. Only the latter accepts nonlinear preconditioners.
 
     Returns ``(uscat_b, uscat_dn_b, info)`` with the scattered Dirichlet and
     Neumann traces on the boundary, in the domain's ordering.
@@ -1651,6 +1670,16 @@ def solve_bie_flat_matfree(
     if method == "dense":
         z = dense_solve_flat(matvec, rhs)
         info_code = 0
+    elif method == "fgmres":
+        z, info_code = fgmres(
+            jax.jit(matvec),
+            rhs,
+            precond=precond,
+            tol=tol,
+            restart=restart,
+            maxiter=maxiter,
+            stats=stats,
+        )
     elif method == "gmres":
 
         def flat_matvec(x):
@@ -1706,12 +1735,22 @@ def solve_scattering_bie_3D_matfree(
     restart: int = 100,
     precond: str = "none",
     stats: dict = None,
+    inner_tol: float = 0.1,
+    inner_restart: int = 30,
+    inner_maxiter: int = 60,
 ) -> dict:
     """Matrix-free-interior counterpart of :func:`solve_scattering_bie_3D`.
 
     Same problem setup and outputs, but the HPS hierarchy is never merged:
     the leaf ItI maps are coupled to the exterior BIE through the flat
     interface system of :mod:`jaxhps._matfree_iti_3D`.
+
+    ``precond="shift-krylov:<eps>"`` approximately solves the shifted system
+    with the inner tolerance and budgets above; it requires
+    ``method="fgmres"``. ``"shift-sweep:<eps>"`` uses fixed forward/reverse
+    sweeps of the shifted operator. ``"shift:<eps>"`` retains dense LU as a
+    small-system reference. The exterior S/D matrices in this driver are
+    still dense; the low-level operator accepts matrix-free callbacks.
     """
     from jaxhps.local_solve import local_solve_stage_uniform_3D_ItI
     from jaxhps._matfree_iti_3D import (
@@ -1726,6 +1765,10 @@ def solve_scattering_bie_3D_matfree(
         sweep_cost_matvecs,
     )
 
+    pc_kind = precond.split(":")[0]
+    if pc_kind == "shift-krylov" and method != "fgmres":
+        raise ValueError("shift-krylov requires method='fgmres'")
+    inner_stats = {}
     a, q, L, kappa = sd["a"], sd["q"], sd["L"], sd["kappa"]
     eta = float(kappa if eta is None else eta)
     p = q + 4 if p is None else p
@@ -1804,7 +1847,7 @@ def solve_scattering_bie_3D_matfree(
                 T_leaves, maps, eta, apply_S, apply_D
             ),
         )
-    elif precond.startswith("shift"):
+    elif pc_kind in ("shift", "shift-krylov", "shift-sweep"):
         # "shift" or "shift:<eps>": invert the damped flat operator, built from
         # leaf ItI maps of the problem with kappa^2 -> kappa^2 (1 + i eps).
         eps = float(precond.split(":")[1]) if ":" in precond else 0.1
@@ -1819,13 +1862,47 @@ def solve_scattering_bie_3D_matfree(
             eta=eta,
         )
         _, T_shift, _, _ = local_solve_stage_uniform_3D_ItI(shifted)
-        M = make_shifted_operator_preconditioner(
-            T_shift, maps, eta, apply_S, apply_D
-        )
+        if pc_kind == "shift-krylov":
+            M = make_iterative_shifted_preconditioner(
+                T_shift,
+                maps,
+                eta,
+                apply_S,
+                apply_D,
+                jnp.diag(jnp.asarray(sdp["S"])),
+                jnp.diag(jnp.asarray(sdp["D"])),
+                tol=inner_tol,
+                restart=inner_restart,
+                maxiter=inner_maxiter,
+                stats=inner_stats,
+            )
+        elif pc_kind == "shift-sweep":
+            directions = [(1, 1, 1), (-1, -1, -1)]
+            M = jax.jit(
+                make_sweep_preconditioner(
+                    T_shift,
+                    maps,
+                    eta,
+                    jnp.diag(jnp.asarray(sdp["S"])),
+                    jnp.diag(jnp.asarray(sdp["D"])),
+                    root,
+                    L,
+                    directions=directions,
+                    A_matvec=make_flat_bie_operator(
+                        T_shift, maps, eta, apply_S, apply_D
+                    ),
+                )
+            )
+        else:
+            M = make_shifted_operator_preconditioner(
+                T_shift, maps, eta, apply_S, apply_D
+            )
     else:
         raise ValueError(f"unknown preconditioner {precond!r}")
-    if M is not None:
+    if M is not None and pc_kind != "shift-krylov":
         jax.block_until_ready(M(jnp.zeros(maps.n_flat, dtype=jnp.complex128)))
+    if pc_kind.startswith("shift"):
+        jax.block_until_ready(T_shift)
     t_precond = time.perf_counter() - t_precond
     uscat_b, uscat_dn_b, info = solve_bie_flat_matfree(
         T_leaves,
@@ -1847,15 +1924,18 @@ def solve_scattering_bie_3D_matfree(
     info["precond"] = precond
     info["precond_cost_matvecs"] = (
         sweep_cost_matvecs(len(directions))
-        if precond.startswith("sweep")
+        if precond.startswith("sweep") or pc_kind == "shift-sweep"
         else 0
     )
     info["precond_setup_time"] = t_precond
     # "shift" factors the damped flat operator densely, so its setup costs
     # O(n_flat^3) work and O(n_flat^2) memory, not a few matvecs.
-    info["precond_dense_setup"] = precond.startswith("shift")
-    if precond.startswith("shift"):
+    info["precond_dense_setup"] = pc_kind == "shift"
+    if pc_kind.startswith("shift"):
         info["shift_eps"] = eps
+        info["shift_leaf_bytes"] = int(T_shift.nbytes)
+    if pc_kind == "shift-krylov":
+        info["inner_stats"] = inner_stats
     return dict(
         problem=problem,
         boundary_points=bp,
