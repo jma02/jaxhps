@@ -149,6 +149,7 @@ def run_matfree(
     inner_restart=30,
     inner_maxiter=60,
     coarse_q=2,
+    coarse_limit=1024,
 ):
     stats: dict = {}
     t0 = time.perf_counter()
@@ -167,6 +168,7 @@ def run_matfree(
         inner_restart=inner_restart,
         inner_maxiter=inner_maxiter,
         coarse_q=coarse_q,
+        coarse_limit=coarse_limit,
     )
     jax.block_until_ready(jnp.asarray(out["uscat_b"]))
     out["wall_time"] = time.perf_counter() - t0
@@ -430,6 +432,7 @@ def exp_precond(args) -> None:
                 inner_restart=args.inner_restart,
                 inner_maxiter=args.inner_maxiter,
                 coarse_q=args.coarse_q,
+                coarse_limit=args.coarse_limit,
             )
             st = out["stats"]
             cost = int(out["info"]["precond_cost_matvecs"])
@@ -526,6 +529,7 @@ if __name__ == "__main__":
     parser.add_argument("--inner_restart", type=int, default=30)
     parser.add_argument("--inner_maxiter", type=int, default=60)
     parser.add_argument("--coarse_q", type=int, default=2)
+    parser.add_argument("--coarse_limit", type=int, default=1024)
     # "none", "jacobi", "sweep"/"sweep<n_dir>", "shift"/"shift:<eps>".
     parser.add_argument("--precond", type=str, default="none")
     parser.add_argument(
