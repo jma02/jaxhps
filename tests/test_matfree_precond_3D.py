@@ -15,8 +15,10 @@ import sys
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from jaxhps import DiscretizationNode3D, Domain, PDEProblem
+from jaxhps._krylov import fgmres
 from jaxhps._matfree_iti_3D import (
     build_interface_maps,
     flat_bie_diagonal_approx,
@@ -26,6 +28,7 @@ from jaxhps._matfree_iti_3D import (
 from jaxhps._matfree_precond_3D import (
     leaf_index_grid,
     make_gauss_seidel_sweep,
+    make_iterative_shifted_preconditioner,
     make_shifted_operator_preconditioner,
     make_sweep_preconditioner,
     sweep_cost_matvecs,
@@ -39,6 +42,96 @@ sys.path.insert(0, os.path.abspath(_EX_DIR))
 from wave_scattering_utils_3D import (  # noqa: E402
     make_dense_SD_apply,
 )
+
+
+@pytest.mark.parametrize("n_rhs", [1, 2])
+def test_iterative_shifted_solve_without_dense_setup(monkeypatch, n_rhs):
+    _, T_shift, _, maps, S, D, eta = _setup(p=6, q=2, shift=0.1)
+    apply_S, apply_D = make_dense_SD_apply(S, D)
+    A = make_flat_bie_operator(T_shift, maps, eta, apply_S, apply_D)
+    dense = np.asarray(materialize(A, maps.n_flat))
+    rng = np.random.default_rng(12)
+    b = jnp.asarray(
+        rng.normal(size=(maps.n_flat, n_rhs))
+        + 1j * rng.normal(size=(maps.n_flat, n_rhs))
+    )
+    if n_rhs == 1:
+        b = b[:, 0]
+    reference = np.linalg.solve(dense, b)
+
+    def no_dense(*args, **kwargs):
+        raise AssertionError(
+            "The iterative preconditioner must stay matrix-free"
+        )
+
+    monkeypatch.setattr("jaxhps._matfree_precond_3D.materialize", no_dense)
+    monkeypatch.setattr(jax.scipy.linalg, "lu_factor", no_dense)
+    stats = {}
+    M = make_iterative_shifted_preconditioner(
+        T_shift,
+        maps,
+        eta,
+        apply_S,
+        apply_D,
+        jnp.diag(S),
+        jnp.diag(D),
+        tol=1e-10,
+        restart=b.size,
+        maxiter=b.size,
+        stats=stats,
+    )
+    x = M(b)
+    np.testing.assert_allclose(x, reference, rtol=1e-8, atol=1e-8)
+    assert stats["n_unconverged"] == 0
+    assert stats["n_calls"] == 1
+    assert stats["n_matvec"] == stats["n_iter"] + 2
+    np.testing.assert_array_equal(M(jnp.zeros_like(b)), np.zeros_like(b))
+    jax.clear_caches()
+
+
+def test_inexact_shifted_preconditioner_with_flexible_outer_solver():
+    domain, T, _, maps, S, D, eta = _setup(p=6, q=2)
+    _, T_shift, _, _ = local_solve_stage_uniform_3D_ItI(
+        _shifted_problem(domain, 0.1, eta)
+    )
+    apply_S, apply_D = make_dense_SD_apply(S, D)
+    A = jax.jit(make_flat_bie_operator(T, maps, eta, apply_S, apply_D))
+    rng = np.random.default_rng(15)
+    exact = jnp.asarray(
+        rng.normal(size=maps.n_flat) + 1j * rng.normal(size=maps.n_flat)
+    )
+    b = A(exact)
+    inner_stats = {}
+    M = make_iterative_shifted_preconditioner(
+        T_shift,
+        maps,
+        eta,
+        apply_S,
+        apply_D,
+        jnp.diag(S),
+        jnp.diag(D),
+        tol=0.05,
+        restart=20,
+        maxiter=20,
+        stats=inner_stats,
+    )
+    stats = {}
+    x, info = fgmres(
+        A,
+        b,
+        precond=M,
+        tol=1e-9,
+        restart=maps.n_flat,
+        maxiter=maps.n_flat,
+        stats=stats,
+    )
+    assert info == 0
+    assert float(jnp.linalg.norm(b - A(x)) / jnp.linalg.norm(b)) <= 1e-9
+    np.testing.assert_allclose(x, exact, rtol=1e-6, atol=1e-6)
+    assert inner_stats["n_calls"] == stats["n_iter"]
+    assert inner_stats["n_unconverged"] > 0
+    assert inner_stats["n_iter"] <= 20 * inner_stats["n_calls"]
+    jax.clear_caches()
 
 
 def _setup(p=8, q=4, L=1, kappa=4.0, shift=0.0, seed=5):
