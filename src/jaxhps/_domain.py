@@ -382,7 +382,7 @@ class Domain:
         will adaptively refine the HPS grid until reaching a specified tolerance ``tol``. Multiple
         functions for adaptive refinement can be specified in a list.
 
-        The tolerance is enforced in the :math:`\\ell_\infty` norm by default, but can also be enforced in :math:`\\ell_2`.
+        The tolerance is enforced in the :math:`\\ell_\\infty` norm by default, but can also be enforced in :math:`\\ell_2`.
 
         Args:
             p (int): Polynomial order for Chebyshev points.
