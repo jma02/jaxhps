@@ -30,8 +30,6 @@ def case(tmp_path, name, *, kind="radial", n=16, value=1.0, residual=1e-9):
         evaluation_seconds=1.0,
         gpu_memory=dict(peak_bytes_in_use=1024, peak_pool_bytes=2048),
         host_peak_rss_bytes=4096,
-        git_commit="test",
-        git_dirty=False,
     )
     path = tmp_path / f"{name}.json"
     path.write_text(json.dumps(row))

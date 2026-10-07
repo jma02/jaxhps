@@ -61,19 +61,19 @@ device results. JSON records:
 
 - Setup and first solve, including their JIT effects; their sum is the cold
   measured solver cost. Python imports, process/container startup, and fixture
-  loading/hashing are excluded and identified separately.
+  loading are excluded and identified separately.
 - Three zero-initial-guess repeated solves using the **same** setup and RHS
   after a converged first solve. A failed first solve is retained without
   spending more GPU time on ineligible repeats. Repeats measure repeated-solve
   cost, not varied-source or block throughput.
 - Exterior target evaluation, timed separately, including its first compile.
 - HPS exterior fixture generation is a separate CPU preprocessing cost,
-  excluded from solver times. Cached fixture hashes identify the exact input.
+  excluded from solver times.
 - JAX live allocator peak and pool peak, plus host peak RSS. These are
   whole-case measurements through field evaluation; factor sizes are separate.
   They do not include every CUDA driver allocation or measure `nvidia-smi` peak.
 - Raw fields, target coordinates/weights, true residual histories, iterations,
-  versions, GPU identity, source hashes, and the local Git commit/dirty flag.
+  versions, and GPU identity.
 
 For matched-error tables, among converged tested configurations satisfying
 the chosen error ceiling, select the least expensive by the stated cost
@@ -145,7 +145,6 @@ cases; ensure the earlier Modal app has stopped before restarting it.
 
 The [manuscript and data archive](https://github.com/jma02/jaxhps-devin-latex/pull/2)
 contain all 77 tested configurations, including unconverged solves and process
-timeouts, the reference controls, generated comparisons, and a provenance audit.
-Use each raw record's Git revision to reproduce its source version. Matched-error
+timeouts, the reference controls, and generated comparisons. Matched-error
 conclusions apply to these tested configurations and receiver fields; they do not
 establish clinical-frequency accuracy or asymptotic scaling.
