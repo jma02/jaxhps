@@ -129,7 +129,8 @@ def main():
         row["unknowns"] = args.n**3
         row["kernel_bytes"] = kernel.nbytes
         row["cold_setup_solve_seconds"] = time.perf_counter() - t0
-        for _ in range(args.repeats):
+        converged = info["info"] == 0 and info["final_rel_res"] <= 1e-8
+        for _ in range(args.repeats if converged else 0):
             t1 = time.perf_counter()
             u, info = solve_volume(operator, points, args.kappa, direction)
             row["repeats"].append(
@@ -182,7 +183,11 @@ def main():
         row["first_solve_seconds"] = out["info"]["first_solve_seconds"]
         row["exterior_bytes"] = sd["S"].nbytes + sd["D"].nbytes
         ub, dn = out["uscat_b"], out["uscat_dn_b"]
-        for _ in range(args.repeats):
+        converged = (
+            out["info"]["converged"]
+            and out["info"]["gmres_stats"]["final_rel_res"] <= 1e-8
+        )
+        for _ in range(args.repeats if converged else 0):
             t1 = time.perf_counter()
             ub, dn, info = out["resolve"](direction[None])
             row["repeats"].append(

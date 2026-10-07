@@ -62,8 +62,10 @@ device results. JSON records:
 - Setup and first solve, including their JIT effects; their sum is the cold
   measured solver cost. Python imports, process/container startup, and fixture
   loading/hashing are excluded and identified separately.
-- Three zero-initial-guess repeated solves using the **same** setup and RHS.
-  These measure repeated-solve cost, not varied-source or block throughput.
+- Three zero-initial-guess repeated solves using the **same** setup and RHS
+  after a converged first solve. A failed first solve is retained without
+  spending more GPU time on ineligible repeats. Repeats measure repeated-solve
+  cost, not varied-source or block throughput.
 - Exterior target evaluation, timed separately, including its first compile.
 - HPS exterior fixture generation is a separate CPU preprocessing cost,
   excluded from solver times. Cached fixture hashes identify the exact input.

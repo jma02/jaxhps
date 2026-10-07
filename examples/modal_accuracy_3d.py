@@ -114,6 +114,7 @@ def main(
     suite: str = "smoke",
     output: str = "data/examples/accuracy",
     case: str = "",
+    start: int = 0,
 ):
     directory = Path(output)
     directory.mkdir(parents=True, exist_ok=True)
@@ -125,7 +126,8 @@ def main(
             ["git", "status", "--porcelain"], cwd=ROOT, text=True
         ).strip()
     )
-    for index, command in enumerate([case] if case else cases(suite)):
+    commands = [case] if case else cases(suite)
+    for index, command in enumerate(commands[start:], start=start):
         print(f"CASE {index}: {command}", flush=True)
         result = measure.remote(shlex.split(command))
         result.update(git_commit=commit, git_dirty=dirty, invocation=command)
