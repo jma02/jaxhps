@@ -79,3 +79,17 @@ def test_inconsistent_residual_history_is_rejected():
         )
     with pytest.raises(ValueError, match="flag"):
         certified(dict(final_rel_res=0.1, true_res_history=[1.0, 0.1], info=0))
+
+
+def test_absent_repeat_measurements_cannot_win_reuse_comparison(tmp_path):
+    path = case(tmp_path, "no-repeats")
+    raw = json.loads(path.read_text())
+    raw["repeats"] = []
+    path.write_text(json.dumps(raw))
+    result = analyze([path], [dict(kappa=4, changes=dict(all_tight=1e-12))])
+    assert result["rows"][0]["repeat_median_seconds"] is None
+    assert all(
+        match["best_case"] is None
+        for match in result["matches"]
+        if match["metric"] == "repeat_median_seconds"
+    )

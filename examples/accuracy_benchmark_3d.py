@@ -75,6 +75,7 @@ def main():
     parser.add_argument("--q", type=int, default=8)
     parser.add_argument("--L", type=int, default=1)
     parser.add_argument("--p", type=int)
+    parser.add_argument("--leaf-batch-size", type=int)
     parser.add_argument("--precond", default="shift-coarse:0.1")
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--out", type=Path, required=True)
@@ -172,6 +173,7 @@ def main():
             coarse_limit=2048,
             stats={},
             return_solver=True,
+            leaf_batch_size=args.leaf_batch_size,
         )
         row["cold_setup_solve_seconds"] = time.perf_counter() - t0
         row["first_info"] = out["info"]

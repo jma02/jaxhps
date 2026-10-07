@@ -106,6 +106,7 @@ the NumPy 1 runtime used to compile the legacy Fortran extension.
 .venv/bin/modal run examples/modal_accuracy_3d.py --suite smoke
 .venv/bin/modal run examples/modal_accuracy_3d.py --suite radial
 .venv/bin/modal run examples/modal_accuracy_3d.py --suite phantom
+.venv/bin/modal run examples/modal_accuracy_3d.py --suite phantom-p
 .venv/bin/python examples/reference_convergence_3d.py --out reference-controls.json
 .venv/bin/python examples/analyze_accuracy_3d.py data/examples/accuracy \
   --reference-controls reference-controls.json --out accuracy-summary
@@ -131,3 +132,11 @@ controls never count as zero uncertainty. A case is eligible only if all
 four solves pass the true residual check, the reference change is at most
 one tenth of the error ceiling, and field error plus that change stays below
 the ceiling. These empirical changes are not rigorous error bounds.
+
+The `phantom-p` suite refines interior order independently of exterior order:
+`q=8, L=2, p=16,20`, at both phantom frequencies. It uses four-leaf batches
+for the physical and shifted local factorizations. This bounds temporary
+leaf-factorization storage without changing the discrete equations or the
+retained dense exterior matrices. The default driver retains its original
+unbatched behavior. Use `--start INDEX` to resume a suite after completed
+cases; ensure the earlier Modal app has stopped before restarting it.

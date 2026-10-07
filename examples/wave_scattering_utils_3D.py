@@ -30,6 +30,8 @@ from jaxhps import (
     build_solver,
 )
 from jaxhps._krylov import fgmres
+from jaxhps._pdeproblem import _get_PDEProblem_chunk
+from jaxhps.local_solve import local_solve_stage_uniform_3D_ItI
 from jaxhps._matfree_precond_3D import (
     make_coarse_correction_preconditioner,
     make_iterative_shifted_preconditioner,
@@ -1871,6 +1873,27 @@ def solve_bie_flat_matfree(
     return uscat_b, uscat_dn_b, info
 
 
+def _local_impedance_maps(problem: PDEProblem, batch_size: int | None):
+    count = problem.domain.n_leaves
+    if batch_size is not None and batch_size < 1:
+        raise ValueError("leaf_batch_size must be positive")
+    if batch_size is None or batch_size >= count:
+        _, maps, _, source = local_solve_stage_uniform_3D_ItI(problem)
+        return maps, source
+    maps, sources = [], []
+    for start in range(0, count, batch_size):
+        chunk = _get_PDEProblem_chunk(
+            problem, start, min(start + batch_size, count)
+        )
+        _, local_maps, _, local_source = local_solve_stage_uniform_3D_ItI(
+            chunk
+        )
+        jax.block_until_ready((local_maps, local_source))
+        maps.append(local_maps)
+        sources.append(local_source)
+    return jnp.concatenate(maps), jnp.concatenate(sources)
+
+
 def solve_scattering_bie_3D_matfree(
     sd: dict,
     b_radial: Callable[[np.ndarray], np.ndarray] | None,
@@ -1892,6 +1915,7 @@ def solve_scattering_bie_3D_matfree(
     *,
     b_cartesian: Callable[[np.ndarray], np.ndarray] | None = None,
     return_solver: bool = False,
+    leaf_batch_size: int | None = None,
 ) -> dict:
     """Matrix-free-interior counterpart of :func:`solve_scattering_bie_3D`.
 
@@ -1913,8 +1937,8 @@ def solve_scattering_bie_3D_matfree(
     pass ``b_radial=None`` when supplying it.
     With ``return_solver=True`` and total formulation, ``resolve(directions)``
     in the result reuses the leaf maps and preconditioner for plane waves.
+    ``leaf_batch_size`` limits simultaneous local factorizations.
     """
-    from jaxhps.local_solve import local_solve_stage_uniform_3D_ItI
     from jaxhps._matfree_iti_3D import (
         build_interface_maps,
         flat_bie_diagonal_approx,
@@ -1977,7 +2001,7 @@ def solve_scattering_bie_3D_matfree(
     nrm = outward_normals_for_cube_boundary(bp, root)
 
     leaf_start = time.perf_counter()
-    _, T_leaves, _, h_leaves = local_solve_stage_uniform_3D_ItI(problem)
+    T_leaves, h_leaves = _local_impedance_maps(problem, leaf_batch_size)
     jax.block_until_ready((T_leaves, h_leaves))
     leaf_seconds = time.perf_counter() - leaf_start
     maps = build_interface_maps(domain)
@@ -2044,7 +2068,7 @@ def solve_scattering_bie_3D_matfree(
             use_ItI=True,
             eta=eta,
         )
-        _, T_shift, _, _ = local_solve_stage_uniform_3D_ItI(shifted)
+        T_shift, _ = _local_impedance_maps(shifted, leaf_batch_size)
         shift_diagonal = flat_bie_diagonal_approx(
             T_shift,
             maps,

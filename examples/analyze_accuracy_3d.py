@@ -117,7 +117,9 @@ def analyze(files, reference_controls):
                 else (f"q={p['q']},L={p['L']},p={p['p'] or p['q'] + 4}"),
                 n=p["n"] if p["solver"] == "fft" else None,
                 q=p["q"] if p["solver"] == "hps" else None,
+                p=(p["p"] or p["q"] + 4) if p["solver"] == "hps" else None,
                 L=p["L"] if p["solver"] == "hps" else None,
+                leaf_batch_size=p.get("leaf_batch_size"),
                 unknowns=row["unknowns"],
                 converged=bool(
                     certified(info)
@@ -176,9 +178,12 @@ def analyze(files, reference_controls):
                         and r["reference_change"] <= ceiling / 10
                     ]
                     for metric in ("cold_seconds", "repeat_median_seconds"):
+                        measured = [
+                            r for r in eligible if r[metric] is not None
+                        ]
                         best = (
-                            min(eligible, key=lambda r: r[metric])
-                            if eligible
+                            min(measured, key=lambda r: r[metric])
+                            if measured
                             else None
                         )
                         matches.append(
