@@ -106,7 +106,13 @@ def cases(suite):
                 (8, 2),
             )
         ]
-    raise ValueError("suite must be smoke, radial, or phantom")
+    if suite == "phantom-p":
+        return [
+            f"--solver hps --kind phantom --kappa {k} --q 8 --L 2 --p {p} --leaf-batch-size 4"
+            for k in (4, 8)
+            for p in (16, 20)
+        ]
+    raise ValueError("suite must be smoke, radial, phantom, or phantom-p")
 
 
 @app.local_entrypoint()
