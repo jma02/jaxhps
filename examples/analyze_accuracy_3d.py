@@ -35,7 +35,15 @@ def certified(info):
     return converged
 
 
-def analyze(files):
+def analyze(files, reference_controls):
+    radial_changes = {
+        r["kappa"]: max(
+            value
+            for key, value in r["changes"].items()
+            if key != "legacy_reference"
+        )
+        for r in reference_controls
+    }
     raw = []
     failures = []
     for path in files:
@@ -75,6 +83,7 @@ def analyze(files):
                 row=fine,
                 n=fine["parameters"]["n"],
                 previous_n=previous["parameters"]["n"],
+                earlier_n=earlier["parameters"]["n"],
                 relative_change=error(previous, fine),
                 previous_relative_change=error(earlier, previous),
             )
@@ -85,7 +94,9 @@ def analyze(files):
         stats = info.get("gmres_stats", info)
         repeats = row["repeats"]
         timings = [r["seconds"] for r in repeats]
-        uncertainty = 0.0
+        uncertainty = (
+            radial_changes.get(p["kappa"]) if p["kind"] == "radial" else None
+        )
         field_error = row.get("field_relative_error")
         if p["kind"] == "phantom" and p["kappa"] in references:
             reference = references[p["kappa"]]
@@ -158,6 +169,7 @@ def analyze(files):
                         and r["method"] == method
                         and r["converged"]
                         and r["field_error"] is not None
+                        and r["reference_change"] is not None
                         and r["field_error"] + r["reference_change"] <= ceiling
                         and r["reference_change"] <= ceiling / 10
                     ]
@@ -193,9 +205,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directories", nargs="+", type=Path)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--reference-controls", type=Path, required=True)
     args = parser.parse_args()
     result = analyze(
-        [p for d in args.directories for p in sorted(d.glob("*.json"))]
+        [p for d in args.directories for p in sorted(d.glob("*.json"))],
+        json.loads(args.reference_controls.read_text()),
     )
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "summary.json").write_text(json.dumps(result, indent=2))

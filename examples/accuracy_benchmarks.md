@@ -104,6 +104,9 @@ the NumPy 1 runtime used to compile the legacy Fortran extension.
 .venv/bin/modal run examples/modal_accuracy_3d.py --suite smoke
 .venv/bin/modal run examples/modal_accuracy_3d.py --suite radial
 .venv/bin/modal run examples/modal_accuracy_3d.py --suite phantom
+.venv/bin/python examples/reference_convergence_3d.py --out reference-controls.json
+.venv/bin/python examples/analyze_accuracy_3d.py data/examples/accuracy \
+  --reference-controls reference-controls.json --out accuracy-summary
 # One case; use a separate output directory to avoid replacing prior files:
 .venv/bin/modal run examples/modal_accuracy_3d.py --suite extra \
   --output data/examples/accuracy-extra \
@@ -118,3 +121,11 @@ The same per-case CLI runs on CPU for validation:
 `python examples/accuracy_benchmark_3d.py --solver fft --n 32 --out case.json`.
 GPU timings must not be inferred from CPU timings. These experiments use
 plane waves, not point-source illumination or a receiver/source array model.
+
+The analyzer requires independently measured radial reference controls.
+It uses their largest new-reference change (excluding the legacy reference)
+and the finest phantom FFT-grid change as uncertainty indicators. Missing
+controls never count as zero uncertainty. A case is eligible only if all
+four solves pass the true residual check, the reference change is at most
+one tenth of the error ceiling, and field error plus that change stays below
+the ceiling. These empirical changes are not rigorous error bounds.
