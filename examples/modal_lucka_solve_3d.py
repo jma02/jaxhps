@@ -15,7 +15,7 @@ import os
 import modal
 
 from modal_fmm_image import fmm_image
-from breast_phantom_3d import (
+from lucka_phantom_3d import (
     build_lucka_phantom,
     build_lucka_phantom_hemisphere,
 )
