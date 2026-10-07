@@ -150,8 +150,6 @@ def analyze(files, reference_controls):
                 peak_live_gib=row["gpu_memory"]["peak_bytes_in_use"] / 2**30,
                 peak_pool_gib=row["gpu_memory"]["peak_pool_bytes"] / 2**30,
                 host_peak_gib=row["host_peak_rss_bytes"] / 2**30,
-                git_commit=row["git_commit"],
-                git_dirty=row["git_dirty"],
             )
         )
     matches = []

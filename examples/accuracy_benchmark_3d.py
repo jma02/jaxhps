@@ -1,11 +1,9 @@
 """One fresh-process accuracy/timing case. See accuracy_benchmarks.md."""
 
 import argparse
-import hashlib
 import json
 import platform
 import resource
-import subprocess
 import time
 from pathlib import Path
 
@@ -29,14 +27,6 @@ from wave_scattering_utils_3D import (
 
 jax.config.update("jax_enable_x64", True)
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def sha256(path):
-    h = hashlib.sha256()
-    with Path(path).open("rb") as f:
-        for block in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(block)
-    return h.hexdigest()
 
 
 def targets():
@@ -100,23 +90,8 @@ def main():
             dtype="complex128",
             platform=platform.platform(),
         ),
-        source_hashes={
-            str(p.relative_to(ROOT)): sha256(p)
-            for folder in (ROOT / "src", ROOT / "examples")
-            for p in sorted(folder.rglob("*.py"))
-        },
-        target_hash=hashlib.sha256(xyz.tobytes()).hexdigest(),
         repeats=[],
     )
-    if (ROOT / ".git").exists():
-        row["git_commit"] = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
-        ).strip()
-        row["git_dirty"] = bool(
-            subprocess.check_output(
-                ["git", "status", "--porcelain"], cwd=ROOT, text=True
-            ).strip()
-        )
     t0 = time.perf_counter()
     if args.solver == "fft":
         points, b, kernel, operator = prepare_volume_solver(
@@ -154,9 +129,8 @@ def main():
             / "data/examples/SD_3D"
             / (f"SD_k{args.kappa:g}_q{args.q}_L{args.L}_a{args.a:g}.npz")
         )
-        row["fixture_sha256"] = sha256(fixture)
         sd = load_SD_matrices_3D(str(fixture))
-        row["fixture_load_hash_seconds"] = time.perf_counter() - t0
+        row["fixture_load_seconds"] = time.perf_counter() - t0
         t0 = time.perf_counter()
         out = solve_scattering_bie_3D_matfree(
             sd,
