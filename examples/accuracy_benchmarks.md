@@ -140,3 +140,12 @@ leaf-factorization storage without changing the discrete equations or the
 retained dense exterior matrices. The default driver retains its original
 unbatched behavior. Use `--start INDEX` to resume a suite after completed
 cases; ensure the earlier Modal app has stopped before restarting it.
+
+## Archived study
+
+The [manuscript and data archive](https://github.com/jma02/jaxhps-devin-latex/pull/2)
+contain all 77 tested configurations, including unconverged solves and process
+timeouts, the reference controls, generated comparisons, and a provenance audit.
+Use each raw record's Git revision to reproduce its source version. Matched-error
+conclusions apply to these tested configurations and receiver fields; they do not
+establish clinical-frequency accuracy or asymptotic scaling.
