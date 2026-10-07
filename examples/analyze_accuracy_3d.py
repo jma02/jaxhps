@@ -137,9 +137,11 @@ def analyze(files, reference_controls):
                 setup_seconds=row["setup_seconds"],
                 first_solve_seconds=row["first_solve_seconds"],
                 cold_seconds=row["cold_setup_solve_seconds"],
-                repeat_min_seconds=min(timings),
-                repeat_median_seconds=statistics.median(timings),
-                repeat_max_seconds=max(timings),
+                repeat_min_seconds=min(timings) if timings else None,
+                repeat_median_seconds=(
+                    statistics.median(timings) if timings else None
+                ),
+                repeat_max_seconds=max(timings) if timings else None,
                 evaluation_seconds=row["evaluation_seconds"],
                 matvecs=stats["n_matvec"],
                 inner_matvecs=info.get("inner_stats", {}).get("n_matvec", 0),
