@@ -48,16 +48,12 @@ def green_kernel(n, a, kappa):
     return jnp.fft.fftn(cropped)
 
 
-def grid_points(n, a):
-    axis = -a + (np.arange(n) + 0.5) * (2 * a / n)
-    return np.stack(np.meshgrid(axis, axis, axis, indexing="ij"), axis=-1)
-
-
 def prepare_volume_solver(n, a, kappa, coefficient):
     """Prepare a reusable operator; coefficient accepts (..., 3) points."""
     if n < 4 or a <= 0 or kappa <= 0:
         raise ValueError("n>=4 and positive a,kappa required")
-    points = grid_points(n, a)
+    axis = -a + (np.arange(n) + 0.5) * (2 * a / n)
+    points = np.stack(np.meshgrid(axis, axis, axis, indexing="ij"), axis=-1)
     b = np.asarray(coefficient(points))
     if b.shape != points.shape[:-1] or not np.all(np.isfinite(b)):
         raise ValueError("coefficient must be finite with shape (n,n,n)")
