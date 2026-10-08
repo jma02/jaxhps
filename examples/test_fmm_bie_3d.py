@@ -43,15 +43,6 @@ SD_PATH = os.path.join(
 )
 
 
-def make_bumps(pts):
-    """Simple centered radial bump for testing."""
-    r = np.linalg.norm(pts, axis=-1)
-    R = 0.3
-    A = -0.4
-    mask = (r < R).astype(float)
-    return A * (1 - (r / R) ** 2) ** 4 * mask
-
-
 def main():
     sd = load_SD_matrices_3D(SD_PATH)
     a, q, L, kappa = sd["a"], sd["q"], sd["L"], sd["kappa"]
@@ -104,7 +95,11 @@ def main():
     source_dirs = np.column_stack([np.cos(phi), np.sin(phi), np.zeros(n_src)])
 
     int_pts = np.asarray(domain.interior_points)
-    b_int = make_bumps(int_pts)
+    r = np.linalg.norm(int_pts, axis=-1)
+    R = 0.3
+    A = -0.4
+    mask = (r < R).astype(float)
+    b_int = A * (1 - (r / R) ** 2) ** 4 * mask
     I_coeffs = (kappa**2 * (1.0 - b_int)).astype(np.complex128)
     phases = np.einsum("lpd,sd->lps", int_pts, source_dirs)
     uin_int = np.exp(1j * kappa * phases)

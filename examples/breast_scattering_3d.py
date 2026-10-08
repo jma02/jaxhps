@@ -41,7 +41,7 @@ from breast_phantom_3d import (  # noqa: E402
     DEFAULT_CENTERS,
     DEFAULT_MVALS,
     DEFAULT_RADII,
-    breast_b_of_x,
+    breast_n_of_x,
     fibonacci_cap_points,
 )
 from wave_scattering_utils_3D import (  # noqa: E402
@@ -79,7 +79,7 @@ def main():
 
     t0 = time.perf_counter()
     out = solve_scattering_bie_3D_pointsource(
-        sd, breast_b_of_x, sensors, p=args.p
+        sd, lambda pts: 1.0 - breast_n_of_x(pts), sensors, p=args.p
     )
     t_solve = time.perf_counter() - t0
     print(f"HPS build + BIE solve: {t_solve:.1f}s")

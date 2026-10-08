@@ -113,58 +113,9 @@ def circulant_collapse(M):
     return g, residual
 
 
-def mie_curve(b_radial, kappa, rho, R_bump, seps):
-    """Mie ``g(gamma)``: scattered field at separation angle ``gamma``.
-
-    Transmitter along ``+x``; receiver at ``rho (cos gamma, sin gamma, 0)``.
-    """
-    rx = rho * np.stack(
-        [np.cos(seps), np.sin(seps), np.zeros_like(seps)], axis=-1
-    )
-    return mie_scattered_field(
-        target_pts=rx,
-        source_direction=np.array([1.0, 0.0, 0.0]),
-        kappa=float(kappa),
-        b_radial=b_radial,
-        R_supp=R_bump,
-        ell_max=int(np.ceil(2 * (kappa * rho + 6))),
-    )
-
-
-def plot_R_sweep(sd, A_bump, shape, radii, angles, rho, p, fname):
-    """Overlay the sorted pattern ``g(gamma)`` for several scatterer radii.
-
-    The angular content (number of oscillations of ``g``) grows with
-    ``kappa * R``, so larger spheres produce higher-frequency sine waves.
-    """
+def main():
     import matplotlib.pyplot as plt
 
-    kappa = sd["kappa"]
-    deg = np.degrees(angles)
-    fig, ax = plt.subplots(figsize=(7.5, 4.8), constrained_layout=True)
-    for idx, R in enumerate(sorted(radii)):
-        b_radial, _ = make_b_radial(R, A_bump, shape)
-        M, _, _ = measurement_matrix(sd, b_radial, angles, rho, p)
-        g, _ = circulant_collapse(M)
-        gn = np.real(g) / np.max(np.abs(np.real(g)))
-        ax.plot(
-            deg,
-            gn,
-            color=plt.cm.viridis(idx / max(len(radii) - 1, 1)),
-            lw=1.8,
-            label=rf"$R={R}$ ($\kappa R={kappa * R:.1f}$)",
-        )
-    ax.set_title(
-        r"Sorted pattern $\Re\,g(\gamma)$ (normalized) vs scatterer size"
-    )
-    ax.set_xlabel(r"angular separation $\gamma$ (deg)")
-    ax.set_ylabel(r"$\Re\,g / \max|\Re\,g|$")
-    ax.legend(loc="upper right")
-    fig.savefig(fname, dpi=130)
-    print(f"wrote {fname}")
-
-
-def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
         "--npz", default="data/examples/SD_3D/SD_k4_q8_L2_a1.25.npz"
@@ -209,7 +160,14 @@ def main():
     g, residual = circulant_collapse(M)
 
     # Mie reference for the sorted pattern (separation = grid angles).
-    mie = mie_curve(b_radial, kappa, args.rho, args.R_bump, angles)
+    mie = mie_scattered_field(
+        target_pts=rx,
+        source_direction=np.array([1.0, 0.0, 0.0]),
+        kappa=float(kappa),
+        b_radial=b_radial,
+        R_supp=args.R_bump,
+        ell_max=int(np.ceil(2 * (kappa * args.rho + 6))),
+    )
     rel_mie = float(np.linalg.norm(g - mie) / np.linalg.norm(mie))
 
     print(f"kappa={kappa}  N={args.N}  rho={args.rho}  cube a={a}")
@@ -220,7 +178,6 @@ def main():
 
     R_bump = args.R_bump
     fname = f"{args.out}_geometry.png"
-    import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(6.0, 6.4), constrained_layout=True)
     ax.add_patch(plt.Circle((0, 0), R_bump, color="0.6", alpha=0.5))
@@ -244,7 +201,6 @@ def main():
     fig.savefig(fname, dpi=130)
     print(f"wrote {fname}")
     fname = f"{args.out}_matrix.png"
-    import matplotlib.pyplot as plt
 
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.6), constrained_layout=True)
     for ax, m, title, kw in zip(
@@ -265,7 +221,6 @@ def main():
     print(f"wrote {fname}")
     seps = angles
     fname = f"{args.out}_sorted.png"
-    import matplotlib.pyplot as plt
 
     N = M.shape[0]
     deg = np.degrees(seps)
@@ -302,7 +257,6 @@ def main():
     print(f"wrote {fname}")
     fname = f"{args.out}_traces.png"
     n_show = 6
-    import matplotlib.pyplot as plt
 
     N = M.shape[0]
     deg = np.degrees(angles)
@@ -326,16 +280,30 @@ def main():
     print(f"wrote {fname}")
 
     if args.R_sweep:
-        plot_R_sweep(
-            sd,
-            args.A_bump,
-            args.bump,
-            args.R_sweep,
-            angles,
-            args.rho,
-            args.p,
-            f"{args.out}_sweep.png",
+        fig, ax = plt.subplots(figsize=(7.5, 4.8), constrained_layout=True)
+        for idx, R in enumerate(sorted(args.R_sweep)):
+            sweep_b, _ = make_b_radial(R, args.A_bump, args.bump)
+            sweep_M, _, _ = measurement_matrix(
+                sd, sweep_b, angles, args.rho, args.p
+            )
+            sweep_g, _ = circulant_collapse(sweep_M)
+            gn = np.real(sweep_g) / np.max(np.abs(np.real(sweep_g)))
+            ax.plot(
+                deg,
+                gn,
+                color=plt.cm.viridis(idx / max(len(args.R_sweep) - 1, 1)),
+                lw=1.8,
+                label=rf"$R={R}$ ($\kappa R={kappa * R:.1f}$)",
+            )
+        ax.set_title(
+            r"Sorted pattern $\Re\,g(\gamma)$ (normalized) vs scatterer size"
         )
+        ax.set_xlabel(r"angular separation $\gamma$ (deg)")
+        ax.set_ylabel(r"$\Re\,g / \max|\Re\,g|$")
+        ax.legend(loc="upper right")
+        fname = f"{args.out}_sweep.png"
+        fig.savefig(fname, dpi=130)
+        print(f"wrote {fname}")
 
     if args.npz_out is not None:
         np.savez(
