@@ -244,7 +244,7 @@ def main():
                     "Phantom",
                     "Box λ",
                     "n",
-                    "Status",
+                    "Krylov",
                     "Field Δ",
                     "Residual",
                     "Iters",
