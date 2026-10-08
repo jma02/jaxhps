@@ -13,6 +13,8 @@ import os
 
 import numpy as np
 import plotly.graph_objects as go
+from report_utils import figure_html, table_html
+from breast_phantom_3d import build_lucka_phantom_hemisphere
 
 PLOTLY_CDN = "https://cdn.plot.ly/plotly-2.35.2.min.js"
 
@@ -205,519 +207,6 @@ LUCKA_SOLVE = dict(
 # ============================================================
 
 
-def fig_solver_comparison():
-    """Grouped bar: GMRES time across solver types at L=2 and L=3."""
-    fig = go.Figure()
-
-    # L=2 group
-    fig.add_trace(
-        go.Bar(
-            x=["L=2<br>(n=6,144)"],
-            y=[MODAL_SMOKE_CPU["gmres_time"]],
-            name="CPU FMM + scipy GMRES",
-            marker_color="#d62728",
-            text=["18.0s"],
-            textposition="outside",
-        )
-    )
-    fig.add_trace(
-        go.Bar(
-            x=["L=2<br>(n=6,144)"],
-            y=[MODAL_L2_GPU["gmres_time"]],
-            name="GPU dense matvec + JAX GMRES",
-            marker_color="#ff7f0e",
-            text=["9.1s"],
-            textposition="outside",
-        )
-    )
-    fig.add_trace(
-        go.Bar(
-            x=["L=2<br>(n=6,144)"],
-            y=[MODAL_ADV_L2_BLOCK["gmres_time"]],
-            name="GPU dense + block GMRES + Jacobi",
-            marker_color="#2ca02c",
-            text=["6.07s"],
-            textposition="outside",
-        )
-    )
-
-    # L=3 group
-    fig.add_trace(
-        go.Bar(
-            x=["L=3<br>(n=24,576)"],
-            y=[MODAL_HF_CPU["gmres_time"]],
-            name="CPU FMM + scipy GMRES",
-            marker_color="#d62728",
-            text=["617s"],
-            textposition="outside",
-            showlegend=False,
-        )
-    )
-    fig.add_trace(
-        go.Bar(
-            x=["L=3<br>(n=24,576)"],
-            y=[MODAL_L3_GPU["gmres_time"]],
-            name="GPU dense matvec + JAX GMRES",
-            marker_color="#ff7f0e",
-            text=["17.5s"],
-            textposition="outside",
-            showlegend=False,
-        )
-    )
-    fig.add_trace(
-        go.Bar(
-            x=["L=3<br>(n=24,576)"],
-            y=[MODAL_ADV_L3_MATFREE["gmres_time"]],
-            name="GPU matrix-free + Jacobi",
-            marker_color="#1f77b4",
-            text=["97.9s"],
-            textposition="outside",
-        )
-    )
-
-    fig.update_layout(
-        barmode="group",
-        yaxis_title="GMRES solve time (s)",
-        yaxis_type="log",
-        legend=dict(
-            orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5
-        ),
-        margin=dict(l=50, r=20, t=80, b=40),
-        height=500,
-    )
-    return fig
-
-
-def fig_memory_comparison():
-    """Bar chart: GPU memory for dense vs matrix-free at L=3."""
-    labels = [
-        "Dense path<br>(K_S + K_D + T_DtN)",
-        "Matrix-free path<br>(sparse NF + T_DtN)",
-    ]
-    mems = [
-        MODAL_L3_GPU["kernel_mem_gb"],
-        MODAL_ADV_L3_MATFREE["total_mem_gb"],
-    ]
-
-    fig = go.Figure(
-        go.Bar(
-            x=labels,
-            y=mems,
-            text=[f"{m:.1f} GB" for m in mems],
-            textposition="outside",
-            marker_color=["#d62728", "#2ca02c"],
-            width=0.5,
-        )
-    )
-    fig.add_hline(
-        y=80,
-        line=dict(color="#999", dash="dash", width=2),
-        annotation_text="H100 80 GB limit",
-        annotation_position="top right",
-    )
-    fig.update_layout(
-        yaxis_title="GPU memory (GB)",
-        margin=dict(l=50, r=20, t=40, b=40),
-        height=380,
-    )
-    return fig
-
-
-def fig_validation_bars():
-    """Bar chart: FMM matvec and solve errors at L=2."""
-    labels = [
-        "S matvec\nrel err",
-        "D matvec\nrel err",
-        "BIE solve\nrel L2 err",
-        "BIE solve\nmax abs err",
-    ]
-    vals = [
-        VAL_L2["S_matvec_rel_err"],
-        VAL_L2["D_matvec_rel_err"],
-        VAL_L2["rel_L2_err"],
-        VAL_L2["max_abs_err"],
-    ]
-    fig = go.Figure(
-        go.Bar(
-            x=labels,
-            y=vals,
-            text=[f"{v:.2e}" for v in vals],
-            textposition="outside",
-            marker_color=["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"],
-        )
-    )
-    fig.update_layout(
-        yaxis_title="error",
-        yaxis_type="log",
-        margin=dict(l=50, r=20, t=20, b=80),
-        height=360,
-    )
-    return fig
-
-
-def fig_feasibility_kappa():
-    """Scatter: achievable kappa*a vs GPU memory for different (L, q)."""
-    configs = [
-        (2, 8, "L=2, q=8"),
-        (3, 8, "L=3, q=8"),
-        (3, 10, "L=3, q=10"),
-        (3, 12, "L=3, q=12"),
-        (3, 14, "L=3, q=14"),
-        (4, 8, "L=4, q=8"),
-    ]
-    kas, mems, labels, colors = [], [], [], []
-    for L, q, lab in configs:
-        n = 6 * (4**L) * q**2
-        T_mem = n**2 * 16 / 1e9
-        ka_max = np.pi * (2**L) * q / 6.0
-        kas.append(ka_max)
-        mems.append(T_mem)
-        labels.append(lab)
-        colors.append("#2ca02c" if T_mem < 80 else "#d62728")
-
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=kas,
-            y=mems,
-            mode="markers+text",
-            text=labels,
-            textposition="top center",
-            marker=dict(size=14, color=colors),
-            showlegend=False,
-        )
-    )
-    fig.add_hline(
-        y=80,
-        line=dict(color="#999", dash="dash", width=2),
-        annotation_text="H100 80 GB",
-        annotation_position="top right",
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=[26.18 * 1.25],
-            y=[9.66],
-            mode="markers",
-            name="Tested (L=3, q=8, kappa*a=32.7)",
-            marker=dict(size=18, color="#2ca02c", symbol="star"),
-        )
-    )
-    fig.update_layout(
-        xaxis_title="max kappa * a (6 points-per-wavelength criterion)",
-        yaxis_title="T_DtN memory (GB)",
-        yaxis_type="log",
-        legend=dict(
-            orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5
-        ),
-        margin=dict(l=50, r=20, t=60, b=40),
-        height=460,
-    )
-    return fig
-
-
-def fig_breast_freq_mapping():
-    """Scatter: breast frequency vs required L and memory."""
-    c_bg = 1500.0
-    a_phys = 0.055
-    freqs = [50, 100, 150, 200, 250, 500]
-    kas, t_mems, labels = [], [], []
-    for f in freqs:
-        kappa = 2 * np.pi * f * 1e3 / c_bg
-        ka = kappa * a_phys
-        L = max(1, int(np.ceil(np.log2(max(1, 6 * ka / (np.pi * 8))))))
-        q = 8
-        ppw = np.pi * (2**L) * q / ka
-        if ppw < 6 and L <= 3:
-            q = int(np.ceil(6 * ka / (np.pi * 2**L)))
-        n = 6 * (4**L) * q**2
-        T_mem = n**2 * 16 / 1e9
-        kas.append(ka)
-        t_mems.append(T_mem)
-        labels.append(f"{f} kHz")
-
-    fig = go.Figure()
-    feasible = [m < 80 for m in t_mems]
-    fig.add_trace(
-        go.Scatter(
-            x=[kas[i] for i in range(len(kas)) if feasible[i]],
-            y=[t_mems[i] for i in range(len(kas)) if feasible[i]],
-            mode="markers+text",
-            text=[labels[i] for i in range(len(kas)) if feasible[i]],
-            textposition="top center",
-            marker=dict(size=14, color="#2ca02c"),
-            name="Feasible (single H100)",
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=[kas[i] for i in range(len(kas)) if not feasible[i]],
-            y=[t_mems[i] for i in range(len(kas)) if not feasible[i]],
-            mode="markers+text",
-            text=[labels[i] for i in range(len(kas)) if not feasible[i]],
-            textposition="top center",
-            marker=dict(size=14, color="#d62728"),
-            name="OOM (single GPU)",
-        )
-    )
-    fig.add_hline(
-        y=80,
-        line=dict(color="#999", dash="dash", width=2),
-        annotation_text="80 GB limit",
-        annotation_position="top right",
-    )
-    fig.update_layout(
-        xaxis_title="kappa * a (breast geometry, a = 55 mm)",
-        yaxis_title="T_DtN memory (GB)",
-        yaxis_type="log",
-        legend=dict(
-            orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5
-        ),
-        margin=dict(l=50, r=20, t=60, b=40),
-        height=460,
-    )
-    return fig
-
-
-def _build_lucka_phantom_grid(a, N=128):
-    """Generate the pendant hemispherical Lucka breast phantom b(x)
-    on a uniform 3D grid.  Mirrors build_lucka_phantom_hemisphere in
-    modal_lucka_solve_3d.py."""
-    x = np.linspace(-a, a, N)
-    pts = np.stack(np.meshgrid(x, x, x, indexing="ij"), axis=-1).reshape(-1, 3)
-
-    b_fat, b_fibro, b_vessel, b_skin = -0.041, 0.020, 0.103, 0.174
-
-    R = 0.80 * a
-    z0 = 0.55 * a
-    c = np.array([0.0, 0.0, z0])
-    r = np.linalg.norm(pts - c[None, :], axis=-1)
-    z = pts[:, 2]
-
-    def radial_bump(r_vals, r_centre, width):
-        t = np.abs(r_vals - r_centre) / width
-        return np.where(t < 1.0, (1.0 - t**2) ** 4, 0.0)
-
-    def smooth_step_down(xv, x0, w):
-        t = np.clip((xv - (x0 - w)) / w, 0.0, 1.0)
-        return (1.0 - t**2) ** 4
-
-    zcut = smooth_step_down(z, z0, 0.10 * R)
-
-    skin_mask = radial_bump(r, 0.9 * R, 0.08 * R) * zcut
-
-    fat_mask = np.where(r < 0.75 * R, 1.0, 0.0)
-    trans = np.clip((r - 0.75 * R) / (0.10 * R), 0, 1)
-    fat_mask = np.where(
-        (r >= 0.75 * R) & (r < 0.85 * R), (1.0 - trans**2) ** 4, fat_mask
-    )
-    fat_mask = fat_mask * zcut
-
-    c_fib = c - np.array([0.0, 0.0, 0.45 * R])
-    r_fib = np.linalg.norm(pts - c_fib[None, :], axis=-1)
-    R_fib = 0.35 * R
-    fibro_mask = np.where(r_fib < 0.75 * R_fib, 1.0, 0.0)
-    trans_f = np.clip((r_fib - 0.75 * R_fib) / (0.25 * R_fib), 0, 1)
-    fibro_mask = np.where(
-        (r_fib >= 0.75 * R_fib) & (r_fib < R_fib),
-        (1.0 - trans_f**2) ** 4,
-        fibro_mask,
-    )
-
-    vessel_radius = 0.05 * R
-    inside = np.where(r < 0.8 * R, 1.0, 0.0) * zcut
-    d1 = np.sqrt((pts[:, 0] - 0.2 * R) ** 2 + (pts[:, 1] - 0.15 * R) ** 2)
-    v1 = np.where(
-        d1 < vessel_radius, (1.0 - (d1 / vessel_radius) ** 2) ** 4, 0.0
-    )
-    d2 = np.sqrt((pts[:, 1] + 0.1 * R) ** 2 + (z - (z0 - 0.5 * R)) ** 2)
-    v2 = np.where(
-        d2 < vessel_radius, (1.0 - (d2 / vessel_radius) ** 2) ** 4, 0.0
-    )
-    d3 = np.sqrt((pts[:, 0] + 0.15 * R) ** 2 + (z - (z0 - 0.6 * R)) ** 2)
-    v3 = np.where(
-        d3 < vessel_radius, (1.0 - (d3 / vessel_radius) ** 2) ** 4, 0.0
-    )
-    vessel_mask = np.maximum(np.maximum(v1, v2), v3) * inside
-
-    b = fat_mask * b_fat
-    b = np.where(fibro_mask > 0.5, fibro_mask * b_fibro, b)
-    b = np.where(vessel_mask > 0.5, vessel_mask * b_vessel, b)
-    b = b * (1.0 - skin_mask) + skin_mask * b_skin
-    return b.reshape(N, N, N), x
-
-
-def fig_lucka_slices():
-    """Three orthogonal slices through the Lucka breast phantom."""
-    from plotly.subplots import make_subplots
-
-    a = LUCKA_SOLVE["a"]
-    b_vol, x = _build_lucka_phantom_grid(a, N=128)
-    N = len(x)
-    mid = N // 2
-
-    fig = make_subplots(
-        rows=1,
-        cols=3,
-        subplot_titles=["z = 0.15a slice", "y = 0 slice", "x = 0 slice"],
-        horizontal_spacing=0.06,
-    )
-    colorscale = [
-        [0.0, "#2166ac"],
-        [0.35, "#67a9cf"],
-        [0.5, "#f7f7f7"],
-        [0.65, "#ef8a62"],
-        [0.85, "#b2182b"],
-        [1.0, "#67001f"],
-    ]
-    zmin, zmax = -0.05, 0.18
-
-    # z = 0.15a slice (xy plane, through the fibroglandular core)
-    idx_z = int(round((0.15 + 1.0) / 2.0 * (N - 1)))
-    fig.add_trace(
-        go.Heatmap(
-            z=b_vol[:, :, idx_z].T,
-            x=x,
-            y=x,
-            colorscale=colorscale,
-            zmin=zmin,
-            zmax=zmax,
-            showscale=False,
-        ),
-        row=1,
-        col=1,
-    )
-    # y=0 slice (xz plane)
-    fig.add_trace(
-        go.Heatmap(
-            z=b_vol[:, mid, :].T,
-            x=x,
-            y=x,
-            colorscale=colorscale,
-            zmin=zmin,
-            zmax=zmax,
-            showscale=False,
-        ),
-        row=1,
-        col=2,
-    )
-    # x=0 slice (yz plane)
-    fig.add_trace(
-        go.Heatmap(
-            z=b_vol[mid, :, :].T,
-            x=x,
-            y=x,
-            colorscale=colorscale,
-            zmin=zmin,
-            zmax=zmax,
-            colorbar=dict(title="b(x)", len=0.9),
-        ),
-        row=1,
-        col=3,
-    )
-
-    fig.update_layout(
-        height=350,
-        margin=dict(l=40, r=20, t=50, b=40),
-    )
-    for i in range(1, 4):
-        fig.update_xaxes(title_text="", row=1, col=i, scaleanchor=f"y{i}")
-        fig.update_yaxes(title_text="", row=1, col=i)
-    return fig
-
-
-def fig_lucka_volume():
-    """3D isosurface volume rendering of the Lucka breast phantom."""
-    a = LUCKA_SOLVE["a"]
-    b_vol, x = _build_lucka_phantom_grid(a, N=64)
-    X, Y, Z = np.meshgrid(x, x, x, indexing="ij")
-
-    fig = go.Figure()
-
-    # Skin shell (b ≈ 0.174)
-    fig.add_trace(
-        go.Isosurface(
-            x=X.ravel(),
-            y=Y.ravel(),
-            z=Z.ravel(),
-            value=b_vol.ravel(),
-            isomin=0.12,
-            isomax=0.18,
-            surface_count=2,
-            colorscale=[[0, "#d62728"], [1, "#8c1515"]],
-            showscale=False,
-            opacity=0.3,
-            caps=dict(x_show=False, y_show=False, z_show=False),
-            name="Skin (b ≈ 0.17)",
-        )
-    )
-    # Blood vessels (b ≈ 0.103)
-    fig.add_trace(
-        go.Isosurface(
-            x=X.ravel(),
-            y=Y.ravel(),
-            z=Z.ravel(),
-            value=b_vol.ravel(),
-            isomin=0.07,
-            isomax=0.11,
-            surface_count=2,
-            colorscale=[[0, "#ff7f0e"], [1, "#cc6600"]],
-            showscale=False,
-            opacity=0.5,
-            caps=dict(x_show=False, y_show=False, z_show=False),
-            name="Vessels (b ≈ 0.10)",
-        )
-    )
-    # Fibroglandular core (b ≈ 0.020)
-    fig.add_trace(
-        go.Isosurface(
-            x=X.ravel(),
-            y=Y.ravel(),
-            z=Z.ravel(),
-            value=b_vol.ravel(),
-            isomin=0.015,
-            isomax=0.025,
-            surface_count=2,
-            colorscale=[[0, "#2ca02c"], [1, "#1a6b1a"]],
-            showscale=False,
-            opacity=0.4,
-            caps=dict(x_show=False, y_show=False, z_show=False),
-            name="Fibroglandular (b ≈ 0.02)",
-        )
-    )
-    # Fat (b ≈ -0.041)
-    fig.add_trace(
-        go.Isosurface(
-            x=X.ravel(),
-            y=Y.ravel(),
-            z=Z.ravel(),
-            value=b_vol.ravel(),
-            isomin=-0.045,
-            isomax=-0.035,
-            surface_count=2,
-            colorscale=[[0, "#1f77b4"], [1, "#0d4a8a"]],
-            showscale=False,
-            opacity=0.15,
-            caps=dict(x_show=False, y_show=False, z_show=False),
-            name="Fat (b ≈ −0.04)",
-        )
-    )
-
-    fig.update_layout(
-        scene=dict(
-            xaxis_title="x",
-            yaxis_title="y",
-            zaxis_title="z",
-            aspectmode="cube",
-        ),
-        height=550,
-        margin=dict(l=10, r=10, t=40, b=10),
-        legend=dict(
-            orientation="h", yanchor="bottom", y=1.0, xanchor="center", x=0.5
-        ),
-    )
-    return fig
-
-
 # ============================================================
 # HTML generation
 # ============================================================
@@ -757,14 +246,8 @@ def main():
     ap.add_argument("--out", default="fmm_site/index.html")
     args = ap.parse_args()
 
-    def div(fig):
-        return fig.to_html(full_html=False, include_plotlyjs=False)
-
     parts = [HEAD]
 
-    # ================================================================
-    # 1. TITLE
-    # ================================================================
     parts.append(r"""
 <h1>A GPU-accelerated boundary integral solver for 3D penetrable
 Helmholtz scattering</h1>
@@ -775,9 +258,6 @@ Poincar&eacute;&ndash;Steklov solver, deployed on NVIDIA H100 (80 GB)
 via <a href="https://modal.com">Modal</a>.</em></p>
 """)
 
-    # ================================================================
-    # 2. PROBLEM FORMULATION
-    # ================================================================
     parts.append(r"""
 <h2>1. Problem formulation</h2>
 
@@ -806,9 +286,6 @@ half-width $a$, i.e.&nbsp;$\Omega = [-a,a]^3$.  The inhomogeneity
 $b(x)$ is a smooth function supported strictly inside $\Omega$.</p>
 """)
 
-    # ================================================================
-    # 3. DISCRETISATION: HPS INTERIOR
-    # ================================================================
     parts.append(r"""
 <h2>2. Interior discretisation: the HPS method</h2>
 
@@ -825,34 +302,47 @@ per leaf).  The local solution operator and DtN map are computed via the
 <em>iterated impedance-to-impedance</em> (ItI) Cayley transform,
 which is numerically stable for high-frequency problems.</p>
 
-<p>The leaf-level DtN maps are then merged pairwise up the tree in
-$L$ levels.  The final output is the global DtN operator
-$T \in \mathbb C^{n \times n}$ where $n = n_{\mathrm{bdry}}$ is the
-number of boundary degrees of freedom on $\partial\Omega$.
-The boundary is discretised with $q^2$ Gauss&ndash;Legendre nodes
-per patch, with $4^L$ patches per face and 6 faces, giving</p>
+<p>ItI maps are merged up the octree, then converted to a dense root DtN map. The boundary node count is</p>
 
 $$n_{\mathrm{bdry}} = 6 \cdot 4^L \cdot q^2.$$
 
-<p>The entire HPS factorisation is performed on GPU using JAX.  The
-dominant cost is the merge phase at $\mathcal O(p^6 \cdot 8^L)$
-operations.  The output $T$ is stored as a dense
-$n \times n$ matrix (complex128, $16\,n^2$ bytes).</p>
+<p>JAX performs the HPS factorisation; the dense complex128 root map uses $16n^2$ bytes.</p>
 
-<table>
-<tr><th>$L$</th><th>$q$</th><th>$p$</th><th>$n_{\mathrm{bdry}}$</th>
-    <th>$n_{\mathrm{int}}$</th><th>$T_{\mathrm{DtN}}$ memory</th>
-    <th>HPS time (H100)</th></tr>
-<tr><td>2</td><td>8</td><td>12</td><td>6,144</td>
-    <td>110,592</td><td>0.60 GB</td><td>12.8 s</td></tr>
-<tr><td>3</td><td>8</td><td>12</td><td>24,576</td>
-    <td>884,736</td><td>9.66 GB</td><td>58.2 s</td></tr>
-</table>
 """)
+    parts.append(
+        table_html(
+            (
+                r"$L$",
+                r"$q$",
+                r"$p$",
+                r"$n_{\mathrm{bdry}}$",
+                r"$n_{\mathrm{int}}$",
+                r"$T_{\mathrm{DtN}}$ memory",
+                r"HPS time (H100)",
+            ),
+            [
+                (
+                    r"2",
+                    r"8",
+                    r"12",
+                    r"6,144",
+                    r"110,592",
+                    r"0.60 GB",
+                    r"12.8 s",
+                ),
+                (
+                    r"3",
+                    r"8",
+                    r"12",
+                    r"24,576",
+                    r"884,736",
+                    r"9.66 GB",
+                    r"58.2 s",
+                ),
+            ],
+        )
+    )
 
-    # ================================================================
-    # 4. EXTERIOR BIE COUPLING
-    # ================================================================
     parts.append(r"""
 <h2>3. Exterior coupling: the boundary integral equation</h2>
 
@@ -901,9 +391,6 @@ are computed once per configuration $(\kappa, q, L, a)$ using
 $$S \cdot v = K^{\mathrm{smooth}}_S \cdot v + C_S \cdot v.$$
 """)
 
-    # ================================================================
-    # 5. TYPES OF EXTERIOR SOLVER
-    # ================================================================
     parts.append(r"""
 <h2>4. Types of exterior solver</h2>
 
@@ -1000,9 +487,6 @@ solve from 138.6 s (sequential matrix-free) to <b>91.6 s</b>, with
 identical solutions to the GMRES tolerance.</p>
 """)
 
-    # ================================================================
-    # 6. RESULTS: COMPARISON
-    # ================================================================
     parts.append(r"""
 <h2>5. Results</h2>
 
@@ -1013,31 +497,156 @@ tolerance $= 10^{-6}$.</p>
 
 <h3>5.1 Exterior solve times by solver type</h3>
 
-<table>
-<tr><th>solver type</th><th>$\kappa$</th><th>$L$</th>
-    <th>$n_{\mathrm{bdry}}$</th>
-    <th>GMRES time (s)</th><th>GPU memory (GB)</th>
-    <th>speedup</th></tr>
-<tr><td>CPU FMM + scipy</td><td>4.0</td><td>2</td><td>6,144</td>
-    <td>18.0</td><td>0.6 (T only)</td><td>&mdash;</td></tr>
-<tr><td>GPU dense + JAX GMRES</td><td>4.0</td><td>2</td><td>6,144</td>
-    <td>9.1</td><td>1.8</td>
-    <td>$2\times$</td></tr>
-<tr><td>GPU dense + block + Jacobi</td><td>4.0</td><td>2</td><td>6,144</td>
-    <td><b>6.07</b></td><td>1.8</td>
-    <td>$3\times$</td></tr>
-<tr><td colspan="7" style="border:none; height:0.5em;"></td></tr>
-<tr><td>CPU FMM + scipy</td><td>26.2</td><td>3</td><td>24,576</td>
-    <td>617</td><td>9.7 (T only)</td><td>&mdash;</td></tr>
-<tr><td>GPU dense + JAX GMRES</td><td>26.2</td><td>3</td><td>24,576</td>
-    <td><b>17.5</b></td><td>29.0</td>
-    <td>$35\times$</td></tr>
-<tr><td>GPU matrix-free + Jacobi</td><td>26.2</td><td>3</td><td>24,576</td>
-    <td>97.9</td><td><b>13.7</b></td>
-    <td>$6.3\times$ (53% less memory)</td></tr>
-</table>
 """)
-    parts.append('<div class="fig">' + div(fig_solver_comparison()) + "</div>")
+    parts.append(
+        table_html(
+            (
+                r"solver type",
+                r"$\kappa$",
+                r"$L$",
+                r"$n_{\mathrm{bdry}}$",
+                r"GMRES time (s)",
+                r"GPU memory (GB)",
+                r"speedup",
+            ),
+            [
+                (
+                    r"CPU FMM + scipy",
+                    r"4.0",
+                    r"2",
+                    r"6,144",
+                    r"18.0",
+                    r"0.6 (T only)",
+                    r"&mdash;",
+                ),
+                (
+                    r"GPU dense + JAX GMRES",
+                    r"4.0",
+                    r"2",
+                    r"6,144",
+                    r"9.1",
+                    r"1.8",
+                    r"$2\times$",
+                ),
+                (
+                    r"GPU dense + block + Jacobi",
+                    r"4.0",
+                    r"2",
+                    r"6,144",
+                    r"<b>6.07</b>",
+                    r"1.8",
+                    r"$3\times$",
+                ),
+                (
+                    r"CPU FMM + scipy",
+                    r"26.2",
+                    r"3",
+                    r"24,576",
+                    r"617",
+                    r"9.7 (T only)",
+                    r"&mdash;",
+                ),
+                (
+                    r"GPU dense + JAX GMRES",
+                    r"26.2",
+                    r"3",
+                    r"24,576",
+                    r"<b>17.5</b>",
+                    r"29.0",
+                    r"$35\times$",
+                ),
+                (
+                    r"GPU matrix-free + Jacobi",
+                    r"26.2",
+                    r"3",
+                    r"24,576",
+                    r"97.9",
+                    r"<b>13.7</b>",
+                    r"$6.3\times$ (53% less memory)",
+                ),
+            ],
+        )
+    )
+    # Solver comparison
+    fig = go.Figure()
+
+    # L=2 group
+    fig.add_trace(
+        go.Bar(
+            x=["L=2<br>(n=6,144)"],
+            y=[MODAL_SMOKE_CPU["gmres_time"]],
+            name="CPU FMM + scipy GMRES",
+            marker_color="#d62728",
+            text=["18.0s"],
+            textposition="outside",
+        )
+    )
+    fig.add_trace(
+        go.Bar(
+            x=["L=2<br>(n=6,144)"],
+            y=[MODAL_L2_GPU["gmres_time"]],
+            name="GPU dense matvec + JAX GMRES",
+            marker_color="#ff7f0e",
+            text=["9.1s"],
+            textposition="outside",
+        )
+    )
+    fig.add_trace(
+        go.Bar(
+            x=["L=2<br>(n=6,144)"],
+            y=[MODAL_ADV_L2_BLOCK["gmres_time"]],
+            name="GPU dense + block GMRES + Jacobi",
+            marker_color="#2ca02c",
+            text=["6.07s"],
+            textposition="outside",
+        )
+    )
+
+    # L=3 group
+    fig.add_trace(
+        go.Bar(
+            x=["L=3<br>(n=24,576)"],
+            y=[MODAL_HF_CPU["gmres_time"]],
+            name="CPU FMM + scipy GMRES",
+            marker_color="#d62728",
+            text=["617s"],
+            textposition="outside",
+            showlegend=False,
+        )
+    )
+    fig.add_trace(
+        go.Bar(
+            x=["L=3<br>(n=24,576)"],
+            y=[MODAL_L3_GPU["gmres_time"]],
+            name="GPU dense matvec + JAX GMRES",
+            marker_color="#ff7f0e",
+            text=["17.5s"],
+            textposition="outside",
+            showlegend=False,
+        )
+    )
+    fig.add_trace(
+        go.Bar(
+            x=["L=3<br>(n=24,576)"],
+            y=[MODAL_ADV_L3_MATFREE["gmres_time"]],
+            name="GPU matrix-free + Jacobi",
+            marker_color="#1f77b4",
+            text=["97.9s"],
+            textposition="outside",
+        )
+    )
+
+    fig.update_layout(
+        barmode="group",
+        yaxis_title="GMRES solve time (s)",
+        yaxis_type="log",
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5
+        ),
+        margin=dict(l=50, r=20, t=80, b=40),
+        height=500,
+    )
+    parts.append('<div class="fig">' + figure_html(fig) + "</div>")
 
     parts.append(r"""
 <h3>5.2 Memory trade-off at $L = 3$</h3>
@@ -1048,20 +657,53 @@ $T$ (9.7 GB) plus the sparse near-field corrections in BCOO format
 (4.0 GB for indices and data), totalling 13.7 GB &mdash; a factor of
 $2.1\times$ reduction.</p>
 """)
-    parts.append('<div class="fig">' + div(fig_memory_comparison()) + "</div>")
+    # Memory comparison
+    labels = [
+        "Dense path<br>(K_S + K_D + T_DtN)",
+        "Matrix-free path<br>(sparse NF + T_DtN)",
+    ]
+    mems = [
+        MODAL_L3_GPU["kernel_mem_gb"],
+        MODAL_ADV_L3_MATFREE["total_mem_gb"],
+    ]
+
+    fig = go.Figure(
+        go.Bar(
+            x=labels,
+            y=mems,
+            text=[f"{m:.1f} GB" for m in mems],
+            textposition="outside",
+            marker_color=["#d62728", "#2ca02c"],
+            width=0.5,
+        )
+    )
+    fig.add_hline(
+        y=80,
+        line=dict(color="#999", dash="dash", width=2),
+        annotation_text="H100 80 GB limit",
+        annotation_position="top right",
+    )
+    fig.update_layout(
+        yaxis_title="GPU memory (GB)",
+        margin=dict(l=50, r=20, t=40, b=40),
+        height=380,
+    )
+    parts.append('<div class="fig">' + figure_html(fig) + "</div>")
 
     parts.append(r"""
 <h3>5.3 Total solve times (HPS + exterior)</h3>
 
-<table>
-<tr><th>$\kappa$</th><th>$L$</th><th>solver</th>
-    <th>HPS (s)</th><th>GMRES (s)</th><th>total (s)</th></tr>
-<tr><td>4.0</td><td>2</td><td>dense + block + Jacobi</td>
-    <td>11.7</td><td>6.1</td><td><b>17.8</b></td></tr>
-<tr><td>26.2</td><td>3</td><td>GPU dense</td>
-    <td>58.2</td><td>17.5</td><td><b>75.7</b></td></tr>
-<tr><td>26.2</td><td>3</td><td>matrix-free + Jacobi</td>
-    <td>54.9</td><td>97.9</td><td><b>152.8</b></td></tr>
+<table><tr><th>$\kappa$</th><th>$L$</th><th>solver</th><th>HPS (s)</th><th>GMRES (s)</th><th>total (s)</th></tr>
+""")
+    for row in (
+        ("4.0", "2", "dense + block + Jacobi", "11.7", "6.1", "<b>17.8</b>"),
+        ("26.2", "3", "GPU dense", "58.2", "17.5", "<b>75.7</b>"),
+        ("26.2", "3", "matrix-free + Jacobi", "54.9", "97.9", "<b>152.8</b>"),
+    ):
+        parts.append(
+            "<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>"
+        )
+    parts.append(r"""
 </table>
 
 <div class="note">
@@ -1077,9 +719,6 @@ dense + block GMRES at $L \le 2$; matrix-free + block GMRES
 </div>
 """)
 
-    # ================================================================
-    # 7. MAXIMUM ACHIEVABLE KAPPA
-    # ================================================================
     parts.append(r"""
 <h2>6. Resolution limits on a single GPU</h2>
 
@@ -1101,25 +740,42 @@ dense + block GMRES at $L \le 2$; matrix-free + block GMRES
 
 <p>The following table shows feasible configurations:</p>
 
-<table>
-<tr><th>$L$</th><th>$q$</th><th>$n_{\mathrm{bdry}}$</th>
-    <th>$T_{\mathrm{DtN}}$ (GB)</th>
-    <th>max $\kappa a$</th><th>fits 80 GB?</th></tr>
-<tr><td>2</td><td>8</td><td>6,144</td>
-    <td>0.60</td><td>33.5</td><td class="pass">yes</td></tr>
-<tr><td>3</td><td>8</td><td>24,576</td>
-    <td>9.66</td><td>33.5</td>
-    <td class="pass">yes (tested, $\kappa a = 32.7$)</td></tr>
-<tr><td>3</td><td>10</td><td>38,400</td>
-    <td>23.6</td><td>41.9</td><td class="pass">yes</td></tr>
-<tr><td>3</td><td>12</td><td>55,296</td>
-    <td>48.9</td><td>50.3</td>
-    <td class="warn">marginal (HPS peak ~54 GB)</td></tr>
-<tr><td>3</td><td>14</td><td>75,264</td>
-    <td>90.6</td><td>58.6</td><td class="warn">no</td></tr>
-<tr><td>4</td><td>8</td><td>98,304</td>
-    <td>154.6</td><td>67.0</td><td class="warn">no</td></tr>
-</table>
+""")
+    parts.append(
+        table_html(
+            (
+                r"$L$",
+                r"$q$",
+                r"$n_{\mathrm{bdry}}$",
+                r"$T_{\mathrm{DtN}}$ (GB)",
+                r"max $\kappa a$",
+                r"fits 80 GB?",
+            ),
+            [
+                (r"2", r"8", r"6,144", r"0.60", r"33.5", r"yes"),
+                (
+                    r"3",
+                    r"8",
+                    r"24,576",
+                    r"9.66",
+                    r"33.5",
+                    r"yes (tested, $\kappa a = 32.7$)",
+                ),
+                (r"3", r"10", r"38,400", r"23.6", r"41.9", r"yes"),
+                (
+                    r"3",
+                    r"12",
+                    r"55,296",
+                    r"48.9",
+                    r"50.3",
+                    r"marginal (HPS peak ~54 GB)",
+                ),
+                (r"3", r"14", r"75,264", r"90.6", r"58.6", r"no"),
+                (r"4", r"8", r"98,304", r"154.6", r"67.0", r"no"),
+            ],
+        )
+    )
+    parts.append(r"""
 
 <div class="highlight">
 <b>Practical limit:</b> $\kappa a \approx 33$&ndash;$50$ on a single H100
@@ -1129,11 +785,64 @@ compression of the DtN operator (e.g.&nbsp;$\mathcal H$-matrix or
 butterfly factorisation).
 </div>
 """)
-    parts.append('<div class="fig">' + div(fig_feasibility_kappa()) + "</div>")
+    # Feasibility kappa
+    configs = [
+        (2, 8, "L=2, q=8"),
+        (3, 8, "L=3, q=8"),
+        (3, 10, "L=3, q=10"),
+        (3, 12, "L=3, q=12"),
+        (3, 14, "L=3, q=14"),
+        (4, 8, "L=4, q=8"),
+    ]
+    kas, mems, labels, colors = [], [], [], []
+    for L, q, lab in configs:
+        n = 6 * (4**L) * q**2
+        T_mem = n**2 * 16 / 1e9
+        ka_max = np.pi * (2**L) * q / 6.0
+        kas.append(ka_max)
+        mems.append(T_mem)
+        labels.append(lab)
+        colors.append("#2ca02c" if T_mem < 80 else "#d62728")
 
-    # ================================================================
-    # 8. APPLICATION: BREAST ULTRASOUND (LUCKA ET AL.)
-    # ================================================================
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=kas,
+            y=mems,
+            mode="markers+text",
+            text=labels,
+            textposition="top center",
+            marker=dict(size=14, color=colors),
+            showlegend=False,
+        )
+    )
+    fig.add_hline(
+        y=80,
+        line=dict(color="#999", dash="dash", width=2),
+        annotation_text="H100 80 GB",
+        annotation_position="top right",
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=[26.18 * 1.25],
+            y=[9.66],
+            mode="markers",
+            name="Tested (L=3, q=8, kappa*a=32.7)",
+            marker=dict(size=18, color="#2ca02c", symbol="star"),
+        )
+    )
+    fig.update_layout(
+        xaxis_title="max kappa * a (6 points-per-wavelength criterion)",
+        yaxis_title="T_DtN memory (GB)",
+        yaxis_type="log",
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5
+        ),
+        margin=dict(l=50, r=20, t=60, b=40),
+        height=460,
+    )
+    parts.append('<div class="fig">' + figure_html(fig) + "</div>")
+
     parts.append(r"""
 <h2>7. Application: breast ultrasound imaging (Lucka et al.)</h2>
 
@@ -1157,27 +866,27 @@ $b(x) = 1 - (c_{\mathrm{bg}}/c_0(x))^2$.</p>
 <p>The relevant sound speeds and corresponding coefficients for an
 anatomically realistic breast phantom are:</p>
 
-<table>
-<tr><th>tissue</th><th>$c_0$ (m/s)</th>
-    <th>$n = c_{\mathrm{bg}}/c_0$</th>
-    <th>$b = 1 - n^2$</th></tr>
-<tr><td>water (background)</td><td>1500</td>
-    <td>1.000</td><td>0.000</td></tr>
-<tr><td>fat</td><td>1470</td>
-    <td>1.020</td><td>&minus;0.041</td></tr>
-<tr><td>fibro-glandular</td><td>1515</td>
-    <td>0.990</td><td>+0.020</td></tr>
-<tr><td>blood vessels</td><td>1584</td>
-    <td>0.947</td><td>+0.103</td></tr>
-<tr><td>skin</td><td>1650</td>
-    <td>0.909</td><td>+0.174</td></tr>
-</table>
+""")
+    parts.append(
+        table_html(
+            (
+                r"tissue",
+                r"$c_0$ (m/s)",
+                r"$n = c_{\mathrm{bg}}/c_0$",
+                r"$b = 1 - n^2$",
+            ),
+            [
+                (r"water (background)", r"1500", r"1.000", r"0.000"),
+                (r"fat", r"1470", r"1.020", r"&minus;0.041"),
+                (r"fibro-glandular", r"1515", r"0.990", r"+0.020"),
+                (r"blood vessels", r"1584", r"0.947", r"+0.103"),
+                (r"skin", r"1650", r"0.909", r"+0.174"),
+            ],
+        )
+    )
+    parts.append(r"""
 
-<p>All contrasts satisfy $|b| \le 0.18$, which is mild.  The BIE
-formulation converges rapidly for such low-contrast inclusions;
-GMRES typically requires $\lesssim 50$ iterations.  By comparison,
-our synthetic dataset uses $|b|$ up to $0.5$, so the breast problem
-lies well within the regime where the solver has been validated.</p>
+<p>These coefficients define a synthetic tissue model, not a validated anatomical reconstruction. Low contrast alone does not establish discretisation accuracy.</p>
 
 <h3>7.2 Frequency&ndash;wavenumber mapping</h3>
 
@@ -1216,38 +925,73 @@ which determines the discretisation requirements:</p>
     parts.append("</table>\n")
 
     parts.append(r"""
-<div class="highlight">
-<b>Conclusion:</b> frequencies up to <b>150 kHz</b>
-($\kappa a \approx 34.6$) are directly feasible and have been
-validated at the equivalent non-dimensional parameters.
-At 200 kHz ($\kappa a \approx 46$) the problem is tight but
-potentially solvable with $q = 12$.  Above 250 kHz, the
-$T_{\mathrm{DtN}}$ matrix exceeds single-GPU memory.
-Their target resolution of 1.5 MHz ($\kappa a \approx 346$)
-requires fundamentally different algorithmic infrastructure
-(hierarchical compression of $T$, or multi-GPU distribution).
-</div>
+<div class="highlight">The table estimates memory and nominal sampling requirements, not receiver-field accuracy. Frequencies around 150 kHz ($\kappa a\approx34.6$) overlap the demonstrated algebraic solves. The 1.5 MHz target ($\kappa a\approx346$) exceeds the dense root-map budget; FFT volume-integral methods are the primary direction for further comparison.</div>
 
 <h3>7.3 Relevance to full-waveform inversion</h3>
 
-<p>The Lucka et al.&nbsp;FWI pipeline uses a multi-scale approach,
-beginning at coarse spatial resolutions ($\Delta x = 2$&ndash;$4$ mm,
-corresponding to $f \approx 100$&ndash;$200$ kHz) and progressively
-refining.  Our solver is directly applicable to these
-<em>lowest-frequency initialisations</em> of the inversion &mdash;
-providing a high-accuracy, spectrally convergent forward model at
-a cost of $\sim 75$ s per frequency per source configuration.
-For a 20-frequency sweep over 50&ndash;200 kHz with the full
-1024-source hemispherical array (batched as simultaneous RHS),
-the total compute would be approximately 25 minutes on a single H100.</p>
+<p>These four-source timings do not establish the cost or accuracy of a full inversion or a 1024-source acquisition.</p>
 """)
-    parts.append(
-        '<div class="fig">' + div(fig_breast_freq_mapping()) + "</div>"
-    )
+    # Breast freq mapping
+    c_bg = 1500.0
+    a_phys = 0.055
+    freqs = [50, 100, 150, 200, 250, 500]
+    kas, t_mems, labels = [], [], []
+    for f in freqs:
+        kappa = 2 * np.pi * f * 1e3 / c_bg
+        ka = kappa * a_phys
+        L = max(1, int(np.ceil(np.log2(max(1, 6 * ka / (np.pi * 8))))))
+        q = 8
+        ppw = np.pi * (2**L) * q / ka
+        if ppw < 6 and L <= 3:
+            q = int(np.ceil(6 * ka / (np.pi * 2**L)))
+        n = 6 * (4**L) * q**2
+        T_mem = n**2 * 16 / 1e9
+        kas.append(ka)
+        t_mems.append(T_mem)
+        labels.append(f"{f} kHz")
 
-    # ================================================================
-    # 8.5 LUCKA FORWARD SOLVE DEMONSTRATION
-    # ================================================================
+    fig = go.Figure()
+    feasible = [m < 80 for m in t_mems]
+    fig.add_trace(
+        go.Scatter(
+            x=[kas[i] for i in range(len(kas)) if feasible[i]],
+            y=[t_mems[i] for i in range(len(kas)) if feasible[i]],
+            mode="markers+text",
+            text=[labels[i] for i in range(len(kas)) if feasible[i]],
+            textposition="top center",
+            marker=dict(size=14, color="#2ca02c"),
+            name="Feasible (single H100)",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=[kas[i] for i in range(len(kas)) if not feasible[i]],
+            y=[t_mems[i] for i in range(len(kas)) if not feasible[i]],
+            mode="markers+text",
+            text=[labels[i] for i in range(len(kas)) if not feasible[i]],
+            textposition="top center",
+            marker=dict(size=14, color="#d62728"),
+            name="OOM (single GPU)",
+        )
+    )
+    fig.add_hline(
+        y=80,
+        line=dict(color="#999", dash="dash", width=2),
+        annotation_text="80 GB limit",
+        annotation_position="top right",
+    )
+    fig.update_layout(
+        xaxis_title="kappa * a (breast geometry, a = 55 mm)",
+        yaxis_title="T_DtN memory (GB)",
+        yaxis_type="log",
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5
+        ),
+        margin=dict(l=50, r=20, t=60, b=40),
+        height=460,
+    )
+    parts.append('<div class="fig">' + figure_html(fig) + "</div>")
+
     s = LUCKA_SOLVE
     parts.append(rf"""
 <h3>7.4 Forward solve demonstration: $\kappa = {s["kappa"]:g}$</h3>
@@ -1258,13 +1002,13 @@ using the tissue coefficients from Table&nbsp;7.1.
 The phantom is a <em>pendant hemispherical breast</em>, matching the
 Lucka et al.\ scanner geometry: a hemisphere of radius $R = 0.8a$
 hanging below a chest-wall plane at $z_0 = 0.55a$, built from smooth
-$C^4$ bump functions with a smooth cutoff ramp at the flat face.
+$C^3$ polynomial ramps with a cutoff at the flat face.
 A skin shell wraps the curved surface at $|x - c| \approx 0.9R$
 (hemisphere centre $c = (0,0,z_0)$), a fat bulk fills
 $|x - c| < 0.85R$, a fibroglandular sphere of radius $0.35R$ sits
 below the chest wall, and three blood-vessel cylinders
-(radius $0.05R$) thread the interior.  The scattering potential
-$b(x)$ remains smooth and compactly supported inside the cube.</p>
+(radius $0.05R$) thread the interior.  The potential is compactly supported, but thresholded tissue overrides
+introduce jumps; these legacy runs do not certify field accuracy.</p>
 
 <h4>Scattering potential $b(x)$: orthogonal slices</h4>
 
@@ -1272,7 +1016,84 @@ $b(x)$ remains smooth and compactly supported inside the cube.</p>
 computational cube $[-a,a]^3$, showing the scattering potential
 $b(x) = 1 - n^2(x)$:</p>
 """)
-    parts.append('<div class="fig">' + div(fig_lucka_slices()) + "</div>")
+    # Lucka slices
+    from plotly.subplots import make_subplots
+
+    a = LUCKA_SOLVE["a"]
+    x = np.linspace(-a, a, 128)
+    pts = np.stack(np.meshgrid(x, x, x, indexing="ij"), axis=-1)
+    b_vol = build_lucka_phantom_hemisphere(pts, a)
+    N = len(x)
+    mid = N // 2
+
+    fig = make_subplots(
+        rows=1,
+        cols=3,
+        subplot_titles=["z = 0.15a slice", "y = 0 slice", "x = 0 slice"],
+        horizontal_spacing=0.06,
+    )
+    colorscale = [
+        [0.0, "#2166ac"],
+        [0.35, "#67a9cf"],
+        [0.5, "#f7f7f7"],
+        [0.65, "#ef8a62"],
+        [0.85, "#b2182b"],
+        [1.0, "#67001f"],
+    ]
+    zmin, zmax = -0.05, 0.18
+
+    # z = 0.15a slice (xy plane, through the fibroglandular core)
+    idx_z = int(round((0.15 + 1.0) / 2.0 * (N - 1)))
+    fig.add_trace(
+        go.Heatmap(
+            z=b_vol[:, :, idx_z].T,
+            x=x,
+            y=x,
+            colorscale=colorscale,
+            zmin=zmin,
+            zmax=zmax,
+            showscale=False,
+        ),
+        row=1,
+        col=1,
+    )
+    # y=0 slice (xz plane)
+    fig.add_trace(
+        go.Heatmap(
+            z=b_vol[:, mid, :].T,
+            x=x,
+            y=x,
+            colorscale=colorscale,
+            zmin=zmin,
+            zmax=zmax,
+            showscale=False,
+        ),
+        row=1,
+        col=2,
+    )
+    # x=0 slice (yz plane)
+    fig.add_trace(
+        go.Heatmap(
+            z=b_vol[mid, :, :].T,
+            x=x,
+            y=x,
+            colorscale=colorscale,
+            zmin=zmin,
+            zmax=zmax,
+            colorbar=dict(title="b(x)", len=0.9),
+        ),
+        row=1,
+        col=3,
+    )
+
+    fig.update_layout(
+        height=350,
+        margin=dict(l=40, r=20, t=50, b=40),
+    )
+    for i in range(1, 4):
+        fig.update_xaxes(title_text="", row=1, col=i, scaleanchor=f"y{i}")
+        fig.update_yaxes(title_text="", row=1, col=i)
+    parts.append('<div class="fig">' + figure_html(fig) + "</div>")
     parts.append(r"""
 <p>Blue regions ($b < 0$): fat (sound speed lower than background).
 Red regions ($b > 0$): skin, blood vessels, fibroglandular tissue
@@ -1285,40 +1106,152 @@ Red regions ($b > 0$): skin, blood vessels, fibroglandular tissue
 layers.  Semi-transparent outer shell = skin; orange tubes =
 blood vessels; green core = fibroglandular tissue; blue fill = fat.</p>
 """)
-    parts.append('<div class="fig">' + div(fig_lucka_volume()) + "</div>")
-    parts.append(rf"""
+    # Lucka volume
+    a = LUCKA_SOLVE["a"]
+    x = np.linspace(-a, a, 64)
+    pts = np.stack(np.meshgrid(x, x, x, indexing="ij"), axis=-1)
+    b_vol = build_lucka_phantom_hemisphere(pts, a)
+    (X, Y, Z) = np.meshgrid(x, x, x, indexing="ij")
+
+    fig = go.Figure()
+
+    # Skin shell (b ≈ 0.174)
+    fig.add_trace(
+        go.Isosurface(
+            x=X.ravel(),
+            y=Y.ravel(),
+            z=Z.ravel(),
+            value=b_vol.ravel(),
+            isomin=0.12,
+            isomax=0.18,
+            surface_count=2,
+            colorscale=[[0, "#d62728"], [1, "#8c1515"]],
+            showscale=False,
+            opacity=0.3,
+            caps=dict(x_show=False, y_show=False, z_show=False),
+            name="Skin (b ≈ 0.17)",
+        )
+    )
+    # Blood vessels (b ≈ 0.103)
+    fig.add_trace(
+        go.Isosurface(
+            x=X.ravel(),
+            y=Y.ravel(),
+            z=Z.ravel(),
+            value=b_vol.ravel(),
+            isomin=0.07,
+            isomax=0.11,
+            surface_count=2,
+            colorscale=[[0, "#ff7f0e"], [1, "#cc6600"]],
+            showscale=False,
+            opacity=0.5,
+            caps=dict(x_show=False, y_show=False, z_show=False),
+            name="Vessels (b ≈ 0.10)",
+        )
+    )
+    # Fibroglandular core (b ≈ 0.020)
+    fig.add_trace(
+        go.Isosurface(
+            x=X.ravel(),
+            y=Y.ravel(),
+            z=Z.ravel(),
+            value=b_vol.ravel(),
+            isomin=0.015,
+            isomax=0.025,
+            surface_count=2,
+            colorscale=[[0, "#2ca02c"], [1, "#1a6b1a"]],
+            showscale=False,
+            opacity=0.4,
+            caps=dict(x_show=False, y_show=False, z_show=False),
+            name="Fibroglandular (b ≈ 0.02)",
+        )
+    )
+    # Fat (b ≈ -0.041)
+    fig.add_trace(
+        go.Isosurface(
+            x=X.ravel(),
+            y=Y.ravel(),
+            z=Z.ravel(),
+            value=b_vol.ravel(),
+            isomin=-0.045,
+            isomax=-0.035,
+            surface_count=2,
+            colorscale=[[0, "#1f77b4"], [1, "#0d4a8a"]],
+            showscale=False,
+            opacity=0.15,
+            caps=dict(x_show=False, y_show=False, z_show=False),
+            name="Fat (b ≈ −0.04)",
+        )
+    )
+
+    fig.update_layout(
+        scene=dict(
+            xaxis_title="x",
+            yaxis_title="y",
+            zaxis_title="z",
+            aspectmode="cube",
+        ),
+        height=550,
+        margin=dict(l=10, r=10, t=40, b=10),
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.0, xanchor="center", x=0.5
+        ),
+    )
+    parts.append('<div class="fig">' + figure_html(fig) + "</div>")
+    parts.append(r"""
 <h4>Solve results</h4>
 
-<table>
-<tr><th>parameter</th><th>value</th></tr>
-<tr><td>$\kappa$</td><td>{s["kappa"]:g}</td></tr>
-<tr><td>$\kappa a$</td><td>{s["kappa_a"]}</td></tr>
-<tr><td>$L$, $q$, $p$</td><td>{s["L"]}, {s["q"]}, {s["p"]}</td></tr>
-<tr><td>$n_{{\mathrm{{bdry}}}}$</td><td>{s["n_bdry"]:,}</td></tr>
-<tr><td>geometry</td><td>pendant hemisphere ($R = 0.8a$, chest wall $z_0 = 0.55a$)</td></tr>
-<tr><td>tissue contrast $b(x)$</td>
-    <td>$[{s["b_min"]:.3f},\; +{s["b_max"]:.3f}]$</td></tr>
-<tr><td>incident fields</td><td>{s["n_src"]} plane waves (Fibonacci $S^2$)</td></tr>
-<tr><td>solver</td><td>matrix-free + <b>block GMRES</b> + Jacobi, restart = {s["restart"]}</td></tr>
-<tr><td>HPS time</td><td>{s["hps_time"]:.1f} s</td></tr>
-<tr><td>GMRES time</td><td>{s["gmres_time"]:.1f} s
-    (sequential GMRES: {s["gmres_time_seq"]:.1f} s, $1.5\times$ slower)</td></tr>
-<tr><td><b>total wall time</b></td><td><b>{s["total_time"]:.1f} s</b>
-    (sequential: {s["total_time_seq"]:.1f} s)</td></tr>
-<tr><td>converged</td><td class="pass">yes (all {s["n_src"]} RHS)</td></tr>
-<tr><td>$\|u^s\|_{{\infty}}$</td><td>{s["uscat_max"]:.3f}</td></tr>
-<tr><td>GPU memory</td><td>{s["total_mem_gb"]:.2f} GB</td></tr>
-</table>
+""")
+    parts.append(
+        table_html(
+            (r"parameter", r"value"),
+            [
+                (r"$\kappa$", rf"""{s["kappa"]:g}"""),
+                (r"$\kappa a$", rf"""{s["kappa_a"]}"""),
+                (r"$L$, $q$, $p$", rf"""{s["L"]}, {s["q"]}, {s["p"]}"""),
+                (r"$n_{\mathrm{bdry}}$", rf"""{s["n_bdry"]:,}"""),
+                (
+                    r"geometry",
+                    r"pendant hemisphere ($R = 0.8a$, chest wall $z_0 = 0.55a$)",
+                ),
+                (
+                    r"tissue contrast $b(x)$",
+                    rf"""$[{s["b_min"]:.3f},\; +{s["b_max"]:.3f}]$""",
+                ),
+                (
+                    r"incident fields",
+                    rf"""{s["n_src"]} plane waves (Fibonacci $S^2$)""",
+                ),
+                (
+                    r"solver",
+                    rf"""matrix-free + <b>block GMRES</b> + Jacobi, restart = {s["restart"]}""",
+                ),
+                (r"HPS time", rf"""{s["hps_time"]:.1f} s"""),
+                (
+                    r"GMRES time",
+                    rf"""{s["gmres_time"]:.1f} s (sequential GMRES: {s["gmres_time_seq"]:.1f} s, $1.5\times$ slower)""",
+                ),
+                (
+                    r"<b>total wall time</b>",
+                    rf"""<b>{s["total_time"]:.1f} s</b> (sequential: {s["total_time_seq"]:.1f} s)""",
+                ),
+                (r"converged", rf"""yes (all {s["n_src"]} RHS)"""),
+                (r"$\|u^s\|_{\infty}$", rf"""{s["uscat_max"]:.3f}"""),
+                (r"GPU memory", rf"""{s["total_mem_gb"]:.2f} GB"""),
+            ],
+        )
+    )
+    parts.append(rf"""
 
 <div class="highlight">
-<b>Key finding:</b> the Lucka breast problem at $\kappa = {s["kappa"]:g}$
+<b>Recorded solve:</b> the legacy tissue system at $\kappa = {s["kappa"]:g}$
 ($\kappa a = {s["kappa_a"]}$, equivalent to $f \approx 150$ kHz for a
 55 mm breast), posed on the pendant hemispherical geometry of the
-scanner, is <em>directly solvable</em> on a single H100 in
+scanner, reached the algebraic stopping criterion on a single H100 in
 <b>{s["total_time"]:.0f} s</b> using the matrix-free solver with
-Jacobi preconditioning.  The mild tissue contrast ($|b| \le 0.18$)
-ensures rapid GMRES convergence once a sufficiently large Krylov
-subspace (restart = {s["restart"]}) is used.
+Jacobi preconditioning and restart = {s["restart"]}.
+The mild tissue contrast ($|b| \le 0.18$) does not by itself establish
+field accuracy or guarantee convergence for other configurations.
 </div>
 
 <p class="note"><b>Note:</b> the dense BIE solver
@@ -1328,9 +1261,6 @@ factorisation phase (peak 54 GB).  The matrix-free path avoids
 storing $K_S$, $K_D$ entirely, requiring only 13.7 GB total.</p>
 """)
 
-    # ================================================================
-    # 9. VALIDATION
-    # ================================================================
     v = VAL_L2
     parts.append(rf"""
 <h2>8. Validation</h2>
@@ -1341,46 +1271,91 @@ $n_{{\mathrm{{bdry}}}} = {v["n_bdry"]:,}$), where both approaches are
 feasible.  The near-field correction involves {v["n_near_pairs"]:,}
 patch pairs ({v["sparsity_pct"]:.1f}% of all pairs).</p>
 
-<table>
-<tr><th>quantity</th><th>value</th></tr>
-<tr><td>$S$ matvec relative error (GPU vs dense)</td>
-    <td>${v["S_matvec_rel_err"]:.2e}$</td></tr>
-<tr><td>$D$ matvec relative error (GPU vs dense)</td>
-    <td>${v["D_matvec_rel_err"]:.2e}$</td></tr>
-<tr><td>BIE solution relative $L^2$ error</td>
-    <td>${v["rel_L2_err"]:.2e}$</td></tr>
-<tr><td>BIE solution max pointwise error</td>
-    <td>${v["max_abs_err"]:.2e}$</td></tr>
-<tr><td>$\|u^s\|_{{\infty}}$ (both solvers)</td>
-    <td>${v["uscat_max_dense"]:.4e}$</td></tr>
-</table>
+""")
+    parts.append(
+        table_html(
+            (r"quantity", r"value"),
+            [
+                (
+                    r"$S$ matvec relative error (GPU vs dense)",
+                    rf"""${v["S_matvec_rel_err"]:.2e}$""",
+                ),
+                (
+                    r"$D$ matvec relative error (GPU vs dense)",
+                    rf"""${v["D_matvec_rel_err"]:.2e}$""",
+                ),
+                (
+                    r"BIE solution relative $L^2$ error",
+                    rf"""${v["rel_L2_err"]:.2e}$""",
+                ),
+                (
+                    r"BIE solution max pointwise error",
+                    rf"""${v["max_abs_err"]:.2e}$""",
+                ),
+                (
+                    r"$\|u^s\|_{\infty}$ (both solvers)",
+                    rf"""${v["uscat_max_dense"]:.4e}$""",
+                ),
+            ],
+        )
+    )
+    parts.append(r"""
 
-<p>Agreement is to $\sim 10^{{-9}}$ in relative $L^2$, confirming that
+<p>Agreement is to $\sim 10^{-9}$ in relative $L^2$, confirming that
 the GPU solver introduces no loss of accuracy relative to a direct
 factorisation.</p>
 """)
-    parts.append('<div class="fig">' + div(fig_validation_bars()) + "</div>")
+    # Validation bars
+    labels = [
+        "S matvec\nrel err",
+        "D matvec\nrel err",
+        "BIE solve\nrel L2 err",
+        "BIE solve\nmax abs err",
+    ]
+    vals = [
+        VAL_L2["S_matvec_rel_err"],
+        VAL_L2["D_matvec_rel_err"],
+        VAL_L2["rel_L2_err"],
+        VAL_L2["max_abs_err"],
+    ]
+    fig = go.Figure(
+        go.Bar(
+            x=labels,
+            y=vals,
+            text=[f"{v:.2e}" for v in vals],
+            textposition="outside",
+            marker_color=["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"],
+        )
+    )
+    fig.update_layout(
+        yaxis_title="error",
+        yaxis_type="log",
+        margin=dict(l=50, r=20, t=20, b=80),
+        height=360,
+    )
+    parts.append('<div class="fig">' + figure_html(fig) + "</div>")
 
-    # ================================================================
-    # 10. PARAMETERS & REPRODUCTION
-    # ================================================================
     parts.append(r"""
 <h2>9. Discretisation parameters and reproduction</h2>
 
-<table>
-<tr><th>parameter</th><th>symbol</th><th>value</th></tr>
-<tr><td>Gauss&ndash;Legendre nodes per patch edge</td>
-    <td>$q$</td><td>8</td></tr>
-<tr><td>interior Chebyshev order</td><td>$p$</td><td>12</td></tr>
-<tr><td>cube half-width</td><td>$a$</td><td>1.25</td></tr>
-<tr><td>GMRES relative tolerance</td><td></td><td>$10^{-6}$</td></tr>
-<tr><td>GMRES restart length</td><td></td><td>50</td></tr>
-<tr><td>GMRES max iterations</td><td></td><td>200</td></tr>
-<tr><td>near-field ratio (patch widths)</td><td></td><td>4.0</td></tr>
-<tr><td>simultaneous incident fields</td>
-    <td>$n_{\mathrm{src}}$</td><td>4</td></tr>
-<tr><td>GPU hardware</td><td></td><td>NVIDIA H100 80 GB (Modal)</td></tr>
-</table>
+""")
+    parts.append(
+        table_html(
+            (r"parameter", r"symbol", r"value"),
+            [
+                (r"Gauss&ndash;Legendre nodes per patch edge", r"$q$", r"8"),
+                (r"interior Chebyshev order", r"$p$", r"12"),
+                (r"cube half-width", r"$a$", r"1.25"),
+                (r"GMRES relative tolerance", r"", r"$10^{-6}$"),
+                (r"GMRES restart length", r"", r"50"),
+                (r"GMRES max iterations", r"", r"200"),
+                (r"near-field ratio (patch widths)", r"", r"4.0"),
+                (r"simultaneous incident fields", r"$n_{\mathrm{src}}$", r"4"),
+                (r"GPU hardware", r"", r"NVIDIA H100 80 GB (Modal)"),
+            ],
+        )
+    )
+    parts.append(r"""
 
 <h3>Reproduction commands</h3>
 <pre><code># L=2 smoke test (kappa=4, ~22s total)

@@ -128,3 +128,138 @@ def fibonacci_cap_points(
     y = sensor_radius * cos_t
     z = sensor_radius * sin_t * np.sin(phi)
     return np.stack([x, y, z], axis=-1)
+
+
+def build_lucka_phantom(int_pts, a):
+    """Spherical legacy tissue potential, preserving thresholded layers.
+    Polynomial ramps vanish to third order at their support edge, but
+    threshold-based tissue overrides can introduce internal jumps.
+    This geometry alone is not a field-accuracy validation.
+    """
+    b_fat = -0.041
+    b_fibro = 0.020
+    b_vessel = 0.103
+    b_skin = 0.174
+
+    shape = int_pts.shape
+    pts = int_pts.reshape(-1, 3)
+    r = np.linalg.norm(pts, axis=-1)
+
+    t = np.abs(r - 0.9 * a) / (0.08 * a)
+    skin_mask = np.where(t < 1.0, (1.0 - t**2) ** 4, 0.0)
+
+    fat_mask = np.where(r < 0.75 * a, 1.0, 0.0)
+    trans = (r - 0.75 * a) / (0.10 * a)
+    trans = np.clip(trans, 0, 1)
+    fat_mask = np.where(
+        (r >= 0.75 * a) & (r < 0.85 * a), (1.0 - trans**2) ** 4, fat_mask
+    )
+
+    fibro_mask = np.where(r < 0.30 * a, 1.0, 0.0)
+    trans_f = (r - 0.30 * a) / (0.10 * a)
+    trans_f = np.clip(trans_f, 0, 1)
+    fibro_mask = np.where(
+        (r >= 0.30 * a) & (r < 0.40 * a),
+        (1.0 - trans_f**2) ** 4,
+        fibro_mask,
+    )
+
+    vessel_radius = 0.05 * a
+    distances = (
+        np.sqrt((pts[:, 0] - 0.2 * a) ** 2 + (pts[:, 1] - 0.15 * a) ** 2),
+        np.sqrt((pts[:, 1] + 0.1 * a) ** 2 + (pts[:, 2] - 0.2 * a) ** 2),
+        np.sqrt((pts[:, 0] + 0.15 * a) ** 2 + (pts[:, 2] - (-0.1 * a)) ** 2),
+    )
+    vessel_mask = np.zeros(len(pts))
+    for distance in distances:
+        mask = np.where(
+            distance < vessel_radius,
+            (1.0 - (distance / vessel_radius) ** 2) ** 4,
+            0.0,
+        )
+        vessel_mask = np.maximum(vessel_mask, mask)
+    vessel_mask *= r < 0.8 * a
+
+    b = fat_mask * b_fat
+    b = np.where(fibro_mask > 0.5, fibro_mask * b_fibro, b)
+    b = np.where(vessel_mask > 0.5, vessel_mask * b_vessel, b)
+    b = b * (1.0 - skin_mask) + skin_mask * b_skin
+
+    b *= np.where(r < 0.98 * a, 1.0, 0.0)
+
+    return b.reshape(shape[:-1])
+
+
+def build_lucka_phantom_hemisphere(int_pts, a):
+    """Pendant hemispherical legacy tissue potential, preserving thresholded layers.
+    Polynomial ramps vanish to third order at their support edge, but
+    threshold-based tissue overrides can introduce internal jumps.
+    This geometry alone is not a field-accuracy validation.
+    """
+    b_fat = -0.041
+    b_fibro = 0.020
+    b_vessel = 0.103
+    b_skin = 0.174
+
+    shape = int_pts.shape
+    pts = int_pts.reshape(-1, 3)
+
+    R = 0.80 * a
+    z0 = 0.55 * a
+    c = np.array([0.0, 0.0, z0])
+    d = pts - c[None, :]
+    r = np.linalg.norm(d, axis=-1)
+    z = pts[:, 2]
+
+    t = np.clip((z - (z0 - 0.10 * R)) / (0.10 * R), 0.0, 1.0)
+    zcut = (1.0 - t**2) ** 4
+    t = np.abs(r - 0.9 * R) / (0.08 * R)
+    skin_mask = np.where(t < 1.0, (1.0 - t**2) ** 4, 0.0) * zcut
+
+    fat_mask = np.where(r < 0.75 * R, 1.0, 0.0)
+    trans = np.clip((r - 0.75 * R) / (0.10 * R), 0, 1)
+    fat_mask = np.where(
+        (r >= 0.75 * R) & (r < 0.85 * R), (1.0 - trans**2) ** 4, fat_mask
+    )
+    fat_mask = fat_mask * zcut
+
+    c_fib = c - np.array([0.0, 0.0, 0.45 * R])
+    r_fib = np.linalg.norm(pts - c_fib[None, :], axis=-1)
+    R_fib = 0.35 * R
+    fibro_mask = np.where(r_fib < 0.75 * R_fib, 1.0, 0.0)
+    trans_f = np.clip((r_fib - 0.75 * R_fib) / (0.25 * R_fib), 0, 1)
+    fibro_mask = np.where(
+        (r_fib >= 0.75 * R_fib) & (r_fib < R_fib),
+        (1.0 - trans_f**2) ** 4,
+        fibro_mask,
+    )
+
+    vessel_radius = 0.05 * R
+    distances = (
+        np.sqrt((pts[:, 0] - 0.2 * R) ** 2 + (pts[:, 1] - 0.15 * R) ** 2),
+        np.sqrt(
+            (pts[:, 1] + 0.1 * R) ** 2 + (pts[:, 2] - (z0 - 0.5 * R)) ** 2
+        ),
+        np.sqrt(
+            (pts[:, 0] + 0.15 * R) ** 2 + (pts[:, 2] - (z0 - 0.6 * R)) ** 2
+        ),
+    )
+    vessel_mask = np.zeros(len(pts))
+    for distance in distances:
+        mask = np.where(
+            distance < vessel_radius,
+            (1.0 - (distance / vessel_radius) ** 2) ** 4,
+            0.0,
+        )
+        vessel_mask = np.maximum(vessel_mask, mask)
+    vessel_mask *= (r < 0.8 * R) * zcut
+
+    b = fat_mask * b_fat
+    b = np.where(fibro_mask > 0.5, fibro_mask * b_fibro, b)
+    b = np.where(vessel_mask > 0.5, vessel_mask * b_vessel, b)
+    b = b * (1.0 - skin_mask) + skin_mask * b_skin
+
+    rad_all = np.linalg.norm(pts, axis=-1)
+    b *= np.where(rad_all < 0.98 * np.sqrt(3) * a, 1.0, 0.0)
+
+    return b.reshape(shape[:-1])

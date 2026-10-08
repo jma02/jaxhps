@@ -101,7 +101,8 @@ def build_exact_block(
     """Use fmm3dbie to build exact S and D blocks for given row/col indices."""
     import fmm3dbie as h3
 
-    def _matgen(alpha, beta):
+    blocks = []
+    for alpha, beta in ((1 + 0j, 0 + 0j), (0 + 0j, 1 + 0j)):
         zpars = np.array([kappa + 0j, alpha, beta], dtype=np.complex128)
         nifds, _, nzfds = h3.helm_comb_dir_fds_block_mem(
             norders,
@@ -124,7 +125,7 @@ def build_exact_block(
             nifds,
             nzfds,
         )
-        return h3.helm_comb_dir_fds_block_matgen(
+        block = h3.helm_comb_dir_fds_block_matgen(
             norders,
             ixyzs,
             iptype,
@@ -140,32 +141,29 @@ def build_exact_block(
             ifwrite,
         )
 
-    S_block = _matgen(1.0 + 0j, 0.0 + 0j)
-    D_block = _matgen(0.0 + 0j, 1.0 + 0j)
-    return S_block, D_block
+        blocks.append(block)
+    return tuple(blocks)
 
 
-def main():
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--a", type=float, default=1.25)
-    p.add_argument("--q", type=int, default=8)
-    p.add_argument("--L", type=int, default=3)
-    p.add_argument("--kappa", type=float, default=10.0)
-    p.add_argument("--eps", type=float, default=1e-9)
-    p.add_argument("--near_ratio", type=float, default=4.0)
-    p.add_argument("--out", type=str, required=True)
-    args = p.parse_args()
+def generate_nearfield(
+    out, a, q, L, kappa, eps=1e-9, near_ratio=4.0, bulk=False
+):
+    """Write sparse near-field corrections using block or bulk quadrature.
 
+    Bulk generation matches the Modal examples: assemble the union of near
+    rows/columns once, then extract the patch blocks. It requires dense
+    temporary matrices; the default block path uses less peak memory.
+    """
     print(
-        f"Generating near-field corrections: a={args.a}, q={args.q}, "
-        f"L={args.L}, kappa={args.kappa}"
+        f"Generating near-field corrections: a={a}, q={q}, "
+        f"L={L}, kappa={kappa}"
     )
 
     # Build geometry
     norders, ixyzs, iptype, srcvals, face_idx = build_cube_srcvals(
-        args.a,
-        args.q,
-        args.L,
+        a,
+        q,
+        L,
     )
     import fmm3dbie as h3
 
@@ -175,33 +173,37 @@ def main():
     bdry_pts = srcvals[0:3, :].T
     normals = srcvals[9:12, :].T
     npts = bdry_pts.shape[0]
-    q2 = args.q**2
+    q2 = q**2
     n_patches = npts // q2
     print(f"  npts={npts}, n_patches={n_patches}")
 
-    # Patch metadata
     patches = np.arange(npts).reshape(n_patches, q2)
-    patch_centers = np.array(
-        [bdry_pts[patches[i]].mean(axis=0) for i in range(n_patches)]
-    )
-    patch_widths = np.array(
-        [
-            np.max(np.ptp(bdry_pts[patches[i]], axis=0))
-            for i in range(n_patches)
-        ]
-    )
+    patch_points = bdry_pts[patches]
+    patch_centers = patch_points.mean(axis=1)
+    patch_widths = np.ptp(patch_points, axis=1).max(axis=1)
 
-    near_pairs = identify_near_patches(
-        patch_centers, patch_widths, args.near_ratio
-    )
+    near_pairs = identify_near_patches(patch_centers, patch_widths, near_ratio)
     print(
         f"  near pairs: {len(near_pairs)} "
         f"(avg {len(near_pairs) / n_patches:.1f} per patch)"
     )
 
-    # Initialize fmm3dbie FDS data structures (once for all blocks)
-    # We must generate the full near-field data, then extract per-block
-    # Actually, matgen with restricted row/col indices handles this.
+    t0 = time.perf_counter()
+    if bulk:
+        near_rows = np.unique([patches[ip] for ip, _ in near_pairs])
+        near_cols = np.unique([patches[jp] for _, jp in near_pairs])
+        S_bulk, D_bulk = build_exact_block(
+            norders,
+            ixyzs,
+            iptype,
+            srccoefs,
+            srcvals,
+            wts,
+            kappa,
+            eps,
+            near_rows + 1,
+            near_cols + 1,
+        )
 
     # Build correction blocks
     n_pairs = len(near_pairs)
@@ -211,32 +213,33 @@ def main():
     S_vals = np.empty(total_entries, dtype=np.complex128)
     D_vals = np.empty(total_entries, dtype=np.complex128)
 
-    t0 = time.perf_counter()
     idx = 0
     for pi, (ip, jp) in enumerate(near_pairs):
         ri = patches[ip]
         ci = patches[jp]
-        # 1-based indices for fmm3dbie
-        row_ind_f = ri + 1
-        col_ind_f = ci + 1
-
-        S_exact, D_exact = build_exact_block(
-            norders,
-            ixyzs,
-            iptype,
-            srccoefs,
-            srcvals,
-            wts,
-            args.kappa,
-            args.eps,
-            row_ind_f,
-            col_ind_f,
-        )
+        if bulk:
+            block = np.ix_(
+                np.searchsorted(near_rows, ri), np.searchsorted(near_cols, ci)
+            )
+            S_exact, D_exact = S_bulk[block], D_bulk[block]
+        else:
+            S_exact, D_exact = build_exact_block(
+                norders,
+                ixyzs,
+                iptype,
+                srccoefs,
+                srcvals,
+                wts,
+                kappa,
+                eps,
+                ri + 1,
+                ci + 1,
+            )
         S_smooth, D_smooth = smooth_kernel_blocks(
             bdry_pts,
             normals,
             wts,
-            args.kappa,
+            kappa,
             ri,
             ci,
         )
@@ -265,10 +268,10 @@ def main():
         shape=(npts, npts),
     )
 
-    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     # Save sparse matrices and metadata
     np.savez(
-        args.out,
+        out,
         S_corr_data=S_corr.data,
         S_corr_indices=S_corr.indices,
         S_corr_indptr=S_corr.indptr,
@@ -280,19 +283,41 @@ def main():
         normals=normals,
         wts=wts,
         face_idx=face_idx,
-        a=args.a,
-        q=args.q,
-        L=args.L,
-        kappa=args.kappa,
-        eps=args.eps,
-        near_ratio=args.near_ratio,
+        a=a,
+        q=q,
+        L=L,
+        kappa=kappa,
+        eps=eps,
+        near_ratio=near_ratio,
         n_near_pairs=len(near_pairs),
     )
     elapsed = time.perf_counter() - t0
-    print(f"\nDone in {elapsed:.1f}s. Wrote {args.out}")
+    print(f"\nDone in {elapsed:.1f}s. Wrote {out}")
     print(f"  S_corr nnz={S_corr.nnz}, D_corr nnz={D_corr.nnz}")
     mem_mb = (S_corr.data.nbytes + D_corr.data.nbytes) / 1e6
     print(f"  Total correction memory: {mem_mb:.1f} MB")
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--a", type=float, default=1.25)
+    p.add_argument("--q", type=int, default=8)
+    p.add_argument("--L", type=int, default=3)
+    p.add_argument("--kappa", type=float, default=10.0)
+    p.add_argument("--eps", type=float, default=1e-9)
+    p.add_argument("--near_ratio", type=float, default=4.0)
+    p.add_argument("--out", type=str, required=True)
+    args = p.parse_args()
+
+    generate_nearfield(
+        args.out,
+        args.a,
+        args.q,
+        args.L,
+        args.kappa,
+        args.eps,
+        args.near_ratio,
+    )
 
 
 if __name__ == "__main__":

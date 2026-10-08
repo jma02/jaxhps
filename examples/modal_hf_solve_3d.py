@@ -15,56 +15,11 @@ Usage
     modal run examples/modal_hf_solve_3d.py --mode solve --freq-khz 150 --a 0.055
 """
 
-import os
 import modal
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from modal_fmm_image import fmm_image
 
 app = modal.App("jaxhps-hf-solve")
-
-# Build image with all dependencies
-fmm_image = (
-    modal.Image.debian_slim(python_version="3.10")
-    .apt_install(
-        "gfortran",
-        "libopenblas-dev",
-        "make",
-        "git",
-        "curl",
-    )
-    .pip_install(
-        "numpy<2",
-        "setuptools<60",
-        "fmm3dpy",
-        "scipy",
-        "jax[cuda12]",
-        "charset_normalizer",
-    )
-    .run_commands(
-        # Clone and build fmm3dbie
-        "git clone --recurse-submodules https://github.com/fastalgorithms/fmm3dbie.git /opt/fmm3dbie",
-        "cd /opt/fmm3dbie && git checkout ddc93f53e60181b79928fb896a678b49865810aa && git submodule update --recursive",
-        # Patch setup.py typo
-        "sed -i \"s|'../src/stok_wrappers/stok_comb_vel.f'|'../src/stok_wrappers/stok_comb_vel.f90'|\" /opt/fmm3dbie/python/setup.py",
-        # Fix non-ASCII chars in Fortran sources (f2py encoding issue)
-        "find /opt/fmm3dbie/src -name '*.f90' -exec sed -i 's/[^[:print:]\\t]//g' {} +",
-        # Build static lib
-        "cd /opt/fmm3dbie && cp make.inc.linux.gnu.openblas make.inc && make -j$(nproc) lib",
-        # Build and install Python wrapper
-        "cd /opt/fmm3dbie/python && FMMBIE_LIBS='-fopenmp -lopenblas' "
-        "FFLAGS='-fallow-argument-mismatch -fPIC -O3 -funroll-loops -std=legacy -w' "
-        "python setup.py install",
-        # Verify
-        "python -c 'import fmm3dbie; print(\"fmm3dbie OK\")'",
-    )
-    .add_local_dir(
-        REPO_ROOT,
-        remote_path="/root/jaxhps",
-        ignore=["data/**", ".git/**", "**/__pycache__/**", "**/*.npz"],
-        copy=True,
-    )
-    .run_commands("pip install --no-deps /root/jaxhps")
-)
 
 vol = modal.Volume.from_name("jaxhps-data", create_if_missing=True)
 
@@ -127,219 +82,17 @@ def run_hf_solve(
 
     # Step 1: Generate near-field corrections
     print("\n=== Step 1: Near-field corrections ===")
+    from gen_nearfield_3D import generate_nearfield
+    from wave_scattering_utils_3D import load_nearfield_correction
+
     nf_path = f"/data/NF_k{kappa:.2f}_q{q}_L{L}_a{a}.npz"
-    regen = os.environ.get("REGEN_NF", "0") == "1"
-    if os.path.exists(nf_path) and not regen:
-        print(f"  Loading cached: {nf_path}")
-        from wave_scattering_utils_3D import load_nearfield_correction
-
-        nf = load_nearfield_correction(nf_path, fmm_eps=fmm_eps)
-    else:
-        print("  Generating with fmm3dbie...")
-        from gen_SD_3D import build_cube_srcvals
-        import fmm3dbie as h3
-        from scipy.sparse import csr_matrix
-
-        norders, ixyzs, iptype, srcvals, face_idx = build_cube_srcvals(a, q, L)
-        srccoefs = h3.surf_vals_to_coefs(
-            norders, ixyzs, iptype, srcvals[0:9, :]
-        )
-        wts = h3.get_qwts(norders, ixyzs, iptype, srcvals)
-        bdry_pts = srcvals[0:3, :].T
-        normals = srcvals[9:12, :].T
-        npts = bdry_pts.shape[0]
-        q2 = q**2
-        n_patches = npts // q2
-        patches = np.arange(npts).reshape(n_patches, q2)
-
-        print(f"  npts={npts}, n_patches={n_patches}")
-
-        # Identify near patches
-        from scipy.spatial import cKDTree
-
-        patch_centers = np.array(
-            [bdry_pts[patches[i]].mean(0) for i in range(n_patches)]
-        )
-        patch_widths = np.array(
-            [
-                np.max(np.ptp(bdry_pts[patches[i]], axis=0))
-                for i in range(n_patches)
-            ]
-        )
-        threshold = near_ratio * patch_widths.max()
-        tree = cKDTree(patch_centers)
-        near_pairs = []
-        for ip in range(n_patches):
-            for jp in tree.query_ball_point(patch_centers[ip], threshold):
-                near_pairs.append((ip, jp))
-        print(
-            f"  {len(near_pairs)} near pairs ({len(near_pairs) / n_patches:.1f} per patch)"
-        )
-
-        # Generate blocks
-        n_pairs = len(near_pairs)
-        total = n_pairs * q2 * q2
-        rows_arr = np.empty(total, dtype=np.int64)
-        cols_arr = np.empty(total, dtype=np.int64)
-        S_vals = np.empty(total, dtype=np.complex128)
-        D_vals = np.empty(total, dtype=np.complex128)
-
-        eps_quad = 1e-9
-        ifwrite = 0
-
-        # Collect unique near-field indices for bulk generation
-        near_row_set = set()
-        near_col_set = set()
-        for ip, jp in near_pairs:
-            near_row_set.update(patches[ip].tolist())
-            near_col_set.update(patches[jp].tolist())
-        all_near_rows = np.array(sorted(near_row_set), dtype=np.int64)
-        all_near_cols = np.array(sorted(near_col_set), dtype=np.int64)
-        print(
-            f"  Near-field index set: {len(all_near_rows)} rows, "
-            f"{len(all_near_cols)} cols"
-        )
-
-        def _matgen_bulk(alpha, beta, row_f, col_f):
-            zpars = np.array([kappa + 0j, alpha, beta], dtype=np.complex128)
-            nifds, _, nzfds = h3.helm_comb_dir_fds_block_mem(
-                norders,
-                ixyzs,
-                iptype,
-                srccoefs,
-                srcvals,
-                eps_quad,
-                zpars,
-                ifwrite,
-            )
-            ifds, zfds = h3.helm_comb_dir_fds_block_init(
-                norders,
-                ixyzs,
-                iptype,
-                srccoefs,
-                srcvals,
-                eps_quad,
-                zpars,
-                nifds,
-                nzfds,
-            )
-            return h3.helm_comb_dir_fds_block_matgen(
-                norders,
-                ixyzs,
-                iptype,
-                srccoefs,
-                srcvals,
-                wts,
-                eps_quad,
-                zpars,
-                ifds,
-                zfds,
-                row_f,
-                col_f,
-                ifwrite,
-            )
-
-        def _smooth_block(ri, ci):
-            xi = bdry_pts[ri][:, None, :]
-            yj = bdry_pts[ci][None, :, :]
-            diff = xi - yj
-            r = np.linalg.norm(diff, axis=-1)
-            wj = wts[ci]
-            with np.errstate(divide="ignore", invalid="ignore"):
-                G = np.exp(1j * kappa * r) / (4.0 * np.pi * r)
-            S_s = G * wj[None, :]
-            S_s[r == 0] = 0.0
-            nj = normals[ci]
-            nd = np.einsum("ijk,jk->ij", diff, nj)
-            with np.errstate(divide="ignore", invalid="ignore"):
-                dG = (1.0 / r - 1j * kappa) / r * G * nd
-            D_s = dG * wj[None, :]
-            D_s[r == 0] = 0.0
-            return S_s, D_s
-
-        # Bulk generation: one fmm3dbie call per layer (S, D)
-        t0 = time.perf_counter()
-        print("  Generating bulk S near-field matrix...")
-        S_bulk = _matgen_bulk(
-            1 + 0j, 0 + 0j, all_near_rows + 1, all_near_cols + 1
-        )
-        print("  Generating bulk D near-field matrix...")
-        D_bulk = _matgen_bulk(
-            0 + 0j, 1 + 0j, all_near_rows + 1, all_near_cols + 1
-        )
-        dt_bulk = time.perf_counter() - t0
-        print(f"  Bulk matgen: {dt_bulk:.1f}s, S shape={S_bulk.shape}")
-
-        # Build index maps for fast block extraction
-        row_map = {v: i for i, v in enumerate(all_near_rows)}
-        col_map = {v: i for i, v in enumerate(all_near_cols)}
-
-        idx = 0
-        for pi, (ip, jp) in enumerate(near_pairs):
-            ri = patches[ip]
-            ci = patches[jp]
-            ri_b = [row_map[r] for r in ri]
-            ci_b = [col_map[c] for c in ci]
-            S_ex = S_bulk[np.ix_(ri_b, ci_b)]
-            D_ex = D_bulk[np.ix_(ri_b, ci_b)]
-            S_sm, D_sm = _smooth_block(ri, ci)
-            bs = q2 * q2
-            rr, cc = np.meshgrid(ri, ci, indexing="ij")
-            rows_arr[idx : idx + bs] = rr.ravel()
-            cols_arr[idx : idx + bs] = cc.ravel()
-            S_vals[idx : idx + bs] = (S_ex - S_sm).ravel()
-            D_vals[idx : idx + bs] = (D_ex - D_sm).ravel()
-            idx += bs
-
-        S_corr = csr_matrix(
-            (S_vals[:idx], (rows_arr[:idx], cols_arr[:idx])),
-            shape=(npts, npts),
-        )
-        D_corr = csr_matrix(
-            (D_vals[:idx], (rows_arr[:idx], cols_arr[:idx])),
-            shape=(npts, npts),
-        )
-
-        # Save
-        np.savez(
-            nf_path,
-            S_corr_data=S_corr.data,
-            S_corr_indices=S_corr.indices,
-            S_corr_indptr=S_corr.indptr,
-            D_corr_data=D_corr.data,
-            D_corr_indices=D_corr.indices,
-            D_corr_indptr=D_corr.indptr,
-            shape=np.array(S_corr.shape),
-            boundary_points=bdry_pts,
-            normals=normals,
-            wts=wts,
-            face_idx=face_idx,
-            a=a,
-            q=q,
-            L=L,
-            kappa=kappa,
-            eps=eps_quad,
-            near_ratio=near_ratio,
-            n_near_pairs=len(near_pairs),
+    regenerate = os.environ.get("REGEN_NF", "0") == "1"
+    if not os.path.exists(nf_path) or regenerate:
+        generate_nearfield(
+            nf_path, a, q, L, kappa, near_ratio=near_ratio, bulk=True
         )
         vol.commit()
-        print(f"  Saved to {nf_path}")
-
-        nf = dict(
-            S_corr=S_corr,
-            D_corr=D_corr,
-            n_near_pairs=len(near_pairs),
-            nnz_S=S_corr.nnz,
-            nnz_D=D_corr.nnz,
-            kappa=kappa,
-            fmm_eps=fmm_eps,
-            boundary_points=bdry_pts,
-            normals=normals,
-            wts=wts,
-            a=a,
-            q=q,
-            L=L,
-        )
+    nf = load_nearfield_correction(nf_path, fmm_eps=fmm_eps)
 
     # Step 2: HPS interior solve
     print("\n=== Step 2: HPS interior solve ===")
@@ -447,8 +200,7 @@ def run_hf_solve(
         jnp.asarray(source_dirs),
     )
     t0 = time.perf_counter()
-    if solver_mode == "dense_block":
-        # Dense matrices + block GMRES + preconditioner
+    if solver_mode in ("dense_block", "matfree"):
         imp, uscat_b, uscat_dn_b, info = solve_bie_gpu_advanced(
             T_DtN_gpu,
             bdry_pts_nf,
@@ -462,28 +214,9 @@ def run_hf_solve(
             tol=gmres_tol,
             maxiter=200,
             restart=50,
-            matrix_free=False,
+            matrix_free=(solver_mode != "dense_block"),
             use_preconditioner=True,
-            block_rhs=True,
-        )
-    elif solver_mode == "matfree":
-        # Matrix-free + sequential + preconditioner
-        imp, uscat_b, uscat_dn_b, info = solve_bie_gpu_advanced(
-            T_DtN_gpu,
-            bdry_pts_nf,
-            normals_nf,
-            wts_nf,
-            float(kappa),
-            float(kappa),
-            np.asarray(uin),
-            np.asarray(uin_dn),
-            nf,
-            tol=gmres_tol,
-            maxiter=200,
-            restart=50,
-            matrix_free=True,
-            use_preconditioner=True,
-            block_rhs=False,
+            block_rhs=(solver_mode != "matfree"),
         )
     else:
         # Default: dense sequential (baseline, same as solve_bie_gmres_gpu)

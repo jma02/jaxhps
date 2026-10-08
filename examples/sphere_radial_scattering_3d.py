@@ -131,122 +131,6 @@ def mie_curve(b_radial, kappa, rho, R_bump, seps):
     )
 
 
-def plot_geometry(rx, R_bump, a, fname):
-    import matplotlib.pyplot as plt
-
-    fig, ax = plt.subplots(figsize=(6.0, 6.4), constrained_layout=True)
-    ax.add_patch(plt.Circle((0, 0), R_bump, color="0.6", alpha=0.5))
-    ax.add_patch(
-        plt.Rectangle(
-            (-a, -a), 2 * a, 2 * a, fill=False, ls="--", ec="k", lw=1.0
-        )
-    )
-    ax.scatter(rx[:, 0], rx[:, 1], s=22, c="C0", zorder=3, label="tx/rx")
-    for r in rx:
-        ax.plot([0, r[0]], [0, r[1]], color="C0", lw=0.3, alpha=0.4)
-    ax.set_aspect("equal")
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
-    ax.set_title(
-        rf"$z=0$ slice: scatterer (supp $r<{R_bump}$), HPS cube,"
-        "\n"
-        rf"radial tx/rx ($\rho={np.linalg.norm(rx[0]):.2f}$)"
-    )
-    ax.legend(loc="upper right")
-    fig.savefig(fname, dpi=130)
-    print(f"wrote {fname}")
-
-
-def plot_matrix(M, fname):
-    import matplotlib.pyplot as plt
-
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.6), constrained_layout=True)
-    for ax, m, title, kw in zip(
-        axes,
-        [np.real(M), np.abs(M)],
-        [r"$\Re\,u^s$", r"$|u^s|$"],
-        [dict(cmap="RdBu_r"), dict(cmap="viridis", vmin=0)],
-    ):
-        if "RdBu" in str(kw.get("cmap")):
-            vm = float(np.abs(np.real(M)).max())
-            kw.update(vmin=-vm, vmax=vm)
-        im = ax.imshow(m, origin="lower", **kw)
-        ax.set_title(f"{title}: measurement matrix")
-        ax.set_xlabel("transmitter index (angle)")
-        ax.set_ylabel("receiver index (angle)")
-        fig.colorbar(im, ax=ax, shrink=0.85)
-    fig.savefig(fname, dpi=130)
-    print(f"wrote {fname}")
-
-
-def plot_sorted(M, g, seps, mie, residual, rel_mie, fname):
-    import matplotlib.pyplot as plt
-
-    N = M.shape[0]
-    deg = np.degrees(seps)
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4.8), constrained_layout=True)
-
-    # Left: every transmitter's receiver trace, aligned to angular separation.
-    ax = axes[0]
-    for i in range(N):
-        ax.plot(deg, np.real(np.roll(M[:, i], -i)), color="0.7", lw=0.6)
-    ax.plot(deg, np.real(g), "C3", lw=2.0, label=r"mean $\Re\,g(\gamma)$")
-    ax.set_title(
-        rf"Aligned receiver traces (all {N} tx collapse), "
-        rf"residual ${residual:.1e}$"
-    )
-    ax.set_xlabel(r"angular separation $\gamma = \beta - \alpha$ (deg)")
-    ax.set_ylabel(r"$\Re\,u^s$")
-    ax.legend(loc="upper right")
-
-    # Right: sorted pattern g(gamma) vs Mie.
-    ax = axes[1]
-    ax.plot(deg, np.real(g), "C0", lw=2.0, label=r"HPS $\Re\,g$")
-    ax.plot(deg, np.imag(g), "C1", lw=2.0, label=r"HPS $\Im\,g$")
-    if mie is not None:
-        ax.plot(deg, np.real(mie), "k--", lw=1.0, label=r"Mie $\Re\,g$")
-        ax.plot(deg, np.imag(mie), "k:", lw=1.0, label=r"Mie $\Im\,g$")
-    ttl = r"Sorted scattered pattern $g(\gamma)$"
-    if rel_mie is not None:
-        ttl += rf"  (rel. err vs Mie ${rel_mie:.1e}$)"
-    ax.set_title(ttl)
-    ax.set_xlabel(r"angular separation $\gamma$ (deg)")
-    ax.set_ylabel(r"$u^s$")
-    ax.legend(loc="upper right", ncol=2)
-    fig.savefig(fname, dpi=130)
-    print(f"wrote {fname}")
-
-
-def plot_traces(M, angles, fname, n_show=6):
-    """Scattered field at a few fixed receivers vs transmitter angle.
-
-    Each receiver gives ``M[j, :] = g(a_j - alpha)``: the same sinusoid in the
-    transmitter angle ``alpha``, phase-shifted by the receiver angle ``a_j``.
-    """
-    import matplotlib.pyplot as plt
-
-    N = M.shape[0]
-    deg = np.degrees(angles)
-    sel = np.linspace(0, N, n_show, endpoint=False).astype(int)
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4.6), constrained_layout=True)
-    for ax, part, lbl in zip(
-        axes, [np.real, np.imag], [r"$\Re\,u^s$", r"$\Im\,u^s$"]
-    ):
-        for j in sel:
-            ax.plot(
-                deg,
-                part(M[j, :]),
-                lw=1.6,
-                label=rf"rx @ {np.degrees(angles[j]):.0f}$^\circ$",
-            )
-        ax.set_title(f"{lbl} at fixed receivers vs transmitter angle")
-        ax.set_xlabel(r"transmitter angle $\alpha$ (deg)")
-        ax.set_ylabel(lbl)
-        ax.legend(loc="upper right", ncol=2, fontsize=8)
-    fig.savefig(fname, dpi=130)
-    print(f"wrote {fname}")
-
-
 def plot_R_sweep(sd, A_bump, shape, radii, angles, rho, p, fname):
     """Overlay the sorted pattern ``g(gamma)`` for several scatterer radii.
 
@@ -334,10 +218,112 @@ def main():
     print(f"  relative to |u^s|_max = {np.max(np.abs(M)):.3e}")
     print(f"sorted pattern g vs Mie, relative L2 error      : {rel_mie:.3e}")
 
-    plot_geometry(rx, args.R_bump, a, f"{args.out}_geometry.png")
-    plot_matrix(M, f"{args.out}_matrix.png")
-    plot_sorted(M, g, angles, mie, residual, rel_mie, f"{args.out}_sorted.png")
-    plot_traces(M, angles, f"{args.out}_traces.png")
+    R_bump = args.R_bump
+    fname = f"{args.out}_geometry.png"
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(6.0, 6.4), constrained_layout=True)
+    ax.add_patch(plt.Circle((0, 0), R_bump, color="0.6", alpha=0.5))
+    ax.add_patch(
+        plt.Rectangle(
+            (-a, -a), 2 * a, 2 * a, fill=False, ls="--", ec="k", lw=1.0
+        )
+    )
+    ax.scatter(rx[:, 0], rx[:, 1], s=22, c="C0", zorder=3, label="tx/rx")
+    for r in rx:
+        ax.plot([0, r[0]], [0, r[1]], color="C0", lw=0.3, alpha=0.4)
+    ax.set_aspect("equal")
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.set_title(
+        rf"$z=0$ slice: scatterer (supp $r<{R_bump}$), HPS cube,"
+        "\n"
+        rf"radial tx/rx ($\rho={np.linalg.norm(rx[0]):.2f}$)"
+    )
+    ax.legend(loc="upper right")
+    fig.savefig(fname, dpi=130)
+    print(f"wrote {fname}")
+    fname = f"{args.out}_matrix.png"
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.6), constrained_layout=True)
+    for ax, m, title, kw in zip(
+        axes,
+        [np.real(M), np.abs(M)],
+        [r"$\Re\,u^s$", r"$|u^s|$"],
+        [dict(cmap="RdBu_r"), dict(cmap="viridis", vmin=0)],
+    ):
+        if "RdBu" in str(kw.get("cmap")):
+            vm = float(np.abs(np.real(M)).max())
+            kw.update(vmin=-vm, vmax=vm)
+        im = ax.imshow(m, origin="lower", **kw)
+        ax.set_title(f"{title}: measurement matrix")
+        ax.set_xlabel("transmitter index (angle)")
+        ax.set_ylabel("receiver index (angle)")
+        fig.colorbar(im, ax=ax, shrink=0.85)
+    fig.savefig(fname, dpi=130)
+    print(f"wrote {fname}")
+    seps = angles
+    fname = f"{args.out}_sorted.png"
+    import matplotlib.pyplot as plt
+
+    N = M.shape[0]
+    deg = np.degrees(seps)
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.8), constrained_layout=True)
+
+    # Left: every transmitter's receiver trace, aligned to angular separation.
+    ax = axes[0]
+    for i in range(N):
+        ax.plot(deg, np.real(np.roll(M[:, i], -i)), color="0.7", lw=0.6)
+    ax.plot(deg, np.real(g), "C3", lw=2.0, label=r"mean $\Re\,g(\gamma)$")
+    ax.set_title(
+        rf"Aligned receiver traces (all {N} tx collapse), "
+        rf"residual ${residual:.1e}$"
+    )
+    ax.set_xlabel(r"angular separation $\gamma = \beta - \alpha$ (deg)")
+    ax.set_ylabel(r"$\Re\,u^s$")
+    ax.legend(loc="upper right")
+
+    # Right: sorted pattern g(gamma) vs Mie.
+    ax = axes[1]
+    ax.plot(deg, np.real(g), "C0", lw=2.0, label=r"HPS $\Re\,g$")
+    ax.plot(deg, np.imag(g), "C1", lw=2.0, label=r"HPS $\Im\,g$")
+    if mie is not None:
+        ax.plot(deg, np.real(mie), "k--", lw=1.0, label=r"Mie $\Re\,g$")
+        ax.plot(deg, np.imag(mie), "k:", lw=1.0, label=r"Mie $\Im\,g$")
+    ttl = r"Sorted scattered pattern $g(\gamma)$"
+    if rel_mie is not None:
+        ttl += rf"  (rel. err vs Mie ${rel_mie:.1e}$)"
+    ax.set_title(ttl)
+    ax.set_xlabel(r"angular separation $\gamma$ (deg)")
+    ax.set_ylabel(r"$u^s$")
+    ax.legend(loc="upper right", ncol=2)
+    fig.savefig(fname, dpi=130)
+    print(f"wrote {fname}")
+    fname = f"{args.out}_traces.png"
+    n_show = 6
+    import matplotlib.pyplot as plt
+
+    N = M.shape[0]
+    deg = np.degrees(angles)
+    sel = np.linspace(0, N, n_show, endpoint=False).astype(int)
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.6), constrained_layout=True)
+    for ax, part, lbl in zip(
+        axes, [np.real, np.imag], [r"$\Re\,u^s$", r"$\Im\,u^s$"]
+    ):
+        for j in sel:
+            ax.plot(
+                deg,
+                part(M[j, :]),
+                lw=1.6,
+                label=rf"rx @ {np.degrees(angles[j]):.0f}$^\circ$",
+            )
+        ax.set_title(f"{lbl} at fixed receivers vs transmitter angle")
+        ax.set_xlabel(r"transmitter angle $\alpha$ (deg)")
+        ax.set_ylabel(lbl)
+        ax.legend(loc="upper right", ncol=2, fontsize=8)
+    fig.savefig(fname, dpi=130)
+    print(f"wrote {fname}")
 
     if args.R_sweep:
         plot_R_sweep(
