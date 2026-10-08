@@ -360,18 +360,14 @@ def make_face_polynomial_transfer(
     n_coarse = n_leaves * 6 * coarse_q**2
 
     def prolong(y: jax.Array) -> jax.Array:
-        batched = y.ndim == 2
         Y = y.reshape(n_leaves, 6, coarse_q, coarse_q, -1)
         X = jnp.einsum("ia,lfabm,jb->lfijm", basis, Y, basis)
-        out = X.reshape(n_fine, -1)
-        return out if batched else out[:, 0]
+        return X.reshape((n_fine, *y.shape[1:]))
 
     def restrict(x: jax.Array) -> jax.Array:
-        batched = x.ndim == 2
         X = x.reshape(n_leaves, 6, q, q, -1)
         Y = jnp.einsum("ia,lfijm,jb->lfabm", basis.conj(), X, basis.conj())
-        out = Y.reshape(n_coarse, -1)
-        return out if batched else out[:, 0]
+        return Y.reshape((n_coarse, *x.shape[1:]))
 
     basis2 = jnp.abs(basis) ** 2
 
@@ -411,28 +407,17 @@ def make_parent_face_transfer(
     valid = fine_to_coarse >= 0
     valid_rows = jnp.asarray(np.flatnonzero(valid), dtype=jnp.int32)
     coarse_rows = jnp.asarray(fine_to_coarse[valid], dtype=jnp.int32)
-    gather = jnp.asarray(np.where(valid, fine_to_coarse, 0), dtype=jnp.int32)
-    mask = jnp.asarray(valid)
     n_fine = n_leaves * 6
     n_coarse = (n_leaves // 8) * 6
 
     def prolong(y: jax.Array) -> jax.Array:
-        values = y[gather] * 0.5
-        return (
-            jnp.where(mask[:, None], values, 0)
-            if y.ndim == 2
-            else jnp.where(mask, values, 0)
-        )
+        values = 0.5 * y[coarse_rows]
+        out = jnp.zeros((n_fine, *y.shape[1:]), dtype=values.dtype)
+        return out.at[valid_rows].set(values)
 
     def restrict(x: jax.Array) -> jax.Array:
-        if x.ndim == 1:
-            return (
-                jnp.zeros(n_coarse, dtype=x.dtype)
-                .at[coarse_rows]
-                .add(0.5 * x[valid_rows])
-            )
         return (
-            jnp.zeros((n_coarse, x.shape[1]), dtype=x.dtype)
+            jnp.zeros((n_coarse, *x.shape[1:]), dtype=x.dtype)
             .at[coarse_rows]
             .add(0.5 * x[valid_rows])
         )
@@ -483,23 +468,12 @@ def make_interface_pair_smoother(
 
     @jax.jit
     def apply(r: jax.Array) -> jax.Array:
-        if r.ndim == 1:
-            coupled = jnp.where(interior, tp * r[safe], 0)
-            return omega * (r - coupled) / denominator
-        coupled = jnp.where(interior[:, None], tp[:, None] * r[safe], 0)
-        return omega * (r - coupled) / denominator[:, None]
+        rhs = r.reshape(diagonal.size, -1)
+        coupled = jnp.where(interior[:, None], tp[:, None] * rhs[safe], 0)
+        out = omega * (rhs - coupled) / denominator[:, None]
+        return out.reshape(r.shape)
 
     return apply
-
-
-def _coarsen_leaf_maps(
-    T: jax.Array, q: int, coarse_q: int, *, coefficient_space: bool
-) -> jax.Array:
-    transfer = make_face_polynomial_transfer(
-        1, q, coarse_q, coefficient_space=coefficient_space
-    )
-    P = transfer.prolong(jnp.eye(transfer.n_coarse, dtype=T.dtype))
-    return jnp.einsum("ia,lij,jb->lab", P.conj(), T, P)
 
 
 def make_face_pair_smoother(
@@ -554,32 +528,6 @@ def make_face_pair_smoother(
     return apply
 
 
-def _partners_at_order(partner: jax.Array, q: int, coarse_q: int) -> jax.Array:
-    host = np.asarray(partner).reshape(-1, q**2)
-    interior = host[:, 0] >= 0
-    if np.any(host[interior] % q**2 != np.arange(q**2)):
-        raise ValueError(
-            "polynomial transfer requires aligned face-node ordering"
-        )
-    faces = partner.reshape(-1, q**2)[:, 0] // q**2
-    nodes = faces[:, None] * coarse_q**2 + jnp.arange(coarse_q**2)[None, :]
-    return jnp.where(faces[:, None] >= 0, nodes, -1).ravel()
-
-
-def _parent_partners(root: DiscretizationNode3D, L: int) -> jax.Array:
-    grid = leaf_index_grid(root, L)
-    lookup = {tuple(cell): leaf for leaf, cell in enumerate(grid)}
-    partners = np.full((len(grid), 6), -1, dtype=np.int32)
-    for leaf, cell in enumerate(grid):
-        for face in range(6):
-            neighbor = cell.copy()
-            neighbor[face // 2] += 1 if face % 2 else -1
-            neighbor_leaf = lookup.get(tuple(neighbor))
-            if neighbor_leaf is not None:
-                partners[leaf, face] = 6 * neighbor_leaf + (face ^ 1)
-    return jnp.asarray(partners.ravel())
-
-
 def make_coarse_correction_preconditioner(
     operator: Callable[[jax.Array], jax.Array],
     diagonal: jax.Array,
@@ -627,7 +575,8 @@ def make_coarse_correction_preconditioner(
         coarse_solves=0,
     )
 
-    def correction(r: jax.Array) -> jax.Array:
+    def apply(r: jax.Array) -> jax.Array:
+        start = time.perf_counter()
         smooth = (
             smoother(r)
             if smoother is not None
@@ -636,13 +585,9 @@ def make_coarse_correction_preconditioner(
             else d_inv[:, None] * r
         )
         residual = r - operator(smooth)
-        return smooth + transfer.prolong(
+        out = smooth + transfer.prolong(
             coarse_solve(transfer.restrict(residual))
         )
-
-    def apply(r: jax.Array) -> jax.Array:
-        start = time.perf_counter()
-        out = correction(r)
         jax.block_until_ready(out)
         stats["n_calls"] += 1
         stats["n_matvec"] += 1
@@ -691,8 +636,10 @@ def make_multilevel_shifted_preconditioner(
     partners = [maps.partner]
     transfers = []
     level_q = q
-    while level_q > coarse_q:
-        next_q = max(coarse_q, level_q // 2)
+    while level_q > coarse_q or (
+        level_q > 1 and diagonals[-1].size > direct_limit
+    ):
+        next_q = max(coarse_q, level_q // 2) if level_q > coarse_q else 1
         coefficient_space = bool(transfers)
         transfer = make_face_polynomial_transfer(
             maps.n_leaves, level_q, next_q, coefficient_space=coefficient_space
@@ -700,33 +647,28 @@ def make_multilevel_shifted_preconditioner(
         transfers.append(transfer)
         operators.append(_galerkin_operator(operators[-1], transfer))
         diagonals.append(transfer.restrict_diagonal(diagonals[-1]))
-        partners.append(_partners_at_order(partners[-1], level_q, next_q))
-        if leaf_maps is not None:
-            leaf_maps = _coarsen_leaf_maps(
-                leaf_maps, level_q, next_q, coefficient_space=coefficient_space
+        host = np.asarray(partners[-1]).reshape(-1, level_q**2)
+        interior = host[:, 0] >= 0
+        if np.any(host[interior] % level_q**2 != np.arange(level_q**2)):
+            raise ValueError(
+                "polynomial transfer requires aligned face-node ordering"
             )
+        faces = partners[-1].reshape(-1, level_q**2)[:, 0] // level_q**2
+        nodes = faces[:, None] * next_q**2 + jnp.arange(next_q**2)[None, :]
+        partners.append(jnp.where(faces[:, None] >= 0, nodes, -1).ravel())
+        if leaf_maps is not None:
+            leaf_transfer = make_face_polynomial_transfer(
+                1, level_q, next_q, coefficient_space=coefficient_space
+            )
+            P = leaf_transfer.prolong(
+                jnp.eye(leaf_transfer.n_coarse, dtype=leaf_maps.dtype)
+            )
+            leaf_maps = jnp.einsum("ia,lij,jb->lab", P.conj(), leaf_maps, P)
             outgoing_diagonals.append(
                 jnp.diagonal(leaf_maps, axis1=1, axis2=2).ravel()
             )
         level_leaf_maps.append(leaf_maps)
         level_q = next_q
-    if diagonals[-1].size > direct_limit and level_q > 1:
-        coefficient_space = bool(transfers)
-        transfer = make_face_polynomial_transfer(
-            maps.n_leaves, level_q, 1, coefficient_space=coefficient_space
-        )
-        transfers.append(transfer)
-        operators.append(_galerkin_operator(operators[-1], transfer))
-        diagonals.append(transfer.restrict_diagonal(diagonals[-1]))
-        partners.append(_partners_at_order(partners[-1], level_q, 1))
-        if leaf_maps is not None:
-            leaf_maps = _coarsen_leaf_maps(
-                leaf_maps, level_q, 1, coefficient_space=coefficient_space
-            )
-            outgoing_diagonals.append(
-                jnp.diagonal(leaf_maps, axis1=1, axis2=2).ravel()
-            )
-        level_leaf_maps.append(leaf_maps)
     for level in range(L, 0, -1):
         if diagonals[-1].size <= direct_limit:
             break
@@ -734,17 +676,33 @@ def make_multilevel_shifted_preconditioner(
         transfers.append(transfer)
         operators.append(_galerkin_operator(operators[-1], transfer))
         diagonals.append(transfer.restrict_diagonal(diagonals[-1]))
-        partners.append(_parent_partners(root, level - 1))
+        grid = leaf_index_grid(root, level - 1)
+        lookup = {tuple(cell): leaf for leaf, cell in enumerate(grid)}
+        parent_partners = np.full((len(grid), 6), -1, dtype=np.int32)
+        for leaf, cell in enumerate(grid):
+            for face in range(6):
+                neighbor = cell.copy()
+                neighbor[face // 2] += 1 if face % 2 else -1
+                neighbor_leaf = lookup.get(tuple(neighbor))
+                if neighbor_leaf is not None:
+                    parent_partners[leaf, face] = 6 * neighbor_leaf + (
+                        face ^ 1
+                    )
+        partners.append(jnp.asarray(parent_partners.ravel()))
         level_leaf_maps.append(None)
         if leaf_maps is not None:
             outgoing_diagonals.append(
                 transfer.restrict_diagonal(outgoing_diagonals[-1])
             )
     coarse_solve = _factorized_solver(operators[-1], diagonals[-1].size)
-    inverses = [omega / d for d in diagonals[:-1]]
     smoother_stats = {}
     smoothers = (
-        []
+        [
+            lambda r, d_inv=omega / d: (
+                d_inv * r if r.ndim == 1 else d_inv[:, None] * r
+            )
+            for d in diagonals[:-1]
+        ]
         if T_leaves is None
         else [
             make_interface_pair_smoother(d, t, p, omega=omega)
@@ -779,26 +737,13 @@ def make_multilevel_shifted_preconditioner(
     def cycle(level: int, r: jax.Array) -> jax.Array:
         if level == len(transfers):
             return coarse_solve(r)
-        d_inv = inverses[level]
-        x = (
-            smoothers[level](r)
-            if smoothers
-            else d_inv * r
-            if r.ndim == 1
-            else d_inv[:, None] * r
-        )
+        x = smoothers[level](r)
         residual = r - operators[level](x)
         x = x + transfers[level].prolong(
             cycle(level + 1, transfers[level].restrict(residual))
         )
         residual = r - operators[level](x)
-        return x + (
-            smoothers[level](residual)
-            if smoothers
-            else d_inv * residual
-            if r.ndim == 1
-            else d_inv[:, None] * residual
-        )
+        return x + smoothers[level](residual)
 
     def apply(r: jax.Array) -> jax.Array:
         start = time.perf_counter()
