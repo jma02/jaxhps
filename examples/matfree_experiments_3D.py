@@ -214,6 +214,8 @@ def exp_mie(args) -> None:
             inner_tol=args.inner_tol,
             inner_restart=args.inner_restart,
             inner_maxiter=args.inner_maxiter,
+            coarse_q=args.coarse_q,
+            coarse_limit=args.coarse_limit,
         )
         err = mie_error(out, sd, b_radial, dirs, args.rho)
         st = out["stats"]
@@ -275,6 +277,8 @@ def exp_kappa(args) -> None:
             inner_tol=args.inner_tol,
             inner_restart=args.inner_restart,
             inner_maxiter=args.inner_maxiter,
+            coarse_q=args.coarse_q,
+            coarse_limit=args.coarse_limit,
         )
         err = mie_error(out, sd, b_radial, DEFAULT_DIR, args.rho)
         st = out["stats"]
@@ -326,6 +330,8 @@ def exp_contrast(args) -> None:
             inner_tol=args.inner_tol,
             inner_restart=args.inner_restart,
             inner_maxiter=args.inner_maxiter,
+            coarse_q=args.coarse_q,
+            coarse_limit=args.coarse_limit,
         )
         err = mie_error(out, sd, b_radial, DEFAULT_DIR, args.rho)
         st = out["stats"]
@@ -376,6 +382,8 @@ def exp_nsrc(args) -> None:
             inner_tol=args.inner_tol,
             inner_restart=args.inner_restart,
             inner_maxiter=args.inner_maxiter,
+            coarse_q=args.coarse_q,
+            coarse_limit=args.coarse_limit,
         )
         st = out["stats"]
         row = dict(
@@ -404,6 +412,8 @@ def exp_nsrc(args) -> None:
                     inner_tol=args.inner_tol,
                     inner_restart=args.inner_restart,
                     inner_maxiter=args.inner_maxiter,
+                    coarse_q=args.coarse_q,
+                    coarse_limit=args.coarse_limit,
                 )
                 seq_mv += int(o1["stats"]["n_matvec"])
             row["seq_time"] = time.perf_counter() - t0
