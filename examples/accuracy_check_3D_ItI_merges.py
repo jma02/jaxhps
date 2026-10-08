@@ -43,36 +43,6 @@ YMIN, YMAX = -0.5, 0.5
 ZMIN, ZMAX = -0.5, 0.5
 
 
-def setup_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--plots_dir",
-        type=str,
-        default="data/examples/accuracy_check_3D_ItI",
-        help="Directory for plot/.npz outputs (created if needed).",
-    )
-    parser.add_argument("--problem_1", action="store_true")
-    parser.add_argument("--problem_2", action="store_true")
-    parser.add_argument("--problem_3", action="store_true")
-    parser.add_argument("--problem_4", action="store_true")
-    parser.add_argument(
-        "--p_vals",
-        type=int,
-        nargs="+",
-        default=[4, 6, 8],
-        help="Chebyshev polynomial orders to sweep.",
-    )
-    parser.add_argument(
-        "--l_vals",
-        type=int,
-        nargs="+",
-        default=[1, 2],
-        help="Octree refinement levels to sweep.",
-    )
-    parser.add_argument("--debug", action="store_true")
-    return parser.parse_args()
-
-
 class Problem3DItI(ABC):
     """Abstract base for 3D ItI accuracy-check problems.
 
@@ -382,131 +352,109 @@ class Problem4(Problem3):
 
 
 # ---------------------------------------------------------------------------
-# Output
+# CLI
 # ---------------------------------------------------------------------------
 
 
-def save_results(
-    errors: np.ndarray,
-    l_vals: list[int],
-    p_vals: list[int],
-    name: str,
-    plots_dir: str,
-) -> None:
-    """Save the error grid to ``<plots_dir>/<name>.npz`` (creates dir)."""
-    os.makedirs(plots_dir, exist_ok=True)
-    out = os.path.join(plots_dir, f"{name}.npz")
-    np.savez(
-        out, errors=errors, l_vals=np.array(l_vals), p_vals=np.array(p_vals)
-    )
-    logging.info("Wrote %s", out)
-
-
-def maybe_plot(
-    errors: np.ndarray,
-    l_vals: list[int],
-    p_vals: list[int],
-    title: str,
-    save_path: str | None,
-) -> None:
-    """Plot max-norm relative error vs ``p`` (one curve per ``L``) if matplotlib is available."""
-    try:
-        import matplotlib.pyplot as plt
-    except ImportError:
-        logging.info("matplotlib not available; skipping plot")
-        return
-
-    fig, ax = plt.subplots()
-    for i, l in enumerate(l_vals):
-        ax.semilogy(p_vals, errors[i], marker="o", label=f"L={l}")
-    ax.set_xticks(p_vals)
-    ax.set_xlabel("p")
-    ax.set_ylabel(r"Relative $\ell_{\infty}$ error")
-    ax.legend()
-    ax.grid(True, which="both", linestyle="--", alpha=0.5)
-    if title:
-        ax.set_title(title)
-    fig.tight_layout()
-    if save_path is not None:
-        fig.savefig(save_path, dpi=150)
-        logging.info("Wrote %s", save_path)
-    plt.close(fig)
-
-
 def main() -> None:
-    args = setup_args()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--plots_dir",
+        type=str,
+        default="data/examples/accuracy_check_3D_ItI",
+        help="Directory for plot/.npz outputs (created if needed).",
+    )
+    parser.add_argument("--problem_1", action="store_true")
+    parser.add_argument("--problem_2", action="store_true")
+    parser.add_argument("--problem_3", action="store_true")
+    parser.add_argument("--problem_4", action="store_true")
+    parser.add_argument(
+        "--p_vals",
+        type=int,
+        nargs="+",
+        default=[4, 6, 8],
+        help="Chebyshev polynomial orders to sweep.",
+    )
+    parser.add_argument(
+        "--l_vals",
+        type=int,
+        nargs="+",
+        default=[1, 2],
+        help="Octree refinement levels to sweep.",
+    )
+    parser.add_argument("--debug", action="store_true")
+    args = parser.parse_args()
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
     )
 
-    if not (
+    run_all = not (
         args.problem_1 or args.problem_2 or args.problem_3 or args.problem_4
-    ):
-        # Default: run all.
-        args.problem_1 = args.problem_2 = args.problem_3 = args.problem_4 = (
-            True
-        )
-
-    if args.problem_1:
-        e = Problem1().run(args.l_vals, args.p_vals)
-        print("\nProblem1 errors (rows=L, cols=p):")
-        print(
-            np.array2string(e, formatter={"float_kind": lambda x: f"{x:.3e}"})
-        )
-        save_results(e, args.l_vals, args.p_vals, "problem_1", args.plots_dir)
-        maybe_plot(
-            e,
-            args.l_vals,
-            args.p_vals,
+    )
+    problems = (
+        (
+            args.problem_1,
+            Problem1,
             "Problem 1: variable-coefficient polynomial",
-            os.path.join(args.plots_dir, "problem_1.png"),
-        )
-
-    if args.problem_2:
-        e = Problem2().run(args.l_vals, args.p_vals)
-        print("\nProblem2 errors (rows=L, cols=p):")
-        print(
-            np.array2string(e, formatter={"float_kind": lambda x: f"{x:.3e}"})
-        )
-        save_results(e, args.l_vals, args.p_vals, "problem_2", args.plots_dir)
-        maybe_plot(
-            e,
-            args.l_vals,
-            args.p_vals,
+        ),
+        (
+            args.problem_2,
+            Problem2,
             "Problem 2: gravity Helmholtz plane wave",
-            os.path.join(args.plots_dir, "problem_2.png"),
-        )
-
-    if args.problem_3:
-        e = Problem3().run(args.l_vals, args.p_vals)
-        print("\nProblem3 errors (rows=L, cols=p):")
-        print(
-            np.array2string(e, formatter={"float_kind": lambda x: f"{x:.3e}"})
-        )
-        save_results(e, args.l_vals, args.p_vals, "problem_3", args.plots_dir)
-        maybe_plot(
-            e,
-            args.l_vals,
-            args.p_vals,
+        ),
+        (
+            args.problem_3,
+            Problem3,
             "Problem 3: Gaussian bump potential (paper 5.1)",
-            os.path.join(args.plots_dir, "problem_3.png"),
+        ),
+        (
+            args.problem_4,
+            Problem4,
+            "Problem 4: lens potential (paper 5.2)",
+        ),
+    )
+    for number, (enabled, problem, title) in enumerate(problems, start=1):
+        if not (enabled or run_all):
+            continue
+        errors = problem().run(args.l_vals, args.p_vals)
+        print(f"\nProblem{number} errors (rows=L, cols=p):")
+        print(
+            np.array2string(
+                errors, formatter={"float_kind": lambda x: f"{x:.3e}"}
+            )
         )
 
-    if args.problem_4:
-        e = Problem4().run(args.l_vals, args.p_vals)
-        print("\nProblem4 errors (rows=L, cols=p):")
-        print(
-            np.array2string(e, formatter={"float_kind": lambda x: f"{x:.3e}"})
+        os.makedirs(args.plots_dir, exist_ok=True)
+        out = os.path.join(args.plots_dir, f"problem_{number}.npz")
+        np.savez(
+            out,
+            errors=errors,
+            l_vals=np.array(args.l_vals),
+            p_vals=np.array(args.p_vals),
         )
-        save_results(e, args.l_vals, args.p_vals, "problem_4", args.plots_dir)
-        maybe_plot(
-            e,
-            args.l_vals,
-            args.p_vals,
-            "Problem 4: lens potential (paper 5.2)",
-            os.path.join(args.plots_dir, "problem_4.png"),
-        )
+        logging.info("Wrote %s", out)
+
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            logging.info("matplotlib not available; skipping plot")
+            continue
+
+        fig, ax = plt.subplots()
+        for i, l in enumerate(args.l_vals):
+            ax.semilogy(args.p_vals, errors[i], marker="o", label=f"L={l}")
+        ax.set_xticks(args.p_vals)
+        ax.set_xlabel("p")
+        ax.set_ylabel(r"Relative $\ell_{\infty}$ error")
+        ax.legend()
+        ax.grid(True, which="both", linestyle="--", alpha=0.5)
+        ax.set_title(title)
+        fig.tight_layout()
+        save_path = os.path.join(args.plots_dir, f"problem_{number}.png")
+        fig.savefig(save_path, dpi=150)
+        logging.info("Wrote %s", save_path)
+        plt.close(fig)
 
 
 if __name__ == "__main__":
