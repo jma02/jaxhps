@@ -32,6 +32,8 @@ image = (
 def case_grid(suite):
     if suite == "smoke":
         return [("vascular", 10, 64)]
+    if suite == "high-frequency":
+        return [("dense", 80, n) for n in (192, 224, 256)]
     if suite == "refinement":
         return [
             (variant, waves, n)
@@ -43,7 +45,7 @@ def case_grid(suite):
             for variant in ("vascular", "dense")
             for n in grids
         ]
-    raise ValueError("suite must be smoke or refinement")
+    raise ValueError("suite must be smoke, refinement, or high-frequency")
 
 
 @app.function(
