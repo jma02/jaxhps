@@ -1,7 +1,6 @@
 """One FFT solve for a branching breast phantom at a specified box size in wavelengths."""
 
 import argparse
-import json
 import platform
 import resource
 import time
@@ -12,22 +11,13 @@ import jax.numpy as jnp
 import numpy as np
 import scipy
 
+from benchmark_io import save_result
 from fft_volume_3d import (
     evaluate_volume_field,
     prepare_volume_solver,
     solve_volume,
 )
 from lucka_phantom_3d import vascular_geometry, vascular_phantom
-
-
-def receiver_points(count=512, radius=2.5):
-    """Fixed equal-weight Fibonacci receiver samples, not a volume norm."""
-    index = np.arange(count)
-    z = 1 - 2 * (index + 0.5) / count
-    phi = index * np.pi * (3 - np.sqrt(5))
-    return radius * np.column_stack(
-        [np.sqrt(1 - z**2) * np.cos(phi), np.sqrt(1 - z**2) * np.sin(phi), z]
-    )
 
 
 def main():
@@ -75,12 +65,7 @@ def main():
         phase="setup",
     )
 
-    def save():
-        temporary = args.out.with_suffix(".tmp")
-        temporary.write_text(json.dumps(row))
-        temporary.replace(args.out)
-
-    save()
+    save_result(args.out, row)
     t0 = time.perf_counter()
     points, b, kernel, operator = prepare_volume_solver(
         args.n,
@@ -91,7 +76,7 @@ def main():
     row["setup_seconds"] = time.perf_counter() - t0
     row["coefficient_range"] = [float(b.min()), float(b.max())]
     row["phase"] = "solve"
-    save()
+    save_result(args.out, row)
     print(f"SETUP {row['setup_seconds']:.2f}s; starting solve", flush=True)
     t1 = time.perf_counter()
     u, stats = solve_volume(
@@ -106,13 +91,23 @@ def main():
     row["solve"] = stats
     row["converged"] = stats["info"] == 0 and stats["final_rel_res"] <= 1e-8
     row["phase"] = "evaluation" if row["converged"] else "complete"
-    save()
+    save_result(args.out, row)
     print(
         f"SOLVE {row['solve_seconds']:.2f}s residual={stats['final_rel_res']:.3g}",
         flush=True,
     )
     if row["converged"]:
-        xyz = receiver_points(args.receivers)
+        # Fixed equal-weight Fibonacci samples, not a volume norm.
+        index = np.arange(args.receivers)
+        z = 1 - 2 * (index + 0.5) / args.receivers
+        phi = index * np.pi * (3 - np.sqrt(5))
+        xyz = 2.5 * np.column_stack(
+            [
+                np.sqrt(1 - z**2) * np.cos(phi),
+                np.sqrt(1 - z**2) * np.sin(phi),
+                z,
+            ]
+        )
         t1 = time.perf_counter()
         field = np.asarray(
             evaluate_volume_field(
@@ -138,7 +133,7 @@ def main():
     row["host_peak_rss_bytes"] = (
         resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
     )
-    save()
+    save_result(args.out, row)
 
 
 if __name__ == "__main__":

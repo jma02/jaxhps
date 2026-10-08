@@ -7,6 +7,8 @@ from pathlib import Path
 
 import modal
 
+from benchmark_io import save_result
+
 ROOT = Path(__file__).resolve().parents[1]
 app = modal.App("jaxhps-vascular-a100")
 image = (
@@ -139,7 +141,7 @@ def main(
         raise ValueError("use an empty output directory")
     for row in measure.remote_gen(suite, budget_seconds, case_seconds):
         name = f"{row['variant']}-w{row['waves']}-n{row['n']}"
-        (directory / f"{name}.json").write_text(json.dumps(row))
+        save_result(directory / f"{name}.json", row)
         print(
             f"SAVED {name} failed={row.get('failed', False)} skipped={row.get('skipped', False)}",
             flush=True,
