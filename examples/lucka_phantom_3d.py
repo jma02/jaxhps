@@ -5,6 +5,8 @@ clinical phantom. All joins have four continuous derivatives. Feature widths
 are geometric parameters and must still be resolved by the discretization.
 """
 
+from functools import lru_cache
+
 import numpy as np
 from scipy.special import betainc
 
@@ -71,3 +73,100 @@ def tissue_phantom(points, a=1.25, geometry="hemisphere"):
     b = (1.0 - vessel) * b + 0.103 * vessel
     b = (1.0 - skin) * b + 0.174 * skin
     return b * zcut
+
+
+@lru_cache(maxsize=8)
+def vascular_geometry(variant="vascular", seed=7):
+    """Return normalized branching centre lines and lobular ellipsoids."""
+    if variant not in ("vascular", "dense"):
+        raise ValueError("variant must be vascular or dense")
+    rng = np.random.default_rng(seed)
+    roots = 3 if variant == "vascular" else 5
+    branches = []
+    for angle in np.arange(roots) * (2 * np.pi / roots):
+        start = np.array([0.42 * np.cos(angle), 0.36 * np.sin(angle), -0.12])
+        pending = [(start, angle, 0)]
+        while pending:
+            start, heading, level = pending.pop()
+            length = 0.23 * 0.84**level
+            direction = np.array(
+                [0.32 * np.cos(heading), 0.32 * np.sin(heading), -1.0]
+            )
+            end = start + length * direction
+            middle = (start + end) / 2
+            middle[:2] += rng.uniform(-0.035, 0.035, 2)
+            radius = 0.045 * 0.8**level
+            branches.append((start, middle, end, radius))
+            if level < 3:
+                for sign in (-1, 1):
+                    pending.append((end, heading + sign * 1.15, level + 1))
+    lobules = []
+    for _ in range(18 if variant == "vascular" else 36):
+        centre = rng.uniform([-0.4, -0.32, -0.65], [0.4, 0.32, -0.18])
+        axes = rng.uniform(0.12, 0.26, 3)
+        angle = rng.uniform(0, 2 * np.pi)
+        lobules.append((centre, axes, angle))
+    return tuple(branches), tuple(lobules)
+
+
+def _ellipsoid_union(mask, points, centre, axes, rotation):
+    extent = np.abs(rotation) @ axes
+    inside = np.all(np.abs(points - centre) < extent, axis=-1)
+    local = (points[inside] - centre) @ rotation / axes
+    profile = np.maximum(1 - np.sum(local**2, axis=-1), 0) ** 5
+    mask[inside] = 1 - (1 - mask[inside]) * (1 - profile)
+
+
+def vascular_phantom(points, a=1.25, variant="vascular", seed=7):
+    """C4 synthetic pendant breast with 45/75 curved, tapering branches.
+
+    Coordinates are normalized by R=0.8a around z=0.55a. Overlapping
+    ellipsoidal bumps form vessels without nearest-segment distance joins.
+    This is a lossless scalar model, not a segmented anatomical phantom.
+    """
+    points = np.asarray(points, dtype=float)
+    if a <= 0 or points.shape[-1:] != (3,):
+        raise ValueError("positive half-width and (..., 3) points required")
+    branches, lobules = vascular_geometry(variant, seed)
+    shape = points.shape[:-1]
+    normalized = (points.reshape(-1, 3) - [0, 0, 0.55 * a]) / (0.8 * a)
+    result = np.zeros(len(normalized))
+    for offset in range(0, len(normalized), 65536):
+        pts = normalized[offset : offset + 65536]
+        r = np.linalg.norm(pts / [0.92, 0.82, 1.0], axis=-1)
+        envelope = step_down(r, 0.97, 0.10) * step_down(pts[:, 2], 0, 0.10)
+        active = envelope > 0
+        p = pts[active]
+        fibro = np.zeros(len(p))
+        vessels = np.zeros(len(p))
+        for centre, axes, angle in lobules:
+            c, s = np.cos(angle), np.sin(angle)
+            rotation = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+            _ellipsoid_union(fibro, p, centre, axes, rotation)
+        for start, middle, end, radius in branches:
+            for t in np.linspace(0, 1, 6):
+                centre = (
+                    (1 - t) ** 2 * start
+                    + 2 * t * (1 - t) * middle
+                    + t**2 * end
+                )
+                tangent = 2 * ((1 - t) * (middle - start) + t * (end - middle))
+                tangent /= np.linalg.norm(tangent)
+                normal = np.cross(tangent, [1, 0, 0])
+                normal /= np.linalg.norm(normal)
+                rotation = np.column_stack(
+                    [normal, np.cross(tangent, normal), tangent]
+                )
+                axes = np.array(
+                    [radius, radius, np.linalg.norm(end - start) / 3]
+                )
+                _ellipsoid_union(vessels, p, centre, axes, rotation)
+        fat = -0.041 + 0.006 * np.prod(np.cos(p * [11, 13, 9]), axis=-1)
+        b = (1 - fibro) * fat + 0.020 * fibro
+        b = (1 - vessels) * b + 0.103 * vessels
+        skin = bump((r[active] - 0.9) / 0.04)
+        b = (1 - skin) * b + 0.174 * skin
+        values = np.zeros(len(pts))
+        values[active] = b * envelope[active]
+        result[offset : offset + len(pts)] = values
+    return result.reshape(shape)
