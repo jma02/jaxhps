@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import resource
+from pathlib import Path
 import sys
 
 import numpy as np
@@ -19,18 +20,6 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 OUT_DIR = "data/examples/matfree_experiments"
-
-
-def rss_gb() -> float:
-    with open("/proc/self/status") as f:
-        for line in f:
-            if line.startswith("VmRSS:"):
-                return int(line.split()[1]) / 1024**2
-    return float("nan")
-
-
-def peak_gb() -> float:
-    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024**2
 
 
 def main() -> None:
@@ -41,13 +30,15 @@ def main() -> None:
     p.add_argument("--restart", type=int, default=400)
     args = p.parse_args()
 
-    stages = []
+    snapshots = []
 
-    def mark(name: str) -> None:
-        stages.append(dict(stage=name, rss_GB=rss_gb(), peak_GB=peak_gb()))
-        print(f"  {name:28s} rss={stages[-1]['rss_GB']:6.2f} GB")
-
-    mark("start")
+    snapshots.append(
+        (
+            "start",
+            int(Path("/proc/self/statm").read_text().split()[1]),
+            resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+        )
+    )
 
     import jax.numpy as jnp  # noqa: E402
 
@@ -61,10 +52,22 @@ def main() -> None:
         permute_to_domain,
     )
 
-    mark("imports")
+    snapshots.append(
+        (
+            "imports",
+            int(Path("/proc/self/statm").read_text().split()[1]),
+            resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+        )
+    )
 
     sd = load_SD_matrices_3D(args.npz)
-    mark("load S, D fixture")
+    snapshots.append(
+        (
+            "load S, D fixture",
+            int(Path("/proc/self/statm").read_text().split()[1]),
+            resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+        )
+    )
 
     a, q, L, kappa = sd["a"], sd["q"], sd["L"], sd["kappa"]
     eta = float(kappa)
@@ -73,7 +76,13 @@ def main() -> None:
         xmin=-a, xmax=a, ymin=-a, ymax=a, zmin=-a, zmax=a
     )
     domain = Domain(p=p_ord, q=q, root=root, L=L)
-    mark("build domain")
+    snapshots.append(
+        (
+            "build domain",
+            int(Path("/proc/self/statm").read_text().split()[1]),
+            resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+        )
+    )
 
     int_pts = np.asarray(domain.interior_points)
     r = np.linalg.norm(int_pts, axis=-1)
@@ -92,25 +101,63 @@ def main() -> None:
         use_ItI=True,
         eta=eta,
     )
-    mark("assemble PDEProblem")
+    snapshots.append(
+        (
+            "assemble PDEProblem",
+            int(Path("/proc/self/statm").read_text().split()[1]),
+            resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+        )
+    )
 
     _, T_leaves, _, h_leaves = local_solve_stage_uniform_3D_ItI(problem)
     T_leaves.block_until_ready()
-    mark("leaf local solves")
+    snapshots.append(
+        (
+            "leaf local solves",
+            int(Path("/proc/self/statm").read_text().split()[1]),
+            resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+        )
+    )
 
     maps = build_interface_maps(domain)
-    mark("interface maps")
+    snapshots.append(
+        (
+            "interface maps",
+            int(Path("/proc/self/statm").read_text().split()[1]),
+            resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+        )
+    )
 
     bp = np.asarray(domain.boundary_points).reshape(-1, 3)
     _, sdp = permute_to_domain(sd, bp)
     S = jnp.asarray(sdp["S"])
     S.block_until_ready()
-    mark("S, D permuted to device")
+    snapshots.append(
+        (
+            "S, D permuted to device",
+            int(Path("/proc/self/statm").read_text().split()[1]),
+            resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+        )
+    )
 
     n_flat = maps.n_flat
     basis = jnp.zeros((args.restart + 1, n_flat), dtype=jnp.complex128)
     basis.block_until_ready()
-    mark(f"Krylov basis (restart={args.restart})")
+    snapshots.append(
+        (
+            f"Krylov basis (restart={args.restart})",
+            int(Path("/proc/self/statm").read_text().split()[1]),
+            resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+        )
+    )
+
+    page_gb = os.sysconf("SC_PAGE_SIZE") / 1024**3
+    stages = [
+        dict(stage=name, rss_GB=pages * page_gb, peak_GB=peak_kb / 1024**2)
+        for name, pages, peak_kb in snapshots
+    ]
+    for stage in stages:
+        print(f"  {stage['stage']:28s} rss={stage['rss_GB']:6.2f} GB")
 
     sizes = dict(
         n_bdry=int(bp.shape[0]),

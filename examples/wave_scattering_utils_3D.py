@@ -1774,40 +1774,23 @@ def solve_bie_flat_matfree(
         z = dense_solve_flat(matvec, rhs)
         info_code = 0
     elif method == "gmres":
-        squeeze = rhs.ndim == 1
-        if squeeze:
-            z, info_code = _gmres_python_loop(
-                matvec,
-                rhs,
-                tol=tol,
-                restart=restart,
-                maxiter=maxiter,
-                M=precond,
-                stats=stats,
-            )
-        else:
-            n_flat, n_src = rhs.shape
 
-            def flat_matvec(x):
-                return matvec(x.reshape(n_flat, n_src)).ravel()
+        def flat_matvec(x):
+            return matvec(x.reshape(rhs.shape)).ravel()
 
-            if precond is None:
-                flat_precond = None
-            else:
+        def flat_precond(x):
+            return precond(x.reshape(rhs.shape)).ravel()
 
-                def flat_precond(x):
-                    return precond(x.reshape(n_flat, n_src)).ravel()
-
-            z, info_code = _gmres_python_loop(
-                flat_matvec,
-                rhs.ravel(),
-                tol=tol,
-                restart=restart,
-                maxiter=maxiter,
-                M=flat_precond,
-                stats=stats,
-            )
-            z = z.reshape(n_flat, n_src)
+        z, info_code = _gmres_python_loop(
+            flat_matvec,
+            rhs.ravel(),
+            tol=tol,
+            restart=restart,
+            maxiter=maxiter,
+            M=None if precond is None else flat_precond,
+            stats=stats,
+        )
+        z = z.reshape(rhs.shape)
     else:
         raise ValueError(f"unknown method {method!r}")
     jax.block_until_ready(z)

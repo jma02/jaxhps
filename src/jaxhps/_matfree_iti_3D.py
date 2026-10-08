@@ -32,7 +32,7 @@ needs.
 
 Memory: the flat system stores the leaf ItI blocks,
 :math:`8^L (6q^2)^2` entries, versus :math:`(6 \cdot 4^L q^2)^2` for the root
-operator -- a factor :math:`4.5 \cdot 2^L` fewer entries -- and neither the
+operator -- a factor :math:`2^L` fewer entries -- and neither the
 intermediate merge operators nor the dense root DtN map is ever built.
 """
 
@@ -528,19 +528,15 @@ def flat_bie_rhs(
     elif h_leaves is not None and jnp.asarray(h_leaves).ndim == 3:
         n_src = jnp.asarray(h_leaves).shape[-1]
     shape = (n_flat,) if n_src is None else (n_flat, n_src)
-    rhs = jnp.zeros(shape, dtype=jnp.complex128)
-
-    if h_leaves is not None:
-        h_flat = _flatten_leafwise(jnp.asarray(h_leaves))
-        p_safe = jnp.where(maps.is_interior, maps.partner, 0)
-        gathered = -h_flat[p_safe]
-        mask = maps.is_interior
-        if rhs.ndim == 2:
-            mask = mask[:, None]
-        rhs = jnp.where(mask, gathered, rhs)
-        h_b = h_flat[maps.bdry_rows]
-    else:
-        h_b = jnp.zeros(rhs[maps.bdry_rows].shape, dtype=jnp.complex128)
+    boundary_zeros = jnp.zeros(
+        (maps.bdry_rows.size, *shape[1:]), dtype=jnp.complex128
+    )
+    rhs = root_ItI_rhs(h_leaves, maps, boundary_zeros)
+    h_b = (
+        boundary_zeros
+        if h_leaves is None
+        else _flatten_leafwise(jnp.asarray(h_leaves))[maps.bdry_rows]
+    )
 
     # Known part of the scattered traces: the particular solution's
     # contribution to (u, u_n), minus the incident field when the interior
