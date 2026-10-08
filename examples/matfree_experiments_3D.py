@@ -86,22 +86,18 @@ def peak_rss_gb() -> float:
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0**2
 
 
-def sphere_targets(rho: float, n_theta: int = 12, n_phi: int = 24):
-    th = np.arccos(np.linspace(-0.95, 0.95, n_theta))
-    ph = np.linspace(0.0, 2 * np.pi, n_phi, endpoint=False)
+def mie_error(out: dict, sd: dict, b_radial, source_dirs, rho: float) -> float:
+    """Relative L2 error of the exterior scattered field against Mie."""
+    th = np.arccos(np.linspace(-0.95, 0.95, 12))
+    ph = np.linspace(0.0, 2 * np.pi, 24, endpoint=False)
     TH, PH = np.meshgrid(th, ph, indexing="ij")
-    return np.column_stack(
+    tgt = np.column_stack(
         [
             (rho * np.sin(TH) * np.cos(PH)).ravel(),
             (rho * np.sin(TH) * np.sin(PH)).ravel(),
             (rho * np.cos(TH)).ravel(),
         ]
     )
-
-
-def mie_error(out: dict, sd: dict, b_radial, source_dirs, rho: float) -> float:
-    """Relative L2 error of the exterior scattered field against Mie."""
-    tgt = sphere_targets(rho)
     u = np.asarray(
         eval_uscat_offsurface_3D(
             jnp.asarray(tgt),
@@ -337,7 +333,16 @@ def exp_nsrc(args) -> None:
     b_radial = b_poly(args.b_amp)
     rows = []
     for k in args.nsrc_list:
-        dirs = fibonacci_dirs(k)
+        i = np.arange(k) + 0.5
+        phi = np.arccos(1.0 - 2.0 * i / k)
+        theta = np.pi * (1 + 5**0.5) * i
+        dirs = np.column_stack(
+            [
+                np.cos(theta) * np.sin(phi),
+                np.sin(theta) * np.sin(phi),
+                np.cos(phi),
+            ]
+        )
         out = run_matfree(
             sd,
             b_radial,
@@ -446,20 +451,6 @@ def exp_precond(args) -> None:
                 f"conv={row['converged']}"
             )
     dump("precond", rows, args)
-
-
-def fibonacci_dirs(n: int) -> np.ndarray:
-    """``n`` roughly equidistributed unit directions."""
-    i = np.arange(n) + 0.5
-    phi = np.arccos(1.0 - 2.0 * i / n)
-    theta = np.pi * (1 + 5**0.5) * i
-    return np.column_stack(
-        [
-            np.cos(theta) * np.sin(phi),
-            np.sin(theta) * np.sin(phi),
-            np.cos(phi),
-        ]
-    )
 
 
 def dump(name: str, rows: list, args) -> None:

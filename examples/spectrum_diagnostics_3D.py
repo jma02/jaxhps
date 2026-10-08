@@ -1,28 +1,18 @@
-r"""Spectral diagnostics for the flat (unmerged) 3D HPS interface system.
+r"""Small-system spectral diagnostics for the flat 3D HPS interface system.
 
-Unpreconditioned restarted GMRES stagnates on the flat interface system of
-:mod:`jaxhps._matfree_iti_3D`.  This script measures the structural reason.
+The lossless continuum ItI map preserves the surface-quadrature inner product.
+The discrete singular values of :math:`W^{1/2}TW^{-1/2}` must be checked under
+refinement, not assumed to equal one. The refinement mode also checks both
+signs of the complex coefficient shift.
 
-1. *Leaf ItI maps are unitary in the surface-quadrature inner product* when
-   the medium is lossless (real wavenumber, real coefficient): the impedance
-   map conserves energy, so :math:`W^{1/2} T W^{-1/2}` has all singular
-   values 1.  Adding absorption (complex coefficient) makes it a strict
-   contraction.
+The interior gluing operator :math:`\mathcal{D}=\Pi T` swaps outgoing traces
+across interfaces. Its spectrum can put :math:`I+\mathcal{D}` near the circle
+:math:`|\lambda-1|=1`. A spectrum surrounding the origin can obstruct GMRES,
+but eigenvalues alone do not determine convergence for nonnormal operators.
+This script compares these spectra, the coupled BIE spectrum, and measured
+GMRES residuals with several preconditioners.
 
-2. Therefore the interior gluing operator
-   :math:`\mathcal{D} = \Pi\, T` (apply the leaf maps, then swap each node
-   with its interface partner) is unitary-like as well, and the interface
-   system :math:`I + \mathcal{D}` has spectrum on/near the circle
-   :math:`|\lambda - 1| = 1`, which passes through the origin.  A spectrum
-   that surrounds or touches 0 is exactly the configuration in which GMRES
-   convergence is not governed by conditioning and in which preconditioners
-   that only cluster eigenvalue magnitudes cannot help.
-
-3. The same diagnostic for the coupled flat BIE operator, and measured GMRES
-   iteration counts with a few candidate preconditioners, for comparison.
-
-Everything here materializes the operators, so it is limited to small cases
-(``L=1``, small ``q``); the production path never forms them.
+All operators here are materialized: use small ``L`` and ``q``.
 
 Usage:
     python examples/spectrum_diagnostics_3D.py --q 4 --p 8 --kappa 4.0
@@ -144,61 +134,11 @@ def origin_in_hull(evals: np.ndarray) -> dict:
     )
 
 
-def gmres_run(A: np.ndarray, rhs: np.ndarray, M, tol, restart, maxiter):
-    stats: dict = {}
-    A_j = jnp.asarray(A)
-    x, code = _gmres_python_loop(
-        lambda v: A_j @ v,
-        jnp.asarray(rhs),
-        tol=tol,
-        restart=restart,
-        maxiter=maxiter,
-        M=M,
-        stats=stats,
-    )
-    res = float(np.linalg.norm(A @ np.asarray(x) - rhs) / np.linalg.norm(rhs))
-    return dict(
-        converged=bool(code == 0),
-        n_matvec=int(stats["n_matvec"]),
-        n_cycles=int(stats["n_cycles"]),
-        rel_res=res,
-        res_history=[float(v) for v in stats["res_history"]],
-    )
-
-
-def preconditioners(A: np.ndarray, maps, n_per_leaf: int) -> dict:
-    """Candidate left preconditioners, all materialized (diagnostic only)."""
-    out = {"none": None}
-
-    diag = np.diag(A).copy()
-    diag[diag == 0.0] = 1.0
-    d_j = jnp.asarray(1.0 / diag)
-    out["jacobi"] = lambda v: d_j * v
-
-    n = A.shape[0]
-    nb = n // n_per_leaf
-    blocks = np.zeros((nb, n_per_leaf, n_per_leaf), dtype=A.dtype)
-    for i in range(nb):
-        sl = slice(i * n_per_leaf, (i + 1) * n_per_leaf)
-        blocks[i] = A[sl, sl]
-    binv = jnp.asarray(np.linalg.inv(blocks))
-
-    def block_jacobi(v):
-        vb = v.reshape(nb, n_per_leaf)
-        return jnp.einsum("bij,bj->bi", binv, vb).reshape(v.shape)
-
-    out["block_jacobi_leafwise"] = block_jacobi
-
-    lu = lu_factor(A)
-    out["exact_lu"] = lambda v: jnp.asarray(lu_solve(lu, np.asarray(v)))
-    return out
-
-
 def refine_study(args: argparse.Namespace) -> None:
     r"""Is the leaf ItI map unitary in the limit, or only approximately?
 
-    Claim 1 above is a statement about the continuous operator.  The computed
-    ItI matrix is only unitary up to the local discretization error, so the
+    Unitarity holds for the continuous operator. The computed ItI matrix
+    is only unitary up to the local discretization error, so the
     evidence has to be a refinement study: ``max|sigma - 1|`` and the spread
     of ``|lambda(D)|`` must go to zero as ``p, q`` grow at fixed geometry.
     """
@@ -374,10 +314,52 @@ def main(args: argparse.Namespace) -> None:
         maps.n_flat
     )
     rhs = rhs / np.linalg.norm(rhs)
+    diag = np.diag(A_bie).copy()
+    diag[diag == 0.0] = 1.0
+    d_inv = jnp.asarray(1.0 / diag)
+    n_per_leaf = maps.n_per_leaf
+    blocks = np.stack(
+        [
+            A_bie[start : start + n_per_leaf, start : start + n_per_leaf]
+            for start in range(0, maps.n_flat, n_per_leaf)
+        ]
+    )
+    binv = jnp.asarray(np.linalg.inv(blocks))
+
+    def block_jacobi(v):
+        return jnp.einsum(
+            "bij,bj->bi", binv, v.reshape(maps.n_leaves, n_per_leaf)
+        ).reshape(v.shape)
+
+    lu = lu_factor(A_bie)
+    preconditioners = {
+        "none": None,
+        "jacobi": lambda v: d_inv * v,
+        "block_jacobi_leafwise": block_jacobi,
+        "exact_lu": lambda v: jnp.asarray(lu_solve(lu, np.asarray(v))),
+    }
     gm = {}
-    for name, M in preconditioners(A_bie, maps, maps.n_per_leaf).items():
-        gm[name] = gmres_run(
-            A_bie, rhs, M, args.tol, args.restart, args.maxiter
+    A_j = jnp.asarray(A_bie)
+    for name, M in preconditioners.items():
+        stats = {}
+        x, code = _gmres_python_loop(
+            lambda v: A_j @ v,
+            jnp.asarray(rhs),
+            tol=args.tol,
+            restart=args.restart,
+            maxiter=args.maxiter,
+            M=M,
+            stats=stats,
+        )
+        gm[name] = dict(
+            converged=bool(code == 0),
+            n_matvec=int(stats["n_matvec"]),
+            n_cycles=int(stats["n_cycles"]),
+            rel_res=float(
+                np.linalg.norm(A_bie @ np.asarray(x) - rhs)
+                / np.linalg.norm(rhs)
+            ),
+            res_history=[float(v) for v in stats["res_history"]],
         )
         g = gm[name]
         print(
@@ -404,58 +386,56 @@ def main(args: argparse.Namespace) -> None:
     print(f"\nwrote {npz_path}\nwrote {json_path}")
 
     if args.plot:
-        make_plots(ev_D, ev_A, ev_bie, gm, args)
+        import matplotlib
 
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
 
-def make_plots(ev_D, ev_A, ev_bie, gm, args) -> None:
-    import matplotlib
+        fig, ax = plt.subplots(1, 3, figsize=(15, 4.6))
+        th = np.linspace(0, 2 * np.pi, 400)
 
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+        ax[0].plot(np.cos(th), np.sin(th), "k--", lw=1, label="unit circle")
+        ax[0].scatter(ev_D.real, ev_D.imag, s=6, alpha=0.6)
+        ax[0].set_title(r"gluing operator $\mathcal{D}$")
 
-    fig, ax = plt.subplots(1, 3, figsize=(15, 4.6))
-    th = np.linspace(0, 2 * np.pi, 400)
+        ax[1].plot(
+            1 + np.cos(th), np.sin(th), "k--", lw=1, label=r"$|\lambda-1|=1$"
+        )
+        ax[1].scatter(ev_A.real, ev_A.imag, s=6, alpha=0.6)
+        ax[1].plot([0], [0], "rx", ms=9, label="origin")
+        ax[1].set_title(r"interface system $I + \mathcal{D}$")
 
-    ax[0].plot(np.cos(th), np.sin(th), "k--", lw=1, label="unit circle")
-    ax[0].scatter(ev_D.real, ev_D.imag, s=6, alpha=0.6)
-    ax[0].set_title(r"gluing operator $\mathcal{D}$")
+        ax[2].scatter(ev_bie.real, ev_bie.imag, s=6, alpha=0.6)
+        ax[2].plot([0], [0], "rx", ms=9, label="origin")
+        ax[2].set_title("coupled flat BIE operator")
 
-    ax[1].plot(
-        1 + np.cos(th), np.sin(th), "k--", lw=1, label=r"$|\lambda-1|=1$"
-    )
-    ax[1].scatter(ev_A.real, ev_A.imag, s=6, alpha=0.6)
-    ax[1].plot([0], [0], "rx", ms=9, label="origin")
-    ax[1].set_title(r"interface system $I + \mathcal{D}$")
+        for a_ in ax:
+            a_.set_xlabel(r"$\Re\lambda$")
+            a_.set_ylabel(r"$\Im\lambda$")
+            a_.set_aspect("equal")
+            a_.legend(loc="upper right", fontsize=8)
+            a_.grid(alpha=0.3)
+        fig.suptitle(
+            rf"$\kappa = {args.kappa}$, $L={args.L}$, $q={args.q}$, $p={args.p}$"
+        )
+        fig.tight_layout()
+        p1 = os.path.join(OUT_DIR, f"{args.out}_spectra.png")
+        fig.savefig(p1, dpi=140)
 
-    ax[2].scatter(ev_bie.real, ev_bie.imag, s=6, alpha=0.6)
-    ax[2].plot([0], [0], "rx", ms=9, label="origin")
-    ax[2].set_title("coupled flat BIE operator")
-
-    for a_ in ax:
-        a_.set_xlabel(r"$\Re\lambda$")
-        a_.set_ylabel(r"$\Im\lambda$")
-        a_.set_aspect("equal")
-        a_.legend(loc="upper right", fontsize=8)
-        a_.grid(alpha=0.3)
-    fig.suptitle(
-        rf"$\kappa = {args.kappa}$, $L={args.L}$, $q={args.q}$, $p={args.p}$"
-    )
-    fig.tight_layout()
-    p1 = os.path.join(OUT_DIR, f"{args.out}_spectra.png")
-    fig.savefig(p1, dpi=140)
-
-    fig2, ax2 = plt.subplots(figsize=(6, 4.4))
-    for name, g in gm.items():
-        ax2.semilogy(g["res_history"], label=f"{name} ({g['n_matvec']} mv)")
-    ax2.set_xlabel("GMRES iteration (within cycle)")
-    ax2.set_ylabel("relative residual")
-    ax2.grid(alpha=0.3)
-    ax2.legend(fontsize=8)
-    ax2.set_title("coupled flat BIE: preconditioner comparison")
-    fig2.tight_layout()
-    p2 = os.path.join(OUT_DIR, f"{args.out}_gmres.png")
-    fig2.savefig(p2, dpi=140)
-    print(f"wrote {p1}\nwrote {p2}")
+        fig2, ax2 = plt.subplots(figsize=(6, 4.4))
+        for name, g in gm.items():
+            ax2.semilogy(
+                g["res_history"], label=f"{name} ({g['n_matvec']} mv)"
+            )
+        ax2.set_xlabel("GMRES iteration (within cycle)")
+        ax2.set_ylabel("relative residual")
+        ax2.grid(alpha=0.3)
+        ax2.legend(fontsize=8)
+        ax2.set_title("coupled flat BIE: preconditioner comparison")
+        fig2.tight_layout()
+        p2 = os.path.join(OUT_DIR, f"{args.out}_gmres.png")
+        fig2.savefig(p2, dpi=140)
+        print(f"wrote {p1}\nwrote {p2}")
 
 
 if __name__ == "__main__":

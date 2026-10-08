@@ -1,45 +1,24 @@
-r"""Preconditioners for the flat leaf-interface system, and what they do.
+r"""Preconditioners for the flat leaf-interface system.
 
-The flat operator of :mod:`jaxhps._matfree_iti_3D` has a very particular
-structure: on an interior row the only diagonal entry is the node's own trace,
-and *all* coupling leaves the leaf,
+On interior rows, :math:`(Az)_i = z_i + (T^{(\ell')}z^{(\ell')})_{partner(i)}`
+with :math:`\ell' \ne \ell(i)`. Thus the leaf-block diagonal is the identity;
+Jacobi scaling only affects boundary rows. Nearly unitary lossless leaf maps
+can produce an interface spectrum near :math:`|\lambda-1|=1`, reaching the
+origin. In the measured cases, refinement fills this annulus more densely
+and increases GMRES iterations despite modest condition numbers.
 
-.. math::
-   (A z)_i = z_i + \big(T^{(\ell')} z^{(\ell')}\big)_{{\rm partner}(i)},
-   \qquad \ell' \neq \ell(i),
-
-so, grouping the unknowns by leaf, :math:`A = I + N` with :math:`N` purely
-off-block-diagonal on the interior rows: the block diagonal is the identity and
-diagonal scaling can only ever act through the boundary rows. Since the leaf
-ItI maps are close to unitary for real :math:`\kappa` and real coefficients,
-the eigenvalues of :math:`I + N` sit near the circle :math:`|\lambda - 1| = 1`,
-which passes through the origin. That is the observed obstruction: the
-Jacobi-preconditioned operator is *well conditioned* yet slow, because its
-spectrum fills an annulus around the origin, and refinement adds interface
-modes that fill it more densely -- iteration counts grow with :math:`q` at
-fixed :math:`\kappa`.
-
-Two families are provided, with very different behaviour:
-
-* :func:`make_sweep_preconditioner` -- Gauss-Seidel sweeps over the leaves in a
-  diagonal ordering, applying :math:`(I + N_<)^{-1}` by forward substitution at
-  the cost of one matvec per sweep and no factorization (the impedance
-  double-sweep idea, free here because the HPS interface unknowns already *are*
-  impedance traces). Measured on the real coupled system it does **not** help:
-  the associated stationary iteration has spectral radius above one, and the
-  spectrum is not clustered by any triangular part.
-* :func:`make_shifted_operator_preconditioner` -- invert a *damped* copy of the
-  same flat operator, built from leaf ItI maps of the complex-shifted problem
-  :math:`\kappa^2 \to \kappa^2 (1 + i\varepsilon)`. Damping pulls the interface
-  spectrum off the origin and clusters the preconditioned spectrum, giving
-  iteration counts an order of magnitude smaller and, in the measured range,
-  independent of :math:`q`. Its cost is a solve with the damped operator, which
-  here is a dense factorization and therefore a diagnostic rather than a
+* :func:`make_sweep_preconditioner` applies triangular Gauss-Seidel solves
+  in diagonal leaf orderings without factorization. In the measured coupled
+  systems, sweeps did not cluster the spectrum or improve convergence; the
+  associated stationary iteration had spectral radius above one.
+* :func:`make_shifted_operator_preconditioner` inverts the flat operator for
+  :math:`\kappa^2 \to \kappa^2(1+i\varepsilon)`. The measured damped solves
+  reduced iterations by an order of magnitude, independently of ``q`` in
+  that range. This implementation uses dense LU: it is a diagnostic, not a
   scalable solver.
 
-Boundary rows are closed by the exterior integral equation, whose row is dense
-over the whole domain boundary; the sweeps treat them by their approximate
-diagonal (:func:`jaxhps._matfree_iti_3D.flat_bie_diagonal_approx`).
+The exterior BIE couples all boundary rows. Sweeps approximate these rows
+using :func:`jaxhps._matfree_iti_3D.flat_bie_diagonal_approx`.
 """
 
 from typing import Callable, Optional, Sequence, Tuple
@@ -70,14 +49,10 @@ def leaf_index_grid(root: DiscretizationNode3D, L: int) -> np.ndarray:
     Returns an array of shape ``(8**L, 3)``; ``i`` increases with ``x``.
     """
     bounds = leaf_bounds_uniform_3D(root, L)
-    n = 2**L
-    hx = (root.xmax - root.xmin) / n
-    hy = (root.ymax - root.ymin) / n
-    hz = (root.zmax - root.zmin) / n
-    i = np.rint((bounds[:, 0] - root.xmin) / hx).astype(np.int64)
-    j = np.rint((bounds[:, 2] - root.ymin) / hy).astype(np.int64)
-    k = np.rint((bounds[:, 4] - root.zmin) / hz).astype(np.int64)
-    return np.stack([i, j, k], axis=-1)
+    lower = np.array([root.xmin, root.ymin, root.zmin])
+    upper = np.array([root.xmax, root.ymax, root.zmax])
+    spacing = (upper - lower) / 2**L
+    return np.rint((bounds[:, ::2] - lower) / spacing).astype(np.int64)
 
 
 def sweep_order(
@@ -95,26 +70,6 @@ def sweep_order(
         a = idx[:, axis] if s > 0 else (n - 1 - idx[:, axis])
         key = key * n + a
     return np.argsort(key, kind="stable").astype(np.int32)
-
-
-def sweep_orders(
-    root: DiscretizationNode3D,
-    L: int,
-    directions: Sequence[Tuple[int, int, int]],
-) -> np.ndarray:
-    """Stack of leaf orderings, shape ``(len(directions), 8**L)``."""
-    return np.stack([sweep_order(root, L, s) for s in directions], axis=0)
-
-
-def _leafwise_maps(maps: InterfaceMaps):
-    partner = np.asarray(maps.partner).reshape(maps.n_leaves, maps.n_per_leaf)
-    interior = partner >= 0
-    p_safe = np.where(interior, partner, 0)
-    return (
-        jnp.asarray(p_safe // maps.n_per_leaf),
-        jnp.asarray(p_safe % maps.n_per_leaf),
-        jnp.asarray(interior),
-    )
 
 
 def make_gauss_seidel_sweep(
@@ -136,17 +91,16 @@ def make_gauss_seidel_sweep(
     Returns a callable acting on flat vectors of shape ``(n_flat,)``.
     """
     n_leaves, n_per_leaf = maps.n_leaves, maps.n_per_leaf
-    p_leaf, p_node, interior = _leafwise_maps(maps)
+    partner = maps.partner.reshape(n_leaves, n_per_leaf)
+    interior = partner >= 0
+    p_safe = jnp.where(interior, partner, 0)
+    p_leaf, p_node = p_safe // n_per_leaf, p_safe % n_per_leaf
     order_j = jnp.asarray(order)
     dinv = jnp.asarray(diag_inv).reshape(n_leaves, n_per_leaf)
 
     def sweep(r: jax.Array) -> jax.Array:
         batched = r.ndim == 2
-        R = (
-            r.reshape(n_leaves, n_per_leaf, -1)
-            if batched
-            else r.reshape(n_leaves, n_per_leaf)
-        )
+        R = r.reshape(n_leaves, n_per_leaf, *r.shape[1:])
         z0 = jnp.zeros_like(R)
         g0 = jnp.zeros_like(R)
         mask = interior[..., None] if batched else interior
@@ -252,14 +206,6 @@ def make_shifted_operator_preconditioner(
     lu, piv = jax.scipy.linalg.lu_factor(A_shift)
 
     def apply(r: jax.Array) -> jax.Array:
-        if r.ndim == 1:
-            return jax.scipy.linalg.lu_solve((lu, piv), r)
-        return jnp.stack(
-            [
-                jax.scipy.linalg.lu_solve((lu, piv), r[:, j])
-                for j in range(r.shape[1])
-            ],
-            axis=1,
-        )
+        return jax.scipy.linalg.lu_solve((lu, piv), r)
 
     return apply
