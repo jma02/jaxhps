@@ -131,7 +131,9 @@ def main() -> None:
     bp = np.asarray(domain.boundary_points).reshape(-1, 3)
     _, sdp = permute_to_domain(sd, bp)
     S = jnp.asarray(sdp["S"])
+    D = jnp.asarray(sdp["D"])
     S.block_until_ready()
+    D.block_until_ready()
     snapshots.append(
         (
             "S, D permuted to device",
@@ -164,7 +166,7 @@ def main() -> None:
         n_flat=int(n_flat),
         leaf_ItI_GB=float(T_leaves.nbytes / 1024**3),
         h_leaves_GB=float(np.asarray(h_leaves).nbytes / 1024**3),
-        S_plus_D_GB=float(2 * S.nbytes / 1024**3),
+        S_plus_D_GB=float((S.nbytes + D.nbytes) / 1024**3),
         krylov_basis_GB=float(basis.nbytes / 1024**3),
         dense_root_DtN_GB=float(bp.shape[0] ** 2 * 16 / 1024**3),
     )

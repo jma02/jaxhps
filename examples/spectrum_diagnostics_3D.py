@@ -453,7 +453,9 @@ if __name__ == "__main__":
     parser.add_argument("--maxiter", type=int, default=600)
     parser.add_argument("--out", type=str, default="spectrum")
     parser.add_argument("--mode", choices=("full", "refine"), default="full")
-    parser.add_argument("--plot", action="store_true", default=True)
+    parser.add_argument(
+        "--plot", action=argparse.BooleanOptionalAction, default=True
+    )
     parsed = parser.parse_args()
     # p=20 with 8 leaves exceeds 30 GB of host memory in the local solve.
     parsed.refine_pairs = [(4, 8), (6, 12), (8, 16)]
