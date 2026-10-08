@@ -144,6 +144,8 @@ def run_matfree(
     inner_tol=0.1,
     inner_restart=30,
     inner_maxiter=60,
+    coarse_q=2,
+    coarse_limit=1024,
 ):
     stats: dict = {}
     t0 = time.perf_counter()
@@ -161,6 +163,8 @@ def run_matfree(
         inner_tol=inner_tol,
         inner_restart=inner_restart,
         inner_maxiter=inner_maxiter,
+        coarse_q=coarse_q,
+        coarse_limit=coarse_limit,
     )
     jax.block_until_ready(jnp.asarray(out["uscat_b"]))
     out["wall_time"] = time.perf_counter() - t0
@@ -210,6 +214,8 @@ def exp_mie(args) -> None:
             inner_tol=args.inner_tol,
             inner_restart=args.inner_restart,
             inner_maxiter=args.inner_maxiter,
+            coarse_q=args.coarse_q,
+            coarse_limit=args.coarse_limit,
         )
         err = mie_error(out, sd, b_radial, dirs, args.rho)
         st = out["stats"]
@@ -271,6 +277,8 @@ def exp_kappa(args) -> None:
             inner_tol=args.inner_tol,
             inner_restart=args.inner_restart,
             inner_maxiter=args.inner_maxiter,
+            coarse_q=args.coarse_q,
+            coarse_limit=args.coarse_limit,
         )
         err = mie_error(out, sd, b_radial, DEFAULT_DIR, args.rho)
         st = out["stats"]
@@ -322,6 +330,8 @@ def exp_contrast(args) -> None:
             inner_tol=args.inner_tol,
             inner_restart=args.inner_restart,
             inner_maxiter=args.inner_maxiter,
+            coarse_q=args.coarse_q,
+            coarse_limit=args.coarse_limit,
         )
         err = mie_error(out, sd, b_radial, DEFAULT_DIR, args.rho)
         st = out["stats"]
@@ -372,6 +382,8 @@ def exp_nsrc(args) -> None:
             inner_tol=args.inner_tol,
             inner_restart=args.inner_restart,
             inner_maxiter=args.inner_maxiter,
+            coarse_q=args.coarse_q,
+            coarse_limit=args.coarse_limit,
         )
         st = out["stats"]
         row = dict(
@@ -400,6 +412,8 @@ def exp_nsrc(args) -> None:
                     inner_tol=args.inner_tol,
                     inner_restart=args.inner_restart,
                     inner_maxiter=args.inner_maxiter,
+                    coarse_q=args.coarse_q,
+                    coarse_limit=args.coarse_limit,
                 )
                 seq_mv += int(o1["stats"]["n_matvec"])
             row["seq_time"] = time.perf_counter() - t0
@@ -451,6 +465,8 @@ def exp_precond(args) -> None:
                 inner_tol=args.inner_tol,
                 inner_restart=args.inner_restart,
                 inner_maxiter=args.inner_maxiter,
+                coarse_q=args.coarse_q,
+                coarse_limit=args.coarse_limit,
             )
             st = out["stats"]
             cost = int(out["info"]["precond_cost_matvecs"])
@@ -465,6 +481,18 @@ def exp_precond(args) -> None:
                 n_precond=int(st.get("n_precond", 0)),
                 inner_matvec=int(inner.get("n_matvec", 0)),
                 inner_unconverged=int(inner.get("n_unconverged", 0)),
+                hierarchy_levels=int(inner.get("n_levels", 0)),
+                hierarchy_coarse_dim=int(inner.get("coarse_dim", 0)),
+                hierarchy_setup_columns=int(inner.get("setup_columns", 0)),
+                hierarchy_coarse_solves=int(inner.get("coarse_solves", 0)),
+                hierarchy_coarse_factor_bytes=int(
+                    inner.get("coarse_factor_bytes", 0)
+                ),
+                hierarchy_smoother_factor_bytes=int(
+                    inner.get("smoother_factor_bytes", 0)
+                ),
+                hierarchy_apply_seconds=float(inner.get("apply_seconds", 0)),
+                true_res_history=st.get("true_res_history", []),
                 n_matvec_equiv=(
                     int(st["n_matvec"])
                     + int(st.get("n_precond", 0)) * cost
@@ -520,6 +548,8 @@ if __name__ == "__main__":
     parser.add_argument("--inner_tol", type=float, default=0.1)
     parser.add_argument("--inner_restart", type=int, default=30)
     parser.add_argument("--inner_maxiter", type=int, default=60)
+    parser.add_argument("--coarse_q", type=int, default=2)
+    parser.add_argument("--coarse_limit", type=int, default=1024)
     # "none", "jacobi", "sweep"/"sweep<n_dir>", "shift"/"shift:<eps>".
     parser.add_argument("--precond", type=str, default="none")
     parser.add_argument(
