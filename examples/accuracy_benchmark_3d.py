@@ -133,7 +133,10 @@ def main():
         row["first_solve_seconds"] = out["info"]["first_solve_seconds"]
         row["exterior_bytes"] = sd["S"].nbytes + sd["D"].nbytes
         ub, dn = out["uscat_b"], out["uscat_dn_b"]
-    converged = certified(row["first_info"])
+    try:
+        converged = certified(row["first_info"])
+    except ValueError:
+        converged = False
     for _ in range(args.repeats if converged else 0):
         t1 = time.perf_counter()
         if args.solver == "fft":
