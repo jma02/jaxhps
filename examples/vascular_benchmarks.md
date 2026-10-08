@@ -43,6 +43,9 @@ independent reference. Never call a small algebraic residual field accuracy.
 # Fresh directory; one remote call, one GPU, sequential fresh child processes
 .venv/bin/modal run examples/modal_vascular_3d.py --suite refinement \
   --output data/examples/vascular-refinement --budget-seconds 900 --case-seconds 150
+# Optional denser-phantom 80-wavelength check, after reviewing 40-wavelength results
+.venv/bin/modal run examples/modal_vascular_3d.py --suite high-frequency \
+  --output data/examples/vascular-80 --budget-seconds 300 --case-seconds 120
 ```
 
 The A100 has 80 GB. Each case is killed at its subprocess time limit; the
@@ -52,6 +55,10 @@ minimum warm containers, or parallel GPU calls. Results stream back after
 each case; partial stage data and timeouts are retained. The idle scaledown
 window is two seconds. Check `modal app list --json` after completion; if
 interrupted, use `modal app stop APP_ID` for this app.
+Budgets apply per invocation. When running several suites, subtract elapsed
+GPU work from the total planned allowance before launching another suite.
+The 80-wavelength grids give only 2.4–3.2 background points per wavelength;
+field refinement must be checked before interpreting them as accurate.
 
 Generate a PDF with geometry, field slices, all measured cases, and refinement
 curves, plus a compact CSV/JSON table (no GPU needed):

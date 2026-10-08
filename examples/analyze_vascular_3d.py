@@ -140,7 +140,7 @@ def geometry_figure():
 
 def cost_figure(rows):
     fig, axes = plt.subplots(1, 3, figsize=(12, 4), layout="constrained")
-    colors = {10: "#0072B2", 20: "#D55E00", 40: "#009E73"}
+    colors = {10: "#0072B2", 20: "#D55E00", 40: "#009E73", 80: "#882255"}
     for variant, style in [("vascular", "-o"), ("dense", "--s")]:
         for waves in sorted({r["waves"] for r in rows}):
             subset = [
