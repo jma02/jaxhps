@@ -52,3 +52,11 @@ minimum warm containers, or parallel GPU calls. Results stream back after
 each case; partial stage data and timeouts are retained. The idle scaledown
 window is two seconds. Check `modal app list --json` after completion; if
 interrupted, use `modal app stop APP_ID` for this app.
+
+Generate a PDF with geometry, field slices, all measured cases, and refinement
+curves, plus a compact CSV/JSON table (no GPU needed):
+
+```sh
+.venv/bin/python examples/analyze_vascular_3d.py data/examples/vascular-refinement \
+  --out vascular-report
+```
