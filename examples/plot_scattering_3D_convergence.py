@@ -19,28 +19,15 @@ import os
 import sys
 
 import numpy as np
-import jax.numpy as jnp
 import matplotlib.pyplot as plt
 
 sys.path.insert(0, os.path.dirname(__file__))
 from wave_scattering_utils_3D import (  # noqa: E402
-    eval_uscat_offsurface_3D,
+    eval_scattering_solution,
     load_SD_matrices_3D,
     solve_scattering_bie_3D,
 )
-from mie_3d import mie_scattered_field  # noqa: E402
-
-
-def exterior_targets():
-    """Ring of 8 points at r = 1.0 in the z=0 plane plus two off-equator
-    points; matches tests/test_scattering_3D_BIE.py."""
-    phi = np.linspace(0, 2 * np.pi, 8, endpoint=False)
-    return np.concatenate(
-        [
-            np.stack([np.cos(phi), np.sin(phi), np.zeros_like(phi)], axis=-1),
-            np.array([[0.0, 0.0, 1.0], [0.7, 0.0, 0.7]]),
-        ]
-    )
+from mie_3d import mie_scattered_field, radial_bump  # noqa: E402
 
 
 def main():
@@ -69,32 +56,28 @@ def main():
 
     R_bump, A_bump = args.R_bump, args.A_bump
 
+    def b_radial(r):
+        return radial_bump(r, R_bump, A_bump, args.bump)
+
     if args.bump == "poly":
-
-        def b_radial(r):
-            rho = np.where(r < R_bump, r / R_bump, 1.0)
-            return np.where(r < R_bump, A_bump * (1.0 - rho * rho) ** 4, 0.0)
-
         bump_label = (
             rf"$b(r) = {A_bump}\,(1 - (r/{R_bump})^2)^4\,1_{{r<{R_bump}}}$"
         )
     else:
-
-        def b_radial(r):
-            r = np.asarray(r, dtype=float)
-            out = np.zeros_like(r)
-            inside = r < R_bump
-            t = 1.0 - (r[inside] / R_bump) ** 2
-            out[inside] = A_bump * np.exp(1.0 - 1.0 / t)
-            return out
-
         bump_label = (
             rf"$b(r) = {A_bump}\,e^{{1 - 1/(1-(r/{R_bump})^2)}}"
             rf"\,1_{{r<{R_bump}}}$"
         )
 
     source_dirs = np.array([[1.0, 0.0, 0.0]], dtype=np.float64)
-    targets = exterior_targets()
+    # Same ring and off-equator points as the Mie comparison tests.
+    phi = np.linspace(0, 2 * np.pi, 8, endpoint=False)
+    targets = np.concatenate(
+        [
+            np.stack([np.cos(phi), np.sin(phi), np.zeros_like(phi)], axis=-1),
+            np.array([[0.0, 0.0, 1.0], [0.7, 0.0, 0.7]]),
+        ]
+    )
 
     paths_q = [s for s in args.sweep_q.split(",") if s]
     paths_L = [s for s in args.sweep_L.split(",") if s]
@@ -112,30 +95,17 @@ def main():
     # The two sweeps share their coarsest fixture; cache errors by path.
     err_cache = {}
 
-    def rel_err_for(path):
-        if path in err_cache:
-            return err_cache[path]
+    for path in dict.fromkeys(paths_q + paths_L):
         sd = load_SD_matrices_3D(path)
         assert sd["kappa"] == kappa, "all fixtures must share kappa"
         out = solve_scattering_bie_3D(sd, b_radial, source_dirs)
-        u_off = np.asarray(
-            eval_uscat_offsurface_3D(
-                target_pts=jnp.asarray(targets),
-                src_pts=jnp.asarray(out["boundary_points"]),
-                src_normals=jnp.asarray(out["normals"]),
-                src_weights=jnp.asarray(out["sdp"]["wts"]),
-                uscat_b=jnp.asarray(out["uscat_b"][:, 0]),
-                uscat_dn_b=jnp.asarray(out["uscat_dn_b"][:, 0]),
-                k=float(kappa),
-            )
-        )
+        u_off = eval_scattering_solution(out, targets, float(kappa))[:, 0]
         rel = float(np.linalg.norm(u_off - u_mie) / np.linalg.norm(u_mie))
         err_cache[path] = (int(sd["q"]), int(sd["L"]), rel)
         print(f"q={sd['q']} L={sd['L']}: rel_err = {rel:.3e}  ({path})")
-        return err_cache[path]
 
-    sweep_q = [rel_err_for(path) for path in paths_q]
-    sweep_L = [rel_err_for(path) for path in paths_L]
+    sweep_q = [err_cache[path] for path in paths_q]
+    sweep_L = [err_cache[path] for path in paths_L]
 
     fig, axes = plt.subplots(1, 2, figsize=(10, 4), constrained_layout=True)
 

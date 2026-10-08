@@ -15,9 +15,8 @@ For a plane wave propagating along ``+z``:
 
     u^inc(r, theta) = sum_{ell >= 0} (2 ell + 1) i^ell j_ell(kappa r) P_ell(cos theta).
 
-For an arbitrary direction ``w``, we rotate the target points so that ``w``
-aligns with ``+z``, evaluate the field, and rotate back; the scattered field
-is rotation-covariant (radial medium), so no other change is needed.
+For an arbitrary direction ``w``, use ``cos(theta) = x . w / |x|``;
+the radial solutions are unchanged.
 
 For each ``ell``, the radial part ``R_ell(r)`` satisfies
 
@@ -51,79 +50,22 @@ from scipy.integrate import solve_ivp
 from scipy.special import lpmv, spherical_jn, spherical_yn
 
 
+def radial_bump(r, radius, amplitude, shape="poly"):
+    """Compact radial potential, polynomial (C³) or exponential (C∞)."""
+    r = np.asarray(r, dtype=float)
+    inside = r < radius
+    t = 1.0 - (r[inside] / radius) ** 2
+    out = np.zeros_like(r)
+    if shape == "poly":
+        out[inside] = amplitude * t**4
+    else:
+        out[inside] = amplitude * np.exp(1.0 - 1.0 / t)
+    return out
+
+
 def _h1(ell: int, x: np.ndarray) -> np.ndarray:
     """Spherical Hankel function of the first kind, ``h_ell^{(1)}(x)``."""
     return spherical_jn(ell, x) + 1j * spherical_yn(ell, x)
-
-
-def _h1_prime(ell: int, x: np.ndarray) -> np.ndarray:
-    return spherical_jn(ell, x, derivative=True) + 1j * spherical_yn(
-        ell, x, derivative=True
-    )
-
-
-def _rotation_aligning_with_z(w: np.ndarray) -> np.ndarray:
-    """Return rotation ``R`` such that ``R @ w = [0, 0, 1]``."""
-    w = np.asarray(w, dtype=np.float64)
-    w = w / np.linalg.norm(w)
-    z = np.array([0.0, 0.0, 1.0])
-    c = float(np.dot(w, z))
-    if c > 1.0 - 1e-15:
-        return np.eye(3)
-    if c < -1.0 + 1e-15:
-        # 180 deg rotation about x-axis.
-        return np.diag([1.0, -1.0, -1.0])
-    v = np.cross(w, z)
-    s = np.linalg.norm(v)
-    K = np.array([[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]])
-    return np.eye(3) + K + (K @ K) * ((1.0 - c) / (s * s))
-
-
-def _solve_radial_interior(
-    ell: int,
-    kappa: float,
-    b_radial,
-    R_supp: float,
-    eps: float = 1e-4,
-    dense_output: bool = False,
-):
-    """Solve the radial Helmholtz ODE on ``[eps * R_supp, R_supp]``.
-
-    Returns ``(R_end, Rp_end, sol)``: value and derivative at ``r = R_supp`` of
-    the regular interior solution (normalized so ``R_ell(r) ~ r^ell`` near 0).
-    ``sol`` is the raw ``solve_ivp`` result with ``dense_output`` enabled when
-    requested, so the caller can sample ``R_ell(r)`` at arbitrary interior radii.
-    """
-    r0 = eps * R_supp
-
-    if ell == 0:
-        y0 = np.array([1.0, 0.0])
-    else:
-        y0 = np.array([r0**ell, ell * r0 ** (ell - 1)])
-
-    ll = ell * (ell + 1)
-
-    def rhs(rr, y):
-        R, Rp = y
-        Rpp = (
-            -2.0 / rr * Rp
-            + (ll / (rr * rr) - kappa * kappa * (1.0 - b_radial(rr))) * R
-        )
-        return np.array([Rp, Rpp])
-
-    sol = solve_ivp(
-        rhs,
-        (r0, R_supp),
-        y0,
-        method="RK45",
-        rtol=1e-10,
-        atol=1e-13,
-        dense_output=dense_output,
-        max_step=0.05 * R_supp,
-    )
-    if not sol.success:
-        raise RuntimeError(f"radial ODE failed at ell={ell}: {sol.message}")
-    return float(sol.y[0, -1]), float(sol.y[1, -1]), sol
 
 
 def mie_scattering_coefficients(
@@ -146,14 +88,39 @@ def mie_scattering_coefficients(
     coeffs = np.zeros(ell_max + 1, dtype=np.complex128)
     c_arr = np.zeros(ell_max + 1, dtype=np.complex128)
     sols = []
+    r0 = 1e-4 * R_supp
     for ell in range(ell_max + 1):
-        R_end, Rp_end, sol = _solve_radial_interior(
-            ell, kappa, b_radial, R_supp, dense_output=keep_interior
+        # Regular solution R_ell(r) ~ r^ell near the origin.
+        y0 = [1.0, 0.0] if ell == 0 else [r0**ell, ell * r0 ** (ell - 1)]
+        ll = ell * (ell + 1)
+
+        def rhs(rr, y):
+            R, Rp = y
+            Rpp = (
+                -2.0 / rr * Rp
+                + (ll / (rr * rr) - kappa * kappa * (1.0 - b_radial(rr))) * R
+            )
+            return np.array([Rp, Rpp])
+
+        sol = solve_ivp(
+            rhs,
+            (r0, R_supp),
+            y0,
+            method="RK45",
+            rtol=1e-10,
+            atol=1e-13,
+            dense_output=keep_interior,
+            max_step=0.05 * R_supp,
         )
+        if not sol.success:
+            raise RuntimeError(
+                f"radial ODE failed at ell={ell}: {sol.message}"
+            )
+        R_end, Rp_end = sol.y[:, -1]
         jl = spherical_jn(ell, kR)
         jlp = spherical_jn(ell, kR, derivative=True)
         hl = _h1(ell, kR)
-        hlp = _h1_prime(ell, kR)
+        hlp = jlp + 1j * spherical_yn(ell, kR, derivative=True)
         a_ell = (2 * ell + 1) * (1j**ell)
         #   c R_end           = a_ell jl  + b hl
         #   c (Rp_end / kappa) = a_ell jlp + b hlp
@@ -205,17 +172,15 @@ def mie_total_field_interior(
     here; use :func:`mie_scattered_field` for those.
     """
     target_pts = np.asarray(target_pts, dtype=np.float64)
-    rot = _rotation_aligning_with_z(
-        np.asarray(source_direction, dtype=np.float64)
-    )
-    pts_rot = target_pts @ rot.T
-    r = np.linalg.norm(pts_rot, axis=-1)
+    w = np.asarray(source_direction, dtype=np.float64)
+    w = w / np.linalg.norm(w)
+    r = np.linalg.norm(target_pts, axis=-1)
     if np.any(r >= R_supp - 1e-12):
         raise ValueError(
             f"all target_pts must satisfy r < R_supp ({R_supp}); "
             f"found max(r) = {r.max():.6e}."
         )
-    cos_theta = np.clip(pts_rot[:, 2] / np.maximum(r, 1e-300), -1.0, 1.0)
+    cos_theta = np.clip(target_pts @ w / np.maximum(r, 1e-300), -1.0, 1.0)
     if ell_max is None:
         ell_max = int(np.ceil(2 * (kappa * R_supp + 6)))
 
@@ -250,19 +215,15 @@ def mie_scattered_field(
                            rounded up.
     """
     target_pts = np.asarray(target_pts, dtype=np.float64)
-    rot = _rotation_aligning_with_z(
-        np.asarray(source_direction, dtype=np.float64)
-    )
-    pts_rot = target_pts @ rot.T  # apply rotation so w is now along +z
-
-    r = np.linalg.norm(pts_rot, axis=-1)
+    w = np.asarray(source_direction, dtype=np.float64)
+    w = w / np.linalg.norm(w)
+    r = np.linalg.norm(target_pts, axis=-1)
     if np.any(r <= R_supp + 1e-12):
         raise ValueError(
             f"all target_pts must satisfy r > R_supp ({R_supp}); "
             f"found min(r) = {r.min():.6e}."
         )
-    cos_theta = pts_rot[:, 2] / r
-    cos_theta = np.clip(cos_theta, -1.0, 1.0)
+    cos_theta = np.clip(target_pts @ w / r, -1.0, 1.0)
 
     if ell_max is None:
         ell_max = int(np.ceil(2 * (kappa * r.max() + 6)))

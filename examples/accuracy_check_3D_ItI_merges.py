@@ -357,7 +357,7 @@ class Problem3(Problem3DItI):
 # ---------------------------------------------------------------------------
 
 
-class Problem4(Problem3DItI):
+class Problem4(Problem3):
     r"""Vertically-graded lens variable medium with a plane-wave MMS.
 
     Lifts section 5.2's lens potential to 3D by treating ``z`` as the graded
@@ -373,34 +373,12 @@ class Problem4(Problem3DItI):
     variable-coefficient assembly more than the bump.
     """
 
-    kappa = 16.0
-    eta = 16.0
-    source_dir = jnp.array([1.0, 1.0, 1.0]) / jnp.sqrt(3)
-
     def _b(self, pts):
         r = jnp.linalg.norm(pts, axis=-1)
         z = pts[..., 2]
         return (
             4.0 * (z - 0.2) * (1.0 - jax.scipy.special.erf(25.0 * (r - 0.3)))
         )
-
-    def soln(self, pts):
-        return jnp.exp(1j * self.kappa * pts @ self.source_dir)
-
-    def source(self, pts):
-        return -(self.kappa**2) * self._b(pts) * self.soln(pts)
-
-    def I_coefficients(self, pts):
-        return self.kappa**2 * (1.0 - self._b(pts))
-
-    def _dx(self, pts):
-        return 1j * self.kappa * self.source_dir[0] * self.soln(pts)
-
-    def _dy(self, pts):
-        return 1j * self.kappa * self.source_dir[1] * self.soln(pts)
-
-    def _dz(self, pts):
-        return 1j * self.kappa * self.source_dir[2] * self.soln(pts)
 
 
 # ---------------------------------------------------------------------------

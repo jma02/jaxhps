@@ -177,7 +177,10 @@ def build_S_D_matrices(
     wts = h3.get_qwts(norders, ixyzs, iptype, srcvals)
     ifwrite = 0  # don't write near-field cache to disk
 
-    def _matgen(alpha: complex, beta: complex):
+    matrices = []
+    times = []
+    for alpha, beta in [(1.0 + 0j, 0.0 + 0j), (0.0 + 0j, 1.0 + 0j)]:
+        t0 = time.time()
         zpars = np.array([kappa + 0j, alpha, beta], dtype=np.complex128)
         nifds, nrfds, nzfds = h3.helm_comb_dir_fds_block_mem(
             norders,
@@ -200,7 +203,7 @@ def build_S_D_matrices(
             nifds,
             nzfds,
         )
-        return h3.helm_comb_dir_fds_block_matgen(
+        matrix = h3.helm_comb_dir_fds_block_matgen(
             norders,
             ixyzs,
             iptype,
@@ -215,16 +218,11 @@ def build_S_D_matrices(
             col_ind,
             ifwrite,
         )
+        matrices.append(matrix)
+        times.append(time.time() - t0)
 
-    t0 = time.time()
-    S = _matgen(1.0 + 0j, 0.0 + 0j)
-    t_S = time.time() - t0
-
-    t0 = time.time()
-    D = _matgen(0.0 + 0j, 1.0 + 0j)
-    t_D = time.time() - t0
-
-    return S, D, wts, dict(npts=npts, time_S=t_S, time_D=t_D)
+    S, D = matrices
+    return S, D, wts, dict(npts=npts, time_S=times[0], time_D=times[1])
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +230,7 @@ def build_S_D_matrices(
 # ---------------------------------------------------------------------------
 
 
-def parse_args() -> argparse.Namespace:
+def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
         "--a",
@@ -262,11 +260,7 @@ def parse_args() -> argparse.Namespace:
         help="Quadrature tolerance handed to fmm3dbie.",
     )
     p.add_argument("--out", type=str, required=True, help="Output .npz path.")
-    return p.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
+    args = p.parse_args()
     norders, ixyzs, iptype, srcvals, face_idx = build_cube_srcvals(
         args.a,
         args.q,

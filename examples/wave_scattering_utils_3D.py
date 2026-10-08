@@ -36,21 +36,20 @@ def load_SD_matrices_3D(
     Returns a dict with the matrices and metadata; nothing is converted to JAX
     here because callers may want to permute before pushing to device.
     """
-    d = np.load(fp, allow_pickle=False)
-    out = dict(
-        S=d["S"],
-        D=d["D"],
-        wts=d["wts"],
-        boundary_points=d["boundary_points"],
-        normals=d["normals"],
-        face_idx=d["face_idx"],
-        a=float(d["a"]),
-        q=int(d["q"]),
-        L=int(d["L"]),
-        kappa=float(d["kappa"]),
-        eps=float(d["eps"]),
-    )
-    return out
+    with np.load(fp, allow_pickle=False) as d:
+        return dict(
+            S=d["S"],
+            D=d["D"],
+            wts=d["wts"],
+            boundary_points=d["boundary_points"],
+            normals=d["normals"],
+            face_idx=d["face_idx"],
+            a=float(d["a"]),
+            q=int(d["q"]),
+            L=int(d["L"]),
+            kappa=float(d["kappa"]),
+            eps=float(d["eps"]),
+        )
 
 
 def permute_to_domain(
@@ -281,6 +280,21 @@ def eval_uscat_offsurface_3D(
     w_G = G * src_weights[None, :]
     w_dG = dG_dny * src_weights[None, :]
     return w_dG @ uscat_b - w_G @ uscat_dn_b
+
+
+def eval_scattering_solution(out: dict, targets: np.ndarray, kappa: float):
+    """Evaluate all incident fields from a scattering solve at exterior targets."""
+    return np.asarray(
+        eval_uscat_offsurface_3D(
+            target_pts=jnp.asarray(targets),
+            src_pts=jnp.asarray(out["boundary_points"]),
+            src_normals=jnp.asarray(out["normals"]),
+            src_weights=jnp.asarray(out["sdp"]["wts"]),
+            uscat_b=jnp.asarray(out["uscat_b"]),
+            uscat_dn_b=jnp.asarray(out["uscat_dn_b"]),
+            k=kappa,
+        )
+    )
 
 
 def solve_scattering_bie_3D(

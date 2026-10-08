@@ -38,14 +38,13 @@ import logging
 import numpy as np
 import pytest
 import jax
-import jax.numpy as jnp
 
 # Make the example modules importable.
 _EX_DIR = os.path.join(os.path.dirname(__file__), os.pardir, "examples")
 sys.path.insert(0, os.path.abspath(_EX_DIR))
 
 from wave_scattering_utils_3D import (  # noqa: E402
-    eval_uscat_offsurface_3D,
+    eval_scattering_solution,
     load_SD_matrices_3D,
     solve_scattering_bie_3D,
 )
@@ -85,7 +84,8 @@ def _bump_radial(r):
     return np.where(r < R_BUMP, A_BUMP * (1.0 - rho * rho) ** 4, 0.0)
 
 
-def _exterior_targets():
+@pytest.fixture(scope="module")
+def exterior_targets():
     """Ring of 8 points at r = 1.0 in the z=0 plane (well outside both the
     cube and supp(b)), plus two off-equator points."""
     phi = np.linspace(0, 2 * np.pi, 8, endpoint=False)
@@ -104,28 +104,7 @@ def sd_fixture():
             f"SD matrices not available at {SD_NPZ}; "
             f"set JAXHPS_SD_3D_NPZ to a file produced by examples/gen_SD_3D.py."
         )
-    sd = load_SD_matrices_3D(SD_NPZ)
-    return sd
-
-
-def _eval_offsurface(out, targets, kappa, src_idx=None):
-    """Evaluate the scattered field at ``targets`` from a driver result."""
-    uscat_b = out["uscat_b"]
-    uscat_dn_b = out["uscat_dn_b"]
-    if src_idx is not None:
-        uscat_b = uscat_b[:, src_idx]
-        uscat_dn_b = uscat_dn_b[:, src_idx]
-    return np.asarray(
-        eval_uscat_offsurface_3D(
-            target_pts=jnp.asarray(targets),
-            src_pts=jnp.asarray(out["boundary_points"]),
-            src_normals=jnp.asarray(out["normals"]),
-            src_weights=jnp.asarray(out["sdp"]["wts"]),
-            uscat_b=jnp.asarray(uscat_b),
-            uscat_dn_b=jnp.asarray(uscat_dn_b),
-            k=kappa,
-        )
-    )
+    return load_SD_matrices_3D(SD_NPZ)
 
 
 def test_transparent_b_zero(sd_fixture, caplog) -> None:
@@ -162,14 +141,14 @@ def test_transparent_b_zero(sd_fixture, caplog) -> None:
             [0.7, 0.7, 0.7],
         ]
     )
-    u_off = _eval_offsurface(out, targets, kappa)
+    u_off = eval_scattering_solution(out, targets, kappa)
     err_off = float(np.max(np.abs(u_off)))
     logging.info("transparent: max|u^s(target)| = %.3e", err_off)
     assert err_off < 1e-4, f"off-surface u^s should be ~0; got {err_off:.3e}"
     jax.clear_caches()
 
 
-def test_radial_bump_vs_mie(sd_fixture, caplog) -> None:
+def test_radial_bump_vs_mie(sd_fixture, exterior_targets, caplog) -> None:
     """Smooth radial bump scattering: compare to Mie reference at exterior targets."""
     caplog.set_level(logging.INFO)
     kappa = sd_fixture["kappa"]
@@ -184,8 +163,8 @@ def test_radial_bump_vs_mie(sd_fixture, caplog) -> None:
         float(np.max(np.abs(out["uscat_b"]))),
     )
 
-    targets = _exterior_targets()
-    u_off = _eval_offsurface(out, targets, kappa, src_idx=0)
+    targets = exterior_targets
+    u_off = eval_scattering_solution(out, targets, kappa)[:, 0]
     u_mie = mie_scattered_field(
         target_pts=targets,
         source_direction=source_dirs[0],
@@ -215,7 +194,9 @@ def test_radial_bump_vs_mie(sd_fixture, caplog) -> None:
 
 
 @pytest.mark.parametrize("vary", ["q", "L"])
-def test_radial_bump_vs_mie_convergence(vary, caplog) -> None:
+def test_radial_bump_vs_mie_convergence(
+    vary, exterior_targets, caplog
+) -> None:
     """Error against the Mie reference must fall as the discretization is refined.
 
     Runs the radial-bump problem on a sweep of (S, D) fixtures that refine
@@ -256,7 +237,7 @@ def test_radial_bump_vs_mie_convergence(vary, caplog) -> None:
     )
 
     source_dirs = np.array([[1.0, 0.0, 0.0]], dtype=np.float64)
-    targets = _exterior_targets()
+    targets = exterior_targets
     u_mie = mie_scattered_field(
         target_pts=targets,
         source_direction=source_dirs[0],
@@ -271,7 +252,7 @@ def test_radial_bump_vs_mie_convergence(vary, caplog) -> None:
         out = solve_scattering_bie_3D(
             sd, b_radial=_bump_radial, source_dirs=source_dirs
         )
-        u_off = _eval_offsurface(out, targets, kappa, src_idx=0)
+        u_off = eval_scattering_solution(out, targets, kappa)[:, 0]
         rel_err = float(np.linalg.norm(u_off - u_mie) / np.linalg.norm(u_mie))
         rel_errs.append(rel_err)
         logging.info(
