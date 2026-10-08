@@ -55,7 +55,6 @@ def case_grid(suite):
     max_containers=1,
     min_containers=0,
     scaledown_window=2,
-    retries=0,
 )
 def measure(suite, budget_seconds, case_seconds):
     if not 1 <= budget_seconds <= 900 or not 1 <= case_seconds <= 180:
