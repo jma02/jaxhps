@@ -14,250 +14,15 @@ import os
 
 import modal
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from modal_fmm_image import fmm_image
+from breast_phantom_3d import (
+    build_lucka_phantom,
+    build_lucka_phantom_hemisphere,
+)
 
 app = modal.App("jaxhps-lucka-breast")
 
-fmm_image = (
-    modal.Image.debian_slim(python_version="3.10")
-    .apt_install("gfortran", "libopenblas-dev", "make", "git", "curl")
-    .pip_install(
-        "numpy<2",
-        "setuptools<60",
-        "fmm3dpy",
-        "scipy",
-        "jax[cuda12]",
-        "charset_normalizer",
-    )
-    .run_commands(
-        "git clone --recurse-submodules https://github.com/fastalgorithms/fmm3dbie.git /opt/fmm3dbie",
-        "cd /opt/fmm3dbie && git checkout ddc93f53e60181b79928fb896a678b49865810aa && git submodule update --recursive",
-        "sed -i \"s|'../src/stok_wrappers/stok_comb_vel.f'|'../src/stok_wrappers/stok_comb_vel.f90'|\" /opt/fmm3dbie/python/setup.py",
-        "find /opt/fmm3dbie/src -name '*.f90' -exec sed -i 's/[^[:print:]\\t]//g' {} +",
-        "cd /opt/fmm3dbie && cp make.inc.linux.gnu.openblas make.inc && make -j$(nproc) lib",
-        "cd /opt/fmm3dbie/python && FMMBIE_LIBS='-fopenmp -lopenblas' "
-        "FFLAGS='-fallow-argument-mismatch -fPIC -O3 -funroll-loops -std=legacy -w' "
-        "python setup.py install",
-        "python -c 'import fmm3dbie; print(\"fmm3dbie OK\")'",
-    )
-    .add_local_dir(
-        REPO_ROOT,
-        remote_path="/root/jaxhps",
-        ignore=["data/**", ".git/**", "**/__pycache__/**", "**/*.npz"],
-        copy=True,
-    )
-    .run_commands("pip install --no-deps /root/jaxhps")
-)
-
 vol = modal.Volume.from_name("jaxhps-data", create_if_missing=True)
-
-
-def build_lucka_phantom(int_pts, a):
-    """Construct multi-tissue breast phantom b(x) on interior points.
-
-    Tissue model (Lucka et al., Table 1):
-        water (background): c=1500 m/s, b=0
-        fat:                 c=1470 m/s, b=-0.041
-        fibroglandular:      c=1515 m/s, b=+0.020
-        blood vessels:       c=1584 m/s, b=+0.103
-        skin:                c=1650 m/s, b=+0.174
-
-    Geometry: concentric smooth regions inside the cube [-a,a]^3.
-      - Skin shell:    |x| in [0.85a, 0.95a], thickness ~0.1a
-      - Fat layer:     |x| < 0.85a (dominant tissue)
-      - Fibroglandular core: |x| < 0.4a (interior dense tissue)
-      - Blood vessels: 3 thin cylinders (radius 0.05a)
-
-    All transitions are smoothed with C^4 bump functions to ensure
-    compatibility with the spectral HPS discretisation.
-    """
-    import numpy as np
-
-    # Tissue b-values
-    b_fat = -0.041
-    b_fibro = 0.020
-    b_vessel = 0.103
-    b_skin = 0.174
-
-    # Compute radial distance from centre
-    # int_pts shape: (n_leaves, p^3, 3) or (n_pts, 3)
-    shape = int_pts.shape
-    pts = int_pts.reshape(-1, 3)
-    r = np.linalg.norm(pts, axis=-1)
-
-    # Smooth bump: phi(t) = (1-t^2)^4 for |t|<1, 0 otherwise
-    def bump(x, centre, radius):
-        t = np.abs(x - centre) / radius
-        return np.where(t < 1.0, (1.0 - t**2) ** 4, 0.0)
-
-    def radial_bump(r_vals, r_centre, width):
-        t = np.abs(r_vals - r_centre) / width
-        return np.where(t < 1.0, (1.0 - t**2) ** 4, 0.0)
-
-    # Skin shell: peak at r = 0.9a, width 0.08a
-    skin_mask = radial_bump(r, 0.9 * a, 0.08 * a)
-
-    # Fat: everything inside r < 0.85a (smooth cutoff)
-    fat_mask = np.where(r < 0.75 * a, 1.0, 0.0)
-    # Smooth transition from 0.75a to 0.85a
-    trans = (r - 0.75 * a) / (0.10 * a)
-    trans = np.clip(trans, 0, 1)
-    fat_mask = np.where(
-        (r >= 0.75 * a) & (r < 0.85 * a), (1.0 - trans**2) ** 4, fat_mask
-    )
-
-    # Fibroglandular core: r < 0.4a with smooth boundary
-    fibro_mask = np.where(r < 0.30 * a, 1.0, 0.0)
-    trans_f = (r - 0.30 * a) / (0.10 * a)
-    trans_f = np.clip(trans_f, 0, 1)
-    fibro_mask = np.where(
-        (r >= 0.30 * a) & (r < 0.40 * a),
-        (1.0 - trans_f**2) ** 4,
-        fibro_mask,
-    )
-
-    # Blood vessels: 3 thin cylinders along different axes
-    vessel_radius = 0.05 * a
-    vessel_mask = np.zeros(pts.shape[0])
-
-    # Vessel 1: along z-axis, offset to (0.2a, 0.15a, z)
-    d1 = np.sqrt((pts[:, 0] - 0.2 * a) ** 2 + (pts[:, 1] - 0.15 * a) ** 2)
-    v1 = np.where(
-        d1 < vessel_radius, (1.0 - (d1 / vessel_radius) ** 2) ** 4, 0.0
-    )
-    # Only inside breast (r < 0.8a)
-    v1 *= np.where(r < 0.8 * a, 1.0, 0.0)
-
-    # Vessel 2: along x-axis, offset to (x, -0.1a, 0.2a)
-    d2 = np.sqrt((pts[:, 1] + 0.1 * a) ** 2 + (pts[:, 2] - 0.2 * a) ** 2)
-    v2 = np.where(
-        d2 < vessel_radius, (1.0 - (d2 / vessel_radius) ** 2) ** 4, 0.0
-    )
-    v2 *= np.where(r < 0.8 * a, 1.0, 0.0)
-
-    # Vessel 3: along y-axis, offset to (-0.15a, y, -0.1a)
-    d3 = np.sqrt((pts[:, 0] + 0.15 * a) ** 2 + (pts[:, 2] + 0.1 * a) ** 2)
-    v3 = np.where(
-        d3 < vessel_radius, (1.0 - (d3 / vessel_radius) ** 2) ** 4, 0.0
-    )
-    v3 *= np.where(r < 0.8 * a, 1.0, 0.0)
-
-    vessel_mask = np.maximum(np.maximum(v1, v2), v3)
-
-    # Combine: layered (outer layers take priority)
-    # Start with fat as base inside the breast
-    b = fat_mask * b_fat
-    # Add fibroglandular (overrides fat in core)
-    b = np.where(fibro_mask > 0.5, fibro_mask * b_fibro, b)
-    # Add vessels (overrides everything locally)
-    b = np.where(vessel_mask > 0.5, vessel_mask * b_vessel, b)
-    # Add skin shell (outermost layer)
-    b = b * (1.0 - skin_mask) + skin_mask * b_skin
-
-    # Ensure b=0 outside the breast (r > a)
-    b *= np.where(r < 0.98 * a, 1.0, 0.0)
-
-    return b.reshape(shape[:-1])
-
-
-def build_lucka_phantom_hemisphere(int_pts, a):
-    """Pendant hemispherical breast phantom b(x) on interior points.
-
-    Models the Lucka et al. geometry: a pendant breast hanging below a
-    chest-wall plane at z = z0.  Tissue layers are functions of the
-    distance r from the hemisphere centre c = (0, 0, z0), restricted to
-    the lower half-space z < z0, with a smooth C^4 cutoff ramp at the
-    flat face so that b remains smooth and compactly supported.
-
-    Layers (same b-values as the spherical phantom):
-      - Skin shell on the curved surface: |x-c| ~ 0.9R, width 0.08R
-      - Fat bulk:                          |x-c| < 0.85R
-      - Fibroglandular core: sphere of radius 0.35R centred at
-        c - (0, 0, 0.45R)
-      - Blood vessels: 3 thin cylinders (radius 0.05R), masked to the
-        breast interior
-    """
-    import numpy as np
-
-    b_fat = -0.041
-    b_fibro = 0.020
-    b_vessel = 0.103
-    b_skin = 0.174
-
-    shape = int_pts.shape
-    pts = int_pts.reshape(-1, 3)
-
-    # Hemisphere: radius R, centred on the chest-wall plane z = z0
-    R = 0.80 * a
-    z0 = 0.55 * a
-    c = np.array([0.0, 0.0, z0])
-    d = pts - c[None, :]
-    r = np.linalg.norm(d, axis=-1)
-    z = pts[:, 2]
-
-    def radial_bump(r_vals, r_centre, width):
-        t = np.abs(r_vals - r_centre) / width
-        return np.where(t < 1.0, (1.0 - t**2) ** 4, 0.0)
-
-    def smooth_step_down(x, x0, w):
-        """1 for x < x0 - w, C^4 rolloff to 0 at x0."""
-        t = np.clip((x - (x0 - w)) / w, 0.0, 1.0)
-        return (1.0 - t**2) ** 4
-
-    # Flat-face cutoff: full tissue for z < z0 - 0.1R, smooth to 0 at z0
-    zcut = smooth_step_down(z, z0, 0.10 * R)
-
-    # Skin shell on the curved surface
-    skin_mask = radial_bump(r, 0.9 * R, 0.08 * R) * zcut
-
-    # Fat bulk with smooth radial cutoff 0.75R -> 0.85R
-    fat_mask = np.where(r < 0.75 * R, 1.0, 0.0)
-    trans = np.clip((r - 0.75 * R) / (0.10 * R), 0, 1)
-    fat_mask = np.where(
-        (r >= 0.75 * R) & (r < 0.85 * R), (1.0 - trans**2) ** 4, fat_mask
-    )
-    fat_mask = fat_mask * zcut
-
-    # Fibroglandular core: sphere centred below the chest wall
-    c_fib = c - np.array([0.0, 0.0, 0.45 * R])
-    r_fib = np.linalg.norm(pts - c_fib[None, :], axis=-1)
-    R_fib = 0.35 * R
-    fibro_mask = np.where(r_fib < 0.75 * R_fib, 1.0, 0.0)
-    trans_f = np.clip((r_fib - 0.75 * R_fib) / (0.25 * R_fib), 0, 1)
-    fibro_mask = np.where(
-        (r_fib >= 0.75 * R_fib) & (r_fib < R_fib),
-        (1.0 - trans_f**2) ** 4,
-        fibro_mask,
-    )
-
-    # Blood vessels: 3 thin cylinders, masked to the breast interior
-    vessel_radius = 0.05 * R
-    inside = np.where((r < 0.8 * R), 1.0, 0.0) * zcut
-    d1 = np.sqrt((pts[:, 0] - 0.2 * R) ** 2 + (pts[:, 1] - 0.15 * R) ** 2)
-    v1 = np.where(
-        d1 < vessel_radius, (1.0 - (d1 / vessel_radius) ** 2) ** 4, 0.0
-    )
-    d2 = np.sqrt((pts[:, 1] + 0.1 * R) ** 2 + (z - (z0 - 0.5 * R)) ** 2)
-    v2 = np.where(
-        d2 < vessel_radius, (1.0 - (d2 / vessel_radius) ** 2) ** 4, 0.0
-    )
-    d3 = np.sqrt((pts[:, 0] + 0.15 * R) ** 2 + (z - (z0 - 0.6 * R)) ** 2)
-    v3 = np.where(
-        d3 < vessel_radius, (1.0 - (d3 / vessel_radius) ** 2) ** 4, 0.0
-    )
-    vessel_mask = np.maximum(np.maximum(v1, v2), v3) * inside
-
-    # Layered combination (outer layers take priority)
-    b = fat_mask * b_fat
-    b = np.where(fibro_mask > 0.5, fibro_mask * b_fibro, b)
-    b = np.where(vessel_mask > 0.5, vessel_mask * b_vessel, b)
-    b = b * (1.0 - skin_mask) + skin_mask * b_skin
-
-    # Compact support safety margin inside the cube
-    rad_all = np.linalg.norm(pts, axis=-1)
-    b *= np.where(rad_all < 0.98 * np.sqrt(3) * a, 1.0, 0.0)
-
-    return b.reshape(shape[:-1])
 
 
 @app.function(
@@ -302,204 +67,16 @@ def run_lucka_solve(
 
     # Step 1: Near-field corrections
     print("\n=== Step 1: Near-field corrections ===")
+    from gen_nearfield_3D import generate_nearfield
+    from wave_scattering_utils_3D import load_nearfield_correction
+
     nf_path = f"/data/NF_k{kappa:.2f}_q{q}_L{L}_a{a}.npz"
-    if os.path.exists(nf_path):
-        print(f"  Loading cached: {nf_path}")
-        from wave_scattering_utils_3D import load_nearfield_correction
-
-        nf = load_nearfield_correction(nf_path, fmm_eps=1e-7)
-    else:
-        print("  Generating with fmm3dbie...")
-        from gen_SD_3D import build_cube_srcvals
-
-        import fmm3dbie as h3
-        from scipy.sparse import csr_matrix
-        from scipy.spatial import cKDTree
-
-        norders, ixyzs, iptype, srcvals, face_idx = build_cube_srcvals(a, q, L)
-        srccoefs = h3.surf_vals_to_coefs(
-            norders, ixyzs, iptype, srcvals[0:9, :]
-        )
-        wts = h3.get_qwts(norders, ixyzs, iptype, srcvals)
-        bdry_pts = srcvals[0:3, :].T
-        normals = srcvals[9:12, :].T
-        npts = bdry_pts.shape[0]
-        q2 = q**2
-        n_patches = npts // q2
-        patches = np.arange(npts).reshape(n_patches, q2)
-
-        print(f"  npts={npts}, n_patches={n_patches}")
-
-        # Identify near patches
-        patch_centers = np.array(
-            [bdry_pts[patches[i]].mean(0) for i in range(n_patches)]
-        )
-        patch_widths = np.array(
-            [
-                np.max(np.ptp(bdry_pts[patches[i]], axis=0))
-                for i in range(n_patches)
-            ]
-        )
-        threshold = near_ratio * patch_widths.max()
-        tree = cKDTree(patch_centers)
-        near_pairs = []
-        for ip in range(n_patches):
-            for jp in tree.query_ball_point(patch_centers[ip], threshold):
-                near_pairs.append((ip, jp))
-        print(f"  {len(near_pairs)} near pairs")
-
-        # Generate NF blocks
-        near_row_set = set()
-        near_col_set = set()
-        for ip, jp in near_pairs:
-            near_row_set.update(patches[ip].tolist())
-            near_col_set.update(patches[jp].tolist())
-        all_near_rows = np.array(sorted(near_row_set), dtype=np.int64)
-        all_near_cols = np.array(sorted(near_col_set), dtype=np.int64)
-
-        def _matgen_bulk(alpha, beta, row_f, col_f):
-            zpars = np.array([kappa + 0j, alpha, beta], dtype=np.complex128)
-            nifds, _, nzfds = h3.helm_comb_dir_fds_block_mem(
-                norders,
-                ixyzs,
-                iptype,
-                srccoefs,
-                srcvals,
-                1e-9,
-                zpars,
-                0,
-            )
-            ifds, zfds = h3.helm_comb_dir_fds_block_init(
-                norders,
-                ixyzs,
-                iptype,
-                srccoefs,
-                srcvals,
-                1e-9,
-                zpars,
-                nifds,
-                nzfds,
-            )
-            return h3.helm_comb_dir_fds_block_matgen(
-                norders,
-                ixyzs,
-                iptype,
-                srccoefs,
-                srcvals,
-                wts,
-                1e-9,
-                zpars,
-                ifds,
-                zfds,
-                row_f,
-                col_f,
-                0,
-            )
-
-        def _smooth_block(ri, ci):
-            xi = bdry_pts[ri][:, None, :]
-            yj = bdry_pts[ci][None, :, :]
-            diff = xi - yj
-            r = np.linalg.norm(diff, axis=-1)
-            wj = wts[ci]
-            with np.errstate(divide="ignore", invalid="ignore"):
-                G = np.exp(1j * kappa * r) / (4.0 * np.pi * r)
-            S_s = G * wj[None, :]
-            S_s[r == 0] = 0.0
-            nj = normals[ci]
-            nd = np.einsum("ijk,jk->ij", diff, nj)
-            with np.errstate(divide="ignore", invalid="ignore"):
-                dG = (1.0 / r - 1j * kappa) / r * G * nd
-            D_s = dG * wj[None, :]
-            D_s[r == 0] = 0.0
-            return S_s, D_s
-
-        t0 = time.perf_counter()
-        print("  Generating bulk S near-field...")
-        S_bulk = _matgen_bulk(
-            1 + 0j, 0 + 0j, all_near_rows + 1, all_near_cols + 1
-        )
-        print("  Generating bulk D near-field...")
-        D_bulk = _matgen_bulk(
-            0 + 0j, 1 + 0j, all_near_rows + 1, all_near_cols + 1
-        )
-        dt_nf = time.perf_counter() - t0
-        print(f"  NF generation: {dt_nf:.1f}s")
-
-        row_map = {v: i for i, v in enumerate(all_near_rows)}
-        col_map = {v: i for i, v in enumerate(all_near_cols)}
-
-        n_pairs = len(near_pairs)
-        total = n_pairs * q2 * q2
-        rows_arr = np.empty(total, dtype=np.int64)
-        cols_arr = np.empty(total, dtype=np.int64)
-        S_vals = np.empty(total, dtype=np.complex128)
-        D_vals = np.empty(total, dtype=np.complex128)
-        idx = 0
-        for ip, jp in near_pairs:
-            ri = patches[ip]
-            ci = patches[jp]
-            ri_b = [row_map[r_] for r_ in ri]
-            ci_b = [col_map[c_] for c_ in ci]
-            S_ex = S_bulk[np.ix_(ri_b, ci_b)]
-            D_ex = D_bulk[np.ix_(ri_b, ci_b)]
-            S_sm, D_sm = _smooth_block(ri, ci)
-            bs = q2 * q2
-            rr, cc = np.meshgrid(ri, ci, indexing="ij")
-            rows_arr[idx : idx + bs] = rr.ravel()
-            cols_arr[idx : idx + bs] = cc.ravel()
-            S_vals[idx : idx + bs] = (S_ex - S_sm).ravel()
-            D_vals[idx : idx + bs] = (D_ex - D_sm).ravel()
-            idx += bs
-
-        S_corr = csr_matrix(
-            (S_vals[:idx], (rows_arr[:idx], cols_arr[:idx])),
-            shape=(npts, npts),
-        )
-        D_corr = csr_matrix(
-            (D_vals[:idx], (rows_arr[:idx], cols_arr[:idx])),
-            shape=(npts, npts),
-        )
-
-        np.savez(
-            nf_path,
-            S_corr_data=S_corr.data,
-            S_corr_indices=S_corr.indices,
-            S_corr_indptr=S_corr.indptr,
-            D_corr_data=D_corr.data,
-            D_corr_indices=D_corr.indices,
-            D_corr_indptr=D_corr.indptr,
-            shape=np.array(S_corr.shape),
-            boundary_points=bdry_pts,
-            normals=normals,
-            wts=wts,
-            face_idx=face_idx,
-            a=a,
-            q=q,
-            L=L,
-            kappa=kappa,
-            eps=1e-9,
-            near_ratio=near_ratio,
-            n_near_pairs=len(near_pairs),
+    if not os.path.exists(nf_path):
+        generate_nearfield(
+            nf_path, a, q, L, kappa, near_ratio=near_ratio, bulk=True
         )
         vol.commit()
-        print(f"  Saved to {nf_path}")
-
-        nf = dict(
-            S_corr=S_corr,
-            D_corr=D_corr,
-            n_near_pairs=len(near_pairs),
-            nnz_S=S_corr.nnz,
-            nnz_D=D_corr.nnz,
-            kappa=kappa,
-            fmm_eps=1e-7,
-            boundary_points=bdry_pts,
-            normals=normals,
-            wts=wts,
-            a=a,
-            q=q,
-            L=L,
-        )
+    nf = load_nearfield_correction(nf_path, fmm_eps=1e-7)
 
     # Step 2: HPS interior solve with Lucka phantom
     print("\n=== Step 2: HPS interior solve (Lucka phantom) ===")
@@ -611,7 +188,7 @@ def run_lucka_solve(
         jnp.asarray(source_dirs),
     )
     t0 = time.perf_counter()
-    if solver_mode == "dense_block":
+    if solver_mode in ("dense_block", "matfree", "matfree_block"):
         imp, uscat_b, uscat_dn_b, info = solve_bie_gpu_advanced(
             T_DtN_gpu,
             bdry_pts_nf,
@@ -625,27 +202,9 @@ def run_lucka_solve(
             tol=gmres_tol,
             maxiter=maxiter,
             restart=200,
-            matrix_free=False,
+            matrix_free=(solver_mode != "dense_block"),
             use_preconditioner=True,
-            block_rhs=True,
-        )
-    elif solver_mode in ("matfree", "matfree_block"):
-        imp, uscat_b, uscat_dn_b, info = solve_bie_gpu_advanced(
-            T_DtN_gpu,
-            bdry_pts_nf,
-            normals_nf,
-            wts_nf,
-            float(kappa),
-            float(kappa),
-            np.asarray(uin),
-            np.asarray(uin_dn),
-            nf,
-            tol=gmres_tol,
-            maxiter=maxiter,
-            restart=200,
-            matrix_free=True,
-            use_preconditioner=True,
-            block_rhs=(solver_mode == "matfree_block"),
+            block_rhs=(solver_mode != "matfree"),
         )
     else:
         from wave_scattering_utils_3D import solve_bie_gmres_gpu

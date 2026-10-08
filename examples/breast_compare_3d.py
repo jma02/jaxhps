@@ -14,65 +14,6 @@ import argparse
 import numpy as np
 
 
-def plot_matrices(ua, ub, names, fname):
-    import matplotlib.pyplot as plt
-
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4.5), constrained_layout=True)
-    vmax = float(max(np.abs(ua).max(), np.abs(ub).max()))
-    for ax, m, title, vm in zip(
-        axes,
-        [np.abs(ua), np.abs(ub), np.abs(ua - ub)],
-        [f"|umeas| {names[0]}", f"|umeas| {names[1]}", "|difference|"],
-        [vmax, vmax, None],
-    ):
-        im = ax.imshow(m, origin="lower", cmap="viridis", vmin=0, vmax=vm)
-        ax.set_title(title)
-        ax.set_xlabel("tx index")
-        ax.set_ylabel("rx index")
-        fig.colorbar(im, ax=ax, shrink=0.85)
-    fig.savefig(fname, dpi=130)
-    print(f"wrote {fname}")
-
-
-def plot_nearfield_tx(ua, ub, sensors, itx, names, fname):
-    """Scatter the per-receiver near field for transmitter ``itx`` on the cap.
-
-    The cap ``|x| = R, y >= offset`` is shown in its ``(x, z)`` projection;
-    the transmitter location is marked with a star.
-    """
-    import matplotlib.pyplot as plt
-
-    fa, fb = ua[:, itx], ub[:, itx]
-    fields = [np.real(fa), np.real(fb), np.abs(fa - fb)]
-    titles = [
-        rf"$\Re\,u^s$ at rx, {names[0]} (tx {itx})",
-        rf"$\Re\,u^s$ at rx, {names[1]} (tx {itx})",
-        "|difference|",
-    ]
-    vmax = float(max(np.abs(fields[0]).max(), np.abs(fields[1]).max()))
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4.8), constrained_layout=True)
-    for j, (ax, f, title) in enumerate(zip(axes, fields, titles)):
-        if j < 2:
-            kw = dict(cmap="RdBu_r", vmin=-vmax, vmax=vmax)
-        else:
-            kw = dict(cmap="viridis", vmin=0)
-        sc = ax.scatter(sensors[:, 0], sensors[:, 2], c=f, s=36, **kw)
-        ax.plot(
-            sensors[itx, 0],
-            sensors[itx, 2],
-            "k*",
-            markersize=14,
-            markerfacecolor="yellow",
-        )
-        ax.set_title(title)
-        ax.set_xlabel("x")
-        ax.set_ylabel("z")
-        ax.set_aspect("equal")
-        fig.colorbar(sc, ax=ax, shrink=0.85)
-    fig.savefig(fname, dpi=130)
-    print(f"wrote {fname}")
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("npz_a")
@@ -116,12 +57,64 @@ def main():
     print(f"rel max-entry error  : {rel_max:.6e}")
 
     if args.plot is not None:
-        plot_matrices(ua, ub, args.names, f"{args.plot}_matrices.png")
+        names = args.names
+        fname = f"{args.plot}_matrices.png"
+        import matplotlib.pyplot as plt
+
+        fig, axes = plt.subplots(
+            1, 3, figsize=(15, 4.5), constrained_layout=True
+        )
+        vmax = float(max(np.abs(ua).max(), np.abs(ub).max()))
+        for ax, m, title, vm in zip(
+            axes,
+            [np.abs(ua), np.abs(ub), np.abs(ua - ub)],
+            [f"|umeas| {names[0]}", f"|umeas| {names[1]}", "|difference|"],
+            [vmax, vmax, None],
+        ):
+            im = ax.imshow(m, origin="lower", cmap="viridis", vmin=0, vmax=vm)
+            ax.set_title(title)
+            ax.set_xlabel("tx index")
+            ax.set_ylabel("rx index")
+            fig.colorbar(im, ax=ax, shrink=0.85)
+        fig.savefig(fname, dpi=130)
+        print(f"wrote {fname}")
         sensors = da["sensors"]
         for itx in args.tx:
-            plot_nearfield_tx(
-                ua, ub, sensors, itx, args.names, f"{args.plot}_tx{itx}.png"
+            names = args.names
+            fname = f"{args.plot}_tx{itx}.png"
+            import matplotlib.pyplot as plt
+
+            fa, fb = ua[:, itx], ub[:, itx]
+            fields = [np.real(fa), np.real(fb), np.abs(fa - fb)]
+            titles = [
+                rf"$\Re\,u^s$ at rx, {names[0]} (tx {itx})",
+                rf"$\Re\,u^s$ at rx, {names[1]} (tx {itx})",
+                "|difference|",
+            ]
+            vmax = float(max(np.abs(fields[0]).max(), np.abs(fields[1]).max()))
+            fig, axes = plt.subplots(
+                1, 3, figsize=(15, 4.8), constrained_layout=True
             )
+            for j, (ax, f, title) in enumerate(zip(axes, fields, titles)):
+                if j < 2:
+                    kw = dict(cmap="RdBu_r", vmin=-vmax, vmax=vmax)
+                else:
+                    kw = dict(cmap="viridis", vmin=0)
+                sc = ax.scatter(sensors[:, 0], sensors[:, 2], c=f, s=36, **kw)
+                ax.plot(
+                    sensors[itx, 0],
+                    sensors[itx, 2],
+                    "k*",
+                    markersize=14,
+                    markerfacecolor="yellow",
+                )
+                ax.set_title(title)
+                ax.set_xlabel("x")
+                ax.set_ylabel("z")
+                ax.set_aspect("equal")
+                fig.colorbar(sc, ax=ax, shrink=0.85)
+            fig.savefig(fname, dpi=130)
+            print(f"wrote {fname}")
 
 
 if __name__ == "__main__":

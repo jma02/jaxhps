@@ -147,13 +147,6 @@ def outward_normals_for_cube_boundary(
 # ---------------------------------------------------------------------------
 
 
-def _patch_indices(n_bdry: int, q: int, L: int) -> np.ndarray:
-    """Return (n_patches, q^2) array of node indices grouped by patch."""
-    q2 = q * q
-    n_patches = n_bdry // q2
-    return np.arange(n_bdry).reshape(n_patches, q2)
-
-
 def build_nearfield_correction(
     sd: dict,
     bdry_pts: np.ndarray,
@@ -186,64 +179,20 @@ def build_nearfield_correction(
     Returns a dict with sparse CSR correction matrices and metadata.
     """
     from scipy.sparse import csr_matrix
+    from gen_nearfield_3D import identify_near_patches, smooth_kernel_blocks
 
     n_bdry = bdry_pts.shape[0]
     q2 = q * q
-    patches = _patch_indices(n_bdry, q, L)
-    n_patches = patches.shape[0]
-
-    # Patch centers and widths for near-field detection
-    patch_centers = np.array(
-        [bdry_pts[patches[ip]].mean(axis=0) for ip in range(n_patches)]
+    patches = np.arange(n_bdry).reshape(-1, q2)
+    n_patches = len(patches)
+    patch_points = bdry_pts[patches]
+    near_pairs = identify_near_patches(
+        patch_points.mean(axis=1),
+        np.ptp(patch_points, axis=1).max(axis=1),
+        near_ratio,
     )
-    patch_widths = np.array(
-        [
-            np.max(np.ptp(bdry_pts[patches[ip]], axis=0))
-            for ip in range(n_patches)
-        ]
-    )
-    max_pw = patch_widths.max()
-    threshold = near_ratio * max_pw
-
-    # Identify near patch pairs
-    from scipy.spatial import cKDTree
-
-    tree = cKDTree(patch_centers)
-    near_pairs = []  # (i, j) patch-level
-    for ip in range(n_patches):
-        neighbors = tree.query_ball_point(patch_centers[ip], threshold)
-        for jp in neighbors:
-            near_pairs.append((ip, jp))
-
     S_dense = np.asarray(sd["S"])
     D_dense = np.asarray(sd["D"])
-
-    # Smooth kernel blocks (what FMM would give for these pairs)
-    def _smooth_kernel_block(row_idx, col_idx):
-        """G(x_i, y_j) * w_j for the single layer; dG/dn_y * w_j for double."""
-        xi = bdry_pts[row_idx][:, None, :]  # (ni, 1, 3)
-        yj = bdry_pts[col_idx][None, :, :]  # (1, nj, 3)
-        diff = xi - yj  # (ni, nj, 3)
-        r = np.linalg.norm(diff, axis=-1)  # (ni, nj)
-        wj = wts[col_idx]
-
-        # Single layer: G * w_j
-        with np.errstate(divide="ignore", invalid="ignore"):
-            G = np.exp(1j * kappa * r) / (4.0 * np.pi * r)
-        S_smooth = G * wj[None, :]
-        # Self-interaction (r=0): FMM skips these, so smooth contribution = 0
-        S_smooth[r == 0] = 0.0
-
-        # Double layer: dG/dn_y * w_j
-        # diff = x_i - y_j; dG/dn_y = (1/r - ik)(n_y . diff)/r * G
-        nj = normals[col_idx]  # (nj, 3)
-        n_dot_diff = np.einsum("ijk,jk->ij", diff, nj)  # (ni, nj)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            dGdny = (1.0 / r - 1j * kappa) / r * G * n_dot_diff
-        D_smooth = dGdny * wj[None, :]
-        D_smooth[r == 0] = 0.0
-
-        return S_smooth, D_smooth
 
     # Build sparse correction: C = exact_near - smooth_near (block-wise)
     n_pairs = len(near_pairs)
@@ -258,7 +207,9 @@ def build_nearfield_correction(
         ci = patches[jp]
         S_exact = S_dense[np.ix_(ri, ci)]
         D_exact = D_dense[np.ix_(ri, ci)]
-        S_smooth, D_smooth = _smooth_kernel_block(ri, ci)
+        S_smooth, D_smooth = smooth_kernel_blocks(
+            bdry_pts, normals, wts, kappa, ri, ci
+        )
 
         block_size = q2 * q2
         rr, cc = np.meshgrid(ri, ci, indexing="ij")
@@ -323,72 +274,6 @@ def load_nearfield_correction(fp: str, fmm_eps: float = 1e-7) -> dict:
     )
 
 
-def _fmm_apply_S(
-    v: np.ndarray,
-    bdry_pts: np.ndarray,
-    wts: np.ndarray,
-    kappa: float,
-    eps: float,
-) -> np.ndarray:
-    """Apply single-layer operator via FMM: [Sv]_i = sum_{j!=i} G(x_i,x_j) w_j v_j."""
-    import fmm3dpy
-
-    src = np.asfortranarray(bdry_pts.T)  # (3, n)
-    if v.ndim == 1:
-        charges = (wts * v).astype(np.complex128)
-        out = fmm3dpy.hfmm3d(
-            eps=eps, zk=complex(kappa), sources=src, charges=charges, pg=1
-        )
-        return np.asarray(out.pot, dtype=np.complex128).ravel()
-    # Batched: v is (n_bdry, n_rhs)
-    n_rhs = v.shape[1]
-    result = np.empty_like(v, dtype=np.complex128)
-    for k in range(n_rhs):
-        charges = (wts * v[:, k]).astype(np.complex128)
-        out = fmm3dpy.hfmm3d(
-            eps=eps, zk=complex(kappa), sources=src, charges=charges, pg=1
-        )
-        result[:, k] = np.asarray(out.pot, dtype=np.complex128).ravel()
-    return result
-
-
-def _fmm_apply_D(
-    v: np.ndarray,
-    bdry_pts: np.ndarray,
-    normals: np.ndarray,
-    wts: np.ndarray,
-    kappa: float,
-    eps: float,
-) -> np.ndarray:
-    """Apply double-layer operator via FMM: [Dv]_i = sum_{j!=i} dG/dn_y(x_i,x_j) w_j v_j.
-
-    fmm3dpy evaluates  u(x) = sum_j -v_j . grad_x G(x, x_j).  Setting
-    v_j = n_j w_j sigma_j yields the double-layer potential because
-    -n_j . grad_x G = n_j . grad_y G = dG/dn_y.
-    """
-    import fmm3dpy
-
-    src = np.asfortranarray(bdry_pts.T)  # (3, n)
-    nrm_T = normals.T  # (3, n)
-    if v.ndim == 1:
-        scale = (wts * v).astype(np.complex128)  # (n,)
-        dipvec = np.asfortranarray(nrm_T * scale[None, :])  # (3, n)
-        out = fmm3dpy.hfmm3d(
-            eps=eps, zk=complex(kappa), sources=src, dipvec=dipvec, pg=1
-        )
-        return np.asarray(out.pot, dtype=np.complex128).ravel()
-    n_rhs = v.shape[1]
-    result = np.empty_like(v, dtype=np.complex128)
-    for k in range(n_rhs):
-        scale = (wts * v[:, k]).astype(np.complex128)
-        dipvec = np.asfortranarray(nrm_T * scale[None, :])
-        out = fmm3dpy.hfmm3d(
-            eps=eps, zk=complex(kappa), sources=src, dipvec=dipvec, pg=1
-        )
-        result[:, k] = np.asarray(out.pot, dtype=np.complex128).ravel()
-    return result
-
-
 def fmm_matvec_S(
     v: np.ndarray,
     bdry_pts: np.ndarray,
@@ -398,10 +283,25 @@ def fmm_matvec_S(
     fmm_eps: float = 1e-7,
 ) -> np.ndarray:
     """FMM-accelerated single-layer matvec: S @ v = FMM(v) + S_corr @ v."""
-    fmm_part = _fmm_apply_S(v, bdry_pts, wts, kappa, fmm_eps)
+    import fmm3dpy
+
+    src = np.asfortranarray(bdry_pts.T)  # (3, n)
     if v.ndim == 1:
-        return fmm_part + S_corr @ v
-    return fmm_part + S_corr @ v
+        charges = (wts * v).astype(np.complex128)
+        out = fmm3dpy.hfmm3d(
+            eps=fmm_eps, zk=complex(kappa), sources=src, charges=charges, pg=1
+        )
+        return np.asarray(out.pot, dtype=np.complex128).ravel() + S_corr @ v
+    # Batched: v is (n_bdry, n_rhs)
+    n_rhs = v.shape[1]
+    result = np.empty_like(v, dtype=np.complex128)
+    for k in range(n_rhs):
+        charges = (wts * v[:, k]).astype(np.complex128)
+        out = fmm3dpy.hfmm3d(
+            eps=fmm_eps, zk=complex(kappa), sources=src, charges=charges, pg=1
+        )
+        result[:, k] = np.asarray(out.pot, dtype=np.complex128).ravel()
+    return result + S_corr @ v
 
 
 def fmm_matvec_D(
@@ -414,10 +314,27 @@ def fmm_matvec_D(
     fmm_eps: float = 1e-7,
 ) -> np.ndarray:
     """FMM-accelerated double-layer matvec: D @ v = FMM(v) + D_corr @ v."""
-    fmm_part = _fmm_apply_D(v, bdry_pts, normals, wts, kappa, fmm_eps)
+    import fmm3dpy
+
+    src = np.asfortranarray(bdry_pts.T)  # (3, n)
+    nrm_T = normals.T  # (3, n)
     if v.ndim == 1:
-        return fmm_part + D_corr @ v
-    return fmm_part + D_corr @ v
+        scale = (wts * v).astype(np.complex128)  # (n,)
+        dipvec = np.asfortranarray(nrm_T * scale[None, :])  # (3, n)
+        out = fmm3dpy.hfmm3d(
+            eps=fmm_eps, zk=complex(kappa), sources=src, dipvec=dipvec, pg=1
+        )
+        return np.asarray(out.pot, dtype=np.complex128).ravel() + D_corr @ v
+    n_rhs = v.shape[1]
+    result = np.empty_like(v, dtype=np.complex128)
+    for k in range(n_rhs):
+        scale = (wts * v[:, k]).astype(np.complex128)
+        dipvec = np.asfortranarray(nrm_T * scale[None, :])
+        out = fmm3dpy.hfmm3d(
+            eps=fmm_eps, zk=complex(kappa), sources=src, dipvec=dipvec, pg=1
+        )
+        result[:, k] = np.asarray(out.pot, dtype=np.complex128).ravel()
+    return result + D_corr @ v
 
 
 def solve_bie_gmres_fmm(
@@ -454,48 +371,18 @@ def solve_bie_gmres_fmm(
     fmm_eps = nf_corr["fmm_eps"]
     n = bdry_pts.shape[0]
 
-    # ---- T_DtN matmul dispatch (GPU or CPU) ----
+    T = jnp.asarray(T_DtN) if use_gpu_tdtn else np.asarray(T_DtN)
     if use_gpu_tdtn:
-        T_gpu = jnp.asarray(T_DtN)
-        jax.block_until_ready(T_gpu)
-
-        def _tdtn_mv(v_np):
-            """T_DtN @ v on GPU; returns np.ndarray."""
-            result = T_gpu @ jax.device_put(jnp.asarray(v_np))
-            return np.asarray(result)
-
-        def _tdtn_mv_async(v_np):
-            """Launch T_DtN @ v on GPU; return a lazy JAX array (not blocked)."""
-            return T_gpu @ jax.device_put(jnp.asarray(v_np))
-
-        def _collect(jax_arr):
-            """Block + transfer a lazy JAX result to numpy."""
-            return np.asarray(jax_arr)
-
-    else:
-        T_cpu = np.asarray(T_DtN)
-
-        def _tdtn_mv(v_np):
-            return T_cpu @ v_np
-
-        def _tdtn_mv_async(v_np):
-            return T_cpu @ v_np
-
-        def _collect(arr):
-            return arr
-
-    def _apply_S(v):
-        return fmm_matvec_S(v, bdry_pts, wts, kappa, S_corr, fmm_eps)
-
-    def _apply_D(v):
-        return fmm_matvec_D(v, bdry_pts, normals, wts, kappa, D_corr, fmm_eps)
+        jax.block_until_ready(T)
 
     def matvec(x):
-        # T_DtN @ x on GPU (async) while FMM_D runs on CPU
-        Tx_lazy = _tdtn_mv_async(x)
-        Dx = _apply_D(x)
-        Tx = _collect(Tx_lazy)
-        return 0.5 * x - Dx + _apply_S(Tx)
+        # Launch the GPU product before the CPU FMM, then collect it.
+        Tx = T @ x
+        Dx = fmm_matvec_D(x, bdry_pts, normals, wts, kappa, D_corr, fmm_eps)
+        S_Tx = fmm_matvec_S(
+            np.asarray(Tx), bdry_pts, wts, kappa, S_corr, fmm_eps
+        )
+        return 0.5 * x - Dx + S_Tx
 
     A_op = LinearOperator((n, n), matvec=matvec, dtype=np.complex128)
 
@@ -511,7 +398,14 @@ def solve_bie_gmres_fmm(
     uscat_b_cols = []
     gmres_info_list = []
     for s in range(n_src):
-        rhs_s = _apply_S(uin_dn_np[:, s] - _tdtn_mv(uin_np[:, s]))
+        rhs_s = fmm_matvec_S(
+            uin_dn_np[:, s] - np.asarray(T @ uin_np[:, s]),
+            bdry_pts,
+            wts,
+            kappa,
+            S_corr,
+            fmm_eps,
+        )
         sol, info_code = gmres(
             A_op, rhs_s, rtol=tol, restart=restart, maxiter=maxiter, atol=0
         )
@@ -519,7 +413,7 @@ def solve_bie_gmres_fmm(
         gmres_info_list.append(info_code)
 
     uscat_b = np.column_stack(uscat_b_cols)
-    uscat_dn_b = _tdtn_mv(uscat_b + uin_np) - uin_dn_np
+    uscat_dn_b = np.asarray(T @ (uscat_b + uin_np)) - uin_dn_np
     imp = uscat_dn_b + 1j * eta * uscat_b
 
     info = dict(

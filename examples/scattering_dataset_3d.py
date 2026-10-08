@@ -138,49 +138,41 @@ def solve_sample(sd, centers, radii, amps, tx_dirs, rx_pts, p, ctx=None):
     return M
 
 
-def pad(arr, n_max, width=None):
-    """Pad leading axis to ``n_max`` with NaN (for variable scatterer count)."""
-    arr = np.asarray(arr, dtype=np.float64)
-    shape = (n_max,) if width is None else (n_max, width)
-    out = np.full(shape, np.nan)
-    out[: arr.shape[0]] = arr
-    return out
-
-
 def write_shard(path, rows, n_max, n_tx, n_rx):
     import pyarrow as pa
     import pyarrow.parquet as pq
 
     cols = {
         "n_scatterers": pa.array([r["n"] for r in rows], pa.int32()),
-        "centers": pa.array(
-            [pad(r["centers"], n_max, 3).reshape(-1).tolist() for r in rows],
-            pa.list_(pa.float32(), n_max * 3),
-        ),
-        "radii": pa.array(
-            [pad(r["radii"], n_max).tolist() for r in rows],
-            pa.list_(pa.float32(), n_max),
-        ),
-        "amps": pa.array(
-            [pad(r["amps"], n_max).tolist() for r in rows],
-            pa.list_(pa.float32(), n_max),
-        ),
-        "u_real": pa.array(
+    }
+    for name in ("centers", "radii", "amps"):
+        shape = (n_max, 3) if name == "centers" else (n_max,)
+        padded = []
+        for row in rows:
+            arr = np.asarray(row[name], dtype=np.float64)
+            values = np.full(shape, np.nan)
+            values[: len(arr)] = arr
+            padded.append(values.reshape(-1).tolist())
+        cols[name] = pa.array(
+            padded, pa.list_(pa.float32(), int(np.prod(shape)))
+        )
+    cols.update(
+        u_real=pa.array(
             [
                 np.real(r["M"]).astype(np.float32).reshape(-1).tolist()
                 for r in rows
             ],
             pa.list_(pa.float32(), n_rx * n_tx),
         ),
-        "u_imag": pa.array(
+        u_imag=pa.array(
             [
                 np.imag(r["M"]).astype(np.float32).reshape(-1).tolist()
                 for r in rows
             ],
             pa.list_(pa.float32(), n_rx * n_tx),
         ),
-        "sample_index": pa.array([r["idx"] for r in rows], pa.int64()),
-    }
+        sample_index=pa.array([r["idx"] for r in rows], pa.int64()),
+    )
     pq.write_table(pa.table(cols), path)
 
 

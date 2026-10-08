@@ -14,6 +14,7 @@ import argparse
 
 import numpy as np
 import plotly.graph_objects as go
+from report_utils import figure_html, sphere_mesh
 from breast_phantom_3d import (
     B_RADIUS,
     DEFAULT_CENTERS,
@@ -31,245 +32,6 @@ from breast_phantom_3d import (
 )
 
 PLOTLY_CDN = "https://cdn.plot.ly/plotly-2.35.2.min.js"
-
-
-def sphere_mesh(center, radius, n=40):
-    th = np.linspace(0, np.pi, n)
-    ph = np.linspace(0, 2 * np.pi, 2 * n)
-    th, ph = np.meshgrid(th, ph)
-    x = center[0] + radius * np.sin(th) * np.cos(ph)
-    y = center[1] + radius * np.sin(th) * np.sin(ph)
-    z = center[2] + radius * np.cos(th)
-    return x, y, z
-
-
-def hemisphere_mesh(radius, n=60):
-    # hemisphere y >= 0 with polar axis +y
-    th = np.linspace(0, np.pi / 2, n)  # angle from +y
-    ph = np.linspace(0, 2 * np.pi, 2 * n)
-    th, ph = np.meshgrid(th, ph)
-    x = radius * np.sin(th) * np.cos(ph)
-    y = radius * np.cos(th)
-    z = radius * np.sin(th) * np.sin(ph)
-    return x, y, z
-
-
-def fig_domain(n_sensors):
-    fig = go.Figure()
-
-    xs, ys, zs = hemisphere_mesh(B_RADIUS)
-    fig.add_trace(
-        go.Surface(
-            x=xs,
-            y=ys,
-            z=zs,
-            opacity=0.25,
-            showscale=False,
-            colorscale=[[0, "#d4956a"], [1, "#d4956a"]],
-            name="skin (outer surface)",
-            hoverinfo="name",
-            showlegend=True,
-        )
-    )
-    xs, ys, zs = hemisphere_mesh(B_RADIUS - DELTA_SKIN)
-    fig.add_trace(
-        go.Surface(
-            x=xs,
-            y=ys,
-            z=zs,
-            opacity=0.15,
-            showscale=False,
-            colorscale=[[0, "#e8c8a0"], [1, "#e8c8a0"]],
-            name="tissue (inner surface)",
-            hoverinfo="name",
-            showlegend=True,
-        )
-    )
-    for j, (c, rad, m) in enumerate(
-        zip(DEFAULT_CENTERS, DEFAULT_RADII, DEFAULT_MVALS)
-    ):
-        xs, ys, zs = sphere_mesh(c, rad, n=25)
-        fig.add_trace(
-            go.Surface(
-                x=xs,
-                y=ys,
-                z=zs,
-                opacity=0.9,
-                showscale=False,
-                colorscale=[[0, "#b22222"], [1, "#b22222"]],
-                name=f"tumor {j + 1} (n = {m:.3f})",
-                hoverinfo="name",
-                showlegend=(j == 0),
-            )
-        )
-
-    sensors = fibonacci_cap_points(n_sensors)
-    fig.add_trace(
-        go.Scatter3d(
-            x=sensors[:, 0],
-            y=sensors[:, 1],
-            z=sensors[:, 2],
-            mode="markers",
-            marker=dict(size=3, color="#1f77b4"),
-            name=f"tx/rx points ({n_sensors}), |x| = {SENSOR_RADIUS:.3f}",
-        )
-    )
-
-    fig.update_layout(
-        scene=dict(aspectmode="data"),
-        legend=dict(orientation="h", yanchor="bottom", y=0.0),
-        margin=dict(l=0, r=0, t=30, b=0),
-        height=650,
-    )
-    return fig
-
-
-def fig_slice():
-    # coronal slice x = 0 through the tumor centers
-    ny, nz = 400, 400
-    y = np.linspace(-0.2, 1.4, ny)
-    z = np.linspace(-0.8, 0.8, nz)
-    Y, Z = np.meshgrid(y, z, indexing="ij")
-    pts = np.stack([np.zeros_like(Y), Y, Z], axis=-1)
-    n = breast_n_of_x(pts)
-    fig = go.Figure(
-        go.Heatmap(
-            x=z,
-            y=y,
-            z=n,
-            colorscale="Viridis",
-            colorbar=dict(title="n(x)"),
-        )
-    )
-    fig.update_layout(
-        xaxis_title="z",
-        yaxis_title="y",
-        yaxis=dict(scaleanchor="x"),
-        margin=dict(l=40, r=10, t=30, b=40),
-        height=600,
-    )
-    return fig
-
-
-def fig_profile():
-    # 1d radial profile along the line x=0, z=0
-    y = np.linspace(0.0, 1.2, 2000)
-    pts = np.stack([np.zeros_like(y), y, np.zeros_like(y)], axis=-1)
-    n = breast_n_of_x(pts)
-    fig = go.Figure(
-        go.Scatter(x=y, y=n, mode="lines", line=dict(color="#1f77b4"))
-    )
-    fig.update_layout(
-        xaxis_title="y  (x = z = 0)",
-        yaxis_title="n",
-        margin=dict(l=50, r=10, t=30, b=40),
-        height=350,
-    )
-    return fig
-
-
-def fig_matrices(u_hps, u_ng):
-    from plotly.subplots import make_subplots
-
-    diff = np.abs(u_hps - u_ng)
-    fig = make_subplots(
-        rows=1,
-        cols=3,
-        subplot_titles=(
-            "|u_meas|, HPS+BIE",
-            "|u_meas|, NGSolve",
-            "|difference|",
-        ),
-        horizontal_spacing=0.11,
-    )
-    vmax = max(np.abs(u_hps).max(), np.abs(u_ng).max())
-    cbars = [
-        dict(x=0.625, len=0.9, thickness=14),
-        None,
-        dict(x=1.005, len=0.9, thickness=14),
-    ]
-    for col, (m, zmax) in enumerate(
-        [(np.abs(u_hps), vmax), (np.abs(u_ng), vmax), (diff, diff.max())],
-        start=1,
-    ):
-        fig.add_trace(
-            go.Heatmap(
-                z=m,
-                zmin=0,
-                zmax=zmax,
-                colorscale="Viridis",
-                showscale=(col != 2),
-                colorbar=cbars[col - 1],
-            ),
-            row=1,
-            col=col,
-        )
-    fig.update_xaxes(title_text="tx index")
-    fig.update_yaxes(title_text="rx index", row=1, col=1)
-    fig.update_layout(margin=dict(l=40, r=10, t=40, b=40), height=420)
-    return fig
-
-
-def fig_nearfield(sensors, u_hps, u_ng, itx):
-    from plotly.subplots import make_subplots
-
-    fig = make_subplots(
-        rows=1,
-        cols=3,
-        specs=[[{"type": "scene"}] * 3],
-        subplot_titles=(
-            f"Re u^s, HPS+BIE (tx {itx})",
-            f"Re u^s, NGSolve (tx {itx})",
-            "|difference|",
-        ),
-        horizontal_spacing=0.01,
-    )
-    vals = [
-        np.real(u_hps[:, itx]),
-        np.real(u_ng[:, itx]),
-        np.abs(u_hps[:, itx] - u_ng[:, itx]),
-    ]
-    vmax = max(np.abs(vals[0]).max(), np.abs(vals[1]).max())
-    scales = [
-        ("RdBu_r", -vmax, vmax),
-        ("RdBu_r", -vmax, vmax),
-        ("Viridis", 0, vals[2].max()),
-    ]
-    for col, (v, (cs, lo, hi)) in enumerate(zip(vals, scales), start=1):
-        fig.add_trace(
-            go.Scatter3d(
-                x=sensors[:, 0],
-                y=sensors[:, 1],
-                z=sensors[:, 2],
-                mode="markers",
-                marker=dict(
-                    size=5,
-                    color=v,
-                    colorscale=cs,
-                    cmin=lo,
-                    cmax=hi,
-                    showscale=False,
-                ),
-                showlegend=False,
-            ),
-            row=1,
-            col=col,
-        )
-        fig.add_trace(
-            go.Scatter3d(
-                x=[sensors[itx, 0]],
-                y=[sensors[itx, 1]],
-                z=[sensors[itx, 2]],
-                mode="markers",
-                marker=dict(size=9, color="gold", symbol="diamond"),
-                showlegend=False,
-            ),
-            row=1,
-            col=col,
-        )
-    fig.update_scenes(aspectmode="data")
-    fig.update_layout(margin=dict(l=0, r=0, t=40, b=0), height=450)
-    return fig
 
 
 HEAD = f"""<!DOCTYPE html>
@@ -305,11 +67,6 @@ def main():
     ap.add_argument("--n_sensors", type=int, default=64)
     args = ap.parse_args()
 
-    def div(fig):
-        return fig.to_html(
-            full_html=False, include_plotlyjs=False, div_id=None
-        )
-
     parts = [HEAD]
     parts.append(f"""
 <h1>Forward scattering by a smoothed 3D breast phantom</h1>
@@ -341,9 +98,66 @@ source $u^i(x) = e^{{i\\kappa|x - s|}}/(4\\pi|x - s|)$; the data are
 $u^s$ at the receivers, i.e. an $n_{{rx}} \\times n_{{tx}}$ matrix
 $U_{{\\mathrm{{meas}}}}$ per solver.</p>
 """)
-    parts.append(
-        '<div class="fig">' + div(fig_domain(args.n_sensors)) + "</div>"
+    n_sensors = args.n_sensors
+    fig = go.Figure()
+
+    th, ph = np.meshgrid(
+        np.linspace(0, np.pi / 2, 60), np.linspace(0, 2 * np.pi, 120)
     )
+    for radius, opacity, color, name in (
+        (B_RADIUS, 0.25, "#d4956a", "skin (outer surface)"),
+        (B_RADIUS - DELTA_SKIN, 0.15, "#e8c8a0", "tissue (inner surface)"),
+    ):
+        fig.add_trace(
+            go.Surface(
+                x=radius * np.sin(th) * np.cos(ph),
+                y=radius * np.cos(th),
+                z=radius * np.sin(th) * np.sin(ph),
+                opacity=opacity,
+                showscale=False,
+                colorscale=[[0, color], [1, color]],
+                name=name,
+                hoverinfo="name",
+                showlegend=True,
+            )
+        )
+    for j, (c, rad, m) in enumerate(
+        zip(DEFAULT_CENTERS, DEFAULT_RADII, DEFAULT_MVALS)
+    ):
+        (xs, ys, zs) = sphere_mesh(c, rad, n=25)
+        fig.add_trace(
+            go.Surface(
+                x=xs,
+                y=ys,
+                z=zs,
+                opacity=0.9,
+                showscale=False,
+                colorscale=[[0, "#b22222"], [1, "#b22222"]],
+                name=f"tumor {j + 1} (n = {m:.3f})",
+                hoverinfo="name",
+                showlegend=(j == 0),
+            )
+        )
+
+    sensors = fibonacci_cap_points(n_sensors)
+    fig.add_trace(
+        go.Scatter3d(
+            x=sensors[:, 0],
+            y=sensors[:, 1],
+            z=sensors[:, 2],
+            mode="markers",
+            marker=dict(size=3, color="#1f77b4"),
+            name=f"tx/rx points ({n_sensors}), |x| = {SENSOR_RADIUS:.3f}",
+        )
+    )
+
+    fig.update_layout(
+        scene=dict(aspectmode="data"),
+        legend=dict(orientation="h", yanchor="bottom", y=0.0),
+        margin=dict(l=0, r=0, t=30, b=0),
+        height=650,
+    )
+    parts.append('<div class="fig">' + figure_html(fig) + "</div>")
 
     parts.append("""
 <h2>Smoothed coefficient</h2>
@@ -351,8 +165,44 @@ $U_{{\\mathrm{{meas}}}}$ per solver.</p>
 bottom $z$), and the profile along the axis $x = z = 0$ showing the
 $\\tanh$ transitions across skin and tumor 2.</p>
 """)
-    parts.append('<div class="fig">' + div(fig_slice()) + "</div>")
-    parts.append('<div class="fig">' + div(fig_profile()) + "</div>")
+    # coronal slice x = 0 through the tumor centers
+    ny, nz = 400, 400
+    y = np.linspace(-0.2, 1.4, ny)
+    z = np.linspace(-0.8, 0.8, nz)
+    (Y, Z) = np.meshgrid(y, z, indexing="ij")
+    pts = np.stack([np.zeros_like(Y), Y, Z], axis=-1)
+    n = breast_n_of_x(pts)
+    fig = go.Figure(
+        go.Heatmap(
+            x=z,
+            y=y,
+            z=n,
+            colorscale="Viridis",
+            colorbar=dict(title="n(x)"),
+        )
+    )
+    fig.update_layout(
+        xaxis_title="z",
+        yaxis_title="y",
+        yaxis=dict(scaleanchor="x"),
+        margin=dict(l=40, r=10, t=30, b=40),
+        height=600,
+    )
+    parts.append('<div class="fig">' + figure_html(fig) + "</div>")
+    # 1d radial profile along the line x=0, z=0
+    y = np.linspace(0.0, 1.2, 2000)
+    pts = np.stack([np.zeros_like(y), y, np.zeros_like(y)], axis=-1)
+    n = breast_n_of_x(pts)
+    fig = go.Figure(
+        go.Scatter(x=y, y=n, mode="lines", line=dict(color="#1f77b4"))
+    )
+    fig.update_layout(
+        xaxis_title="y  (x = z = 0)",
+        yaxis_title="n",
+        margin=dict(l=50, r=10, t=30, b=40),
+        height=350,
+    )
+    parts.append('<div class="fig">' + figure_html(fig) + "</div>")
 
     if args.hps and args.ng:
         d_h = np.load(args.hps)
@@ -371,15 +221,107 @@ reference decreases the discrepancy monotonically while the HPS solution is
 internally converged to $1.5\\times 10^{{-2}}$ ($p = 10 \\to 12$), so the
 residual difference is attributable to FEM/PML discretization error.</p>
 """)
-        parts.append(
-            '<div class="fig">' + div(fig_matrices(u_hps, u_ng)) + "</div>"
+        from plotly.subplots import make_subplots
+
+        diff = np.abs(u_hps - u_ng)
+        fig = make_subplots(
+            rows=1,
+            cols=3,
+            subplot_titles=(
+                "|u_meas|, HPS+BIE",
+                "|u_meas|, NGSolve",
+                "|difference|",
+            ),
+            horizontal_spacing=0.11,
         )
-        for itx in args.tx:
-            parts.append(
-                '<div class="fig">'
-                + div(fig_nearfield(sensors, u_hps, u_ng, itx))
-                + "</div>"
+        vmax = max(np.abs(u_hps).max(), np.abs(u_ng).max())
+        cbars = [
+            dict(x=0.625, len=0.9, thickness=14),
+            None,
+            dict(x=1.005, len=0.9, thickness=14),
+        ]
+        for col, (m, zmax) in enumerate(
+            [(np.abs(u_hps), vmax), (np.abs(u_ng), vmax), (diff, diff.max())],
+            start=1,
+        ):
+            fig.add_trace(
+                go.Heatmap(
+                    z=m,
+                    zmin=0,
+                    zmax=zmax,
+                    colorscale="Viridis",
+                    showscale=(col != 2),
+                    colorbar=cbars[col - 1],
+                ),
+                row=1,
+                col=col,
             )
+        fig.update_xaxes(title_text="tx index")
+        fig.update_yaxes(title_text="rx index", row=1, col=1)
+        fig.update_layout(margin=dict(l=40, r=10, t=40, b=40), height=420)
+        parts.append('<div class="fig">' + figure_html(fig) + "</div>")
+        for itx in args.tx:
+            from plotly.subplots import make_subplots
+
+            fig = make_subplots(
+                rows=1,
+                cols=3,
+                specs=[[{"type": "scene"}] * 3],
+                subplot_titles=(
+                    f"Re u^s, HPS+BIE (tx {itx})",
+                    f"Re u^s, NGSolve (tx {itx})",
+                    "|difference|",
+                ),
+                horizontal_spacing=0.01,
+            )
+            vals = [
+                np.real(u_hps[:, itx]),
+                np.real(u_ng[:, itx]),
+                np.abs(u_hps[:, itx] - u_ng[:, itx]),
+            ]
+            vmax = max(np.abs(vals[0]).max(), np.abs(vals[1]).max())
+            scales = [
+                ("RdBu_r", -vmax, vmax),
+                ("RdBu_r", -vmax, vmax),
+                ("Viridis", 0, vals[2].max()),
+            ]
+            for col, (v, (cs, lo, hi)) in enumerate(
+                zip(vals, scales), start=1
+            ):
+                fig.add_trace(
+                    go.Scatter3d(
+                        x=sensors[:, 0],
+                        y=sensors[:, 1],
+                        z=sensors[:, 2],
+                        mode="markers",
+                        marker=dict(
+                            size=5,
+                            color=v,
+                            colorscale=cs,
+                            cmin=lo,
+                            cmax=hi,
+                            showscale=False,
+                        ),
+                        showlegend=False,
+                    ),
+                    row=1,
+                    col=col,
+                )
+                fig.add_trace(
+                    go.Scatter3d(
+                        x=[sensors[itx, 0]],
+                        y=[sensors[itx, 1]],
+                        z=[sensors[itx, 2]],
+                        mode="markers",
+                        marker=dict(size=9, color="gold", symbol="diamond"),
+                        showlegend=False,
+                    ),
+                    row=1,
+                    col=col,
+                )
+            fig.update_scenes(aspectmode="data")
+            fig.update_layout(margin=dict(l=0, r=0, t=40, b=0), height=450)
+            parts.append('<div class="fig">' + figure_html(fig) + "</div>")
 
     parts.append("""
 <h2>Reproduction</h2>

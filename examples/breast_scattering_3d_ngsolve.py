@@ -71,14 +71,9 @@ ngsglobals.msg_level = 0
 SetNumThreads(16)
 
 
-def cf_tanh(s):
-    """Overflow-safe tanh of an ngsolve CoefficientFunction."""
-    return 1.0 - 2.0 / (exp(2.0 * s) + 1.0)
-
-
 def cf_chi(d, kval=KVAL):
     """Smoothed indicator chi(d) = (1 + tanh(kval*d)) / 2."""
-    return 0.5 * (1.0 + cf_tanh(kval * d))
+    return 0.5 * (1.0 + (1.0 - 2.0 / (exp(2.0 * (kval * d)) + 1.0)))
 
 
 def smoothed_ncoef():
