@@ -70,15 +70,25 @@ def measure(arguments):
         return dict(failed=True, command=command, error=str(exc), gpu=gpu)
 
 
-def cases(suite):
-    if suite == "smoke":
-        return [
+@app.local_entrypoint()
+def main(
+    suite: str = "smoke",
+    output: str = "data/examples/accuracy",
+    case: str = "",
+    start: int = 0,
+):
+    directory = Path(output)
+    directory.mkdir(parents=True, exist_ok=True)
+    if case:
+        commands = [case]
+    elif suite == "smoke":
+        commands = [
             "--solver fft --kappa 4 --n 32",
             "--solver hps --kappa 4 --q 4 --L 1",
             "--solver hps --kind phantom --kappa 4 --q 6 --L 1",
         ]
-    if suite == "radial":
-        return [
+    elif suite == "radial":
+        commands = [
             f"--solver fft --kappa {k} --n {n}"
             for k in (4, 8, 12)
             for n in (16, 24, 32, 48, 64)
@@ -88,8 +98,8 @@ def cases(suite):
             for q, level in ((8, 1), (10, 1), (12, 1), (6, 2), (8, 2))
             for pc in ("jacobi", "shift-coarse:0.1")
         ]
-    if suite == "phantom":
-        return [
+    elif suite == "phantom":
+        commands = [
             f"--solver fft --kind phantom --kappa {k} --n {n}"
             for k in (4, 8)
             for n in (32, 48, 64, 96, 128, 160, 192)
@@ -106,25 +116,14 @@ def cases(suite):
                 (8, 2),
             )
         ]
-    if suite == "phantom-p":
-        return [
+    elif suite == "phantom-p":
+        commands = [
             f"--solver hps --kind phantom --kappa {k} --q 8 --L 2 --p {p} --leaf-batch-size 4"
             for k in (4, 8)
             for p in (16, 20)
         ]
-    raise ValueError("suite must be smoke, radial, phantom, or phantom-p")
-
-
-@app.local_entrypoint()
-def main(
-    suite: str = "smoke",
-    output: str = "data/examples/accuracy",
-    case: str = "",
-    start: int = 0,
-):
-    directory = Path(output)
-    directory.mkdir(parents=True, exist_ok=True)
-    commands = [case] if case else cases(suite)
+    else:
+        raise ValueError("suite must be smoke, radial, phantom, or phantom-p")
     for index, command in enumerate(commands[start:], start=start):
         print(f"CASE {index}: {command}", flush=True)
         result = measure.remote(shlex.split(command))

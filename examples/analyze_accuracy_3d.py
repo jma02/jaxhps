@@ -4,21 +4,18 @@ import argparse
 import csv
 import json
 import statistics
+from itertools import groupby
+from operator import itemgetter
 from pathlib import Path
 
 import numpy as np
 
 
-def field(row):
-    return np.asarray(row["field_real"]) + 1j * np.asarray(row["field_imag"])
-
-
-def error(row, reference):
-    weights = np.asarray(reference["weights"])
+def relative_error(field, reference, weights):
     return float(
         np.sqrt(
-            np.sum(weights * abs(field(row) - field(reference)) ** 2)
-            / np.sum(weights * abs(field(reference)) ** 2)
+            np.sum(weights * abs(field - reference) ** 2)
+            / np.sum(weights * abs(reference) ** 2)
         )
     )
 
@@ -58,7 +55,15 @@ def analyze(files, reference_controls):
     for row in raw:
         np.testing.assert_array_equal(row["targets"], raw[0]["targets"])
         np.testing.assert_array_equal(row["weights"], raw[0]["weights"])
-        assert np.isfinite(field(row)).all()
+        values = np.asarray(row["field_real"]) + 1j * np.asarray(
+            row["field_imag"]
+        )
+        assert np.isfinite(values).all()
+        row["field"] = values
+        row["certified"] = certified(row["first_info"]) and all(
+            certified(rep["info"]) for rep in row["repeats"]
+        )
+    weights = np.asarray(raw[0]["weights"])
     references = {}
     for kappa in sorted({r["parameters"]["kappa"] for r in raw}):
         candidates = sorted(
@@ -68,24 +73,23 @@ def analyze(files, reference_controls):
                 if r["parameters"]["kind"] == "phantom"
                 and r["parameters"]["solver"] == "fft"
                 and r["parameters"]["kappa"] == kappa
-                and certified(r["first_info"])
-                and all(certified(rep["info"]) for rep in r["repeats"])
+                and r["certified"]
             ],
             key=lambda r: r["parameters"]["n"],
         )
         if len(candidates) >= 3:
-            fine, previous, earlier = (
-                candidates[-1],
-                candidates[-2],
-                candidates[-3],
-            )
+            earlier, previous, fine = candidates[-3:]
             references[kappa] = dict(
                 row=fine,
                 n=fine["parameters"]["n"],
                 previous_n=previous["parameters"]["n"],
                 earlier_n=earlier["parameters"]["n"],
-                relative_change=error(previous, fine),
-                previous_relative_change=error(earlier, previous),
+                relative_change=relative_error(
+                    previous["field"], fine["field"], weights
+                ),
+                previous_relative_change=relative_error(
+                    earlier["field"], previous["field"], weights
+                ),
             )
     rows = []
     for row in raw:
@@ -100,7 +104,9 @@ def analyze(files, reference_controls):
         field_error = row.get("field_relative_error")
         if p["kind"] == "phantom" and p["kappa"] in references:
             reference = references[p["kappa"]]
-            field_error = error(row, reference["row"])
+            field_error = relative_error(
+                row["field"], reference["row"]["field"], weights
+            )
             uncertainty = reference["relative_change"]
         rows.append(
             dict(
@@ -121,10 +127,7 @@ def analyze(files, reference_controls):
                 L=p["L"] if p["solver"] == "hps" else None,
                 leaf_batch_size=p.get("leaf_batch_size"),
                 unknowns=row["unknowns"],
-                converged=bool(
-                    certified(info)
-                    and all(certified(r["info"]) for r in repeats)
-                ),
+                converged=bool(row["certified"]),
                 max_true_residual=max(
                     [stats["final_rel_res"]]
                     + [
@@ -153,48 +156,42 @@ def analyze(files, reference_controls):
             )
         )
     matches = []
-    for kind in sorted({r["kind"] for r in rows}):
-        for kappa in sorted({r["kappa"] for r in rows if r["kind"] == kind}):
-            for ceiling in (0.01, 0.001, 0.0001):
-                for method in sorted(
-                    {
-                        r["method"]
-                        for r in rows
-                        if r["kind"] == kind and r["kappa"] == kappa
-                    }
-                ):
-                    eligible = [
-                        r
-                        for r in rows
-                        if r["kind"] == kind
-                        and r["kappa"] == kappa
-                        and r["method"] == method
-                        and r["converged"]
-                        and r["field_error"] is not None
-                        and r["reference_change"] is not None
-                        and r["field_error"] + r["reference_change"] <= ceiling
-                        and r["reference_change"] <= ceiling / 10
-                    ]
-                    for metric in ("cold_seconds", "repeat_median_seconds"):
-                        measured = [
-                            r for r in eligible if r[metric] is not None
-                        ]
-                        best = (
-                            min(measured, key=lambda r: r[metric])
-                            if measured
-                            else None
+    ordered = sorted(rows, key=itemgetter("kind", "kappa", "method"))
+    for (kind, kappa), cases in groupby(
+        ordered, key=itemgetter("kind", "kappa")
+    ):
+        methods = {
+            method: list(group)
+            for method, group in groupby(cases, key=itemgetter("method"))
+        }
+        for ceiling in (0.01, 0.001, 0.0001):
+            for method, group in methods.items():
+                eligible = [
+                    r
+                    for r in group
+                    if r["converged"]
+                    and r["field_error"] is not None
+                    and r["reference_change"] is not None
+                    and r["field_error"] + r["reference_change"] <= ceiling
+                    and r["reference_change"] <= ceiling / 10
+                ]
+                for metric in ("cold_seconds", "repeat_median_seconds"):
+                    best = min(
+                        (r for r in eligible if r[metric] is not None),
+                        key=itemgetter(metric),
+                        default=None,
+                    )
+                    matches.append(
+                        dict(
+                            kind=kind,
+                            kappa=kappa,
+                            ceiling=ceiling,
+                            method=method,
+                            metric=metric,
+                            best_case=best["case"] if best else None,
+                            seconds=best[metric] if best else None,
                         )
-                        matches.append(
-                            dict(
-                                kind=kind,
-                                kappa=kappa,
-                                ceiling=ceiling,
-                                method=method,
-                                metric=metric,
-                                best_case=best["case"] if best else None,
-                                seconds=best[metric] if best else None,
-                            )
-                        )
+                    )
     return dict(
         rows=rows,
         matches=matches,

@@ -12,6 +12,7 @@ import jax.numpy as jnp
 import numpy as np
 import scipy
 
+from analyze_accuracy_3d import certified, relative_error
 from fft_volume_3d import (
     evaluate_volume_field,
     prepare_volume_solver,
@@ -42,15 +43,6 @@ def targets():
 
 def radial(r):
     return -0.4 * np.maximum(1 - (np.asarray(r) / 0.6) ** 2, 0) ** 4
-
-
-def relative_error(field, reference, weights):
-    return float(
-        np.sqrt(
-            np.sum(weights * abs(field - reference) ** 2)
-            / np.sum(weights * abs(reference) ** 2)
-        )
-    )
 
 
 def main():
@@ -105,24 +97,6 @@ def main():
         row["unknowns"] = args.n**3
         row["kernel_bytes"] = kernel.nbytes
         row["cold_setup_solve_seconds"] = time.perf_counter() - t0
-        converged = info["info"] == 0 and info["final_rel_res"] <= 1e-8
-        for _ in range(args.repeats if converged else 0):
-            t1 = time.perf_counter()
-            u, info = solve_volume(operator, points, args.kappa, direction)
-            row["repeats"].append(
-                dict(seconds=time.perf_counter() - t1, info=info)
-            )
-        t1 = time.perf_counter()
-        field = np.asarray(
-            evaluate_volume_field(
-                jnp.asarray(xyz),
-                jnp.asarray(points),
-                b * u,
-                args.kappa,
-                2 * args.a / args.n,
-            )
-        )
-        row["evaluation_seconds"] = time.perf_counter() - t1
     else:
         fixture = (
             ROOT
@@ -159,17 +133,28 @@ def main():
         row["first_solve_seconds"] = out["info"]["first_solve_seconds"]
         row["exterior_bytes"] = sd["S"].nbytes + sd["D"].nbytes
         ub, dn = out["uscat_b"], out["uscat_dn_b"]
-        converged = (
-            out["info"]["converged"]
-            and out["info"]["gmres_stats"]["final_rel_res"] <= 1e-8
-        )
-        for _ in range(args.repeats if converged else 0):
-            t1 = time.perf_counter()
-            ub, dn, info = out["resolve"](direction[None])
-            row["repeats"].append(
-                dict(seconds=time.perf_counter() - t1, info=info)
-            )
+    converged = certified(row["first_info"])
+    for _ in range(args.repeats if converged else 0):
         t1 = time.perf_counter()
+        if args.solver == "fft":
+            u, info = solve_volume(operator, points, args.kappa, direction)
+        else:
+            ub, dn, info = out["resolve"](direction[None])
+        row["repeats"].append(
+            dict(seconds=time.perf_counter() - t1, info=info)
+        )
+    t1 = time.perf_counter()
+    if args.solver == "fft":
+        field = np.asarray(
+            evaluate_volume_field(
+                jnp.asarray(xyz),
+                jnp.asarray(points),
+                b * u,
+                args.kappa,
+                2 * args.a / args.n,
+            )
+        )
+    else:
         field = np.asarray(
             eval_uscat_offsurface_3D(
                 jnp.asarray(xyz),
@@ -181,7 +166,7 @@ def main():
                 args.kappa,
             )
         ).ravel()
-        row["evaluation_seconds"] = time.perf_counter() - t1
+    row["evaluation_seconds"] = time.perf_counter() - t1
     row["gpu_memory"] = device.memory_stats()
     row["host_peak_rss_bytes"] = (
         resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
@@ -198,16 +183,15 @@ def main():
     print(
         json.dumps(
             {
-                k: v
-                for k, v in row.items()
-                if k
-                in (
+                key: row[key]
+                for key in (
                     "parameters",
                     "cold_setup_solve_seconds",
                     "field_relative_error",
                     "gpu_memory",
                     "host_peak_rss_bytes",
                 )
+                if key in row
             }
         ),
         flush=True,
