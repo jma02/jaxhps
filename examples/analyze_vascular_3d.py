@@ -60,7 +60,7 @@ def summarize(raw):
             )
             key = (data["variant"], data["waves"])
             if key in previous:
-                old = previous[key]
+                old, old_field = previous[key]
                 for parameter in ("seed", "a", "kappa"):
                     if (
                         old["parameters"][parameter]
@@ -69,9 +69,6 @@ def summarize(raw):
                         raise ValueError(f"incompatible {parameter}")
                 if not np.array_equal(old["receivers"], data["receivers"]):
                     raise ValueError("receiver sets differ")
-                old_field = np.asarray(old["field_real"]) + 1j * np.asarray(
-                    old["field_imag"]
-                )
                 norm = np.linalg.norm(field)
                 if norm == 0 or not np.isfinite(norm):
                     raise ValueError(
@@ -81,110 +78,9 @@ def summarize(raw):
                     np.linalg.norm(field - old_field) / norm
                 )
                 row["previous_n"] = old["n"]
-            previous[key] = data
+            previous[key] = (data, field)
         rows.append(row)
     return rows
-
-
-def geometry_figure():
-    fig = plt.figure(figsize=(12, 7), layout="constrained")
-    axis = np.linspace(-1.1, 1.1, 401)
-    x, z = np.meshgrid(axis, axis)
-    norm = TwoSlopeNorm(vmin=-0.047, vcenter=0, vmax=0.174)
-    for index, variant in enumerate(("vascular", "dense")):
-        for column, fixed_y in enumerate((0, 0.3)):
-            ax = fig.add_subplot(2, 3, index * 3 + column + 1)
-            points = np.stack([x, np.full_like(x, fixed_y), z], axis=-1)
-            b = vascular_phantom(points, variant=variant)
-            im = ax.imshow(
-                b,
-                origin="lower",
-                extent=[-1.1, 1.1, -1.1, 1.1],
-                cmap="RdBu_r",
-                norm=norm,
-            )
-            ax.set(
-                title=f"{variant.capitalize()}: y={fixed_y:g}",
-                xlabel="x",
-                ylabel="z",
-            )
-        ax = fig.add_subplot(2, 3, index * 3 + 3, projection="3d")
-        branches, lobules = vascular_geometry(variant)
-        for start, middle, end, radius in branches:
-            t = np.linspace(0, 1, 30)[:, None]
-            curve = (
-                (1 - t) ** 2 * start + 2 * t * (1 - t) * middle + t**2 * end
-            )
-            curve[:, 2] += 0.6875
-            ax.plot(
-                *curve.T, color="#a12a32", linewidth=radius * 65, alpha=0.85
-            )
-        centres = np.array([c for c, _, _ in lobules]) + [0, 0, 0.6875]
-        ax.scatter(*centres.T, color="#197e89", s=12, alpha=0.4)
-        ax.set(
-            title=f"{len(branches)} branches / {len(lobules)} lobules",
-            xlabel="x",
-            ylabel="y",
-            zlabel="z",
-        )
-        ax.set_box_aspect((1, 1, 1))
-        ax.view_init(22, -65)
-    fig.colorbar(
-        im, ax=fig.axes[:], shrink=0.7, label="Contrast b = 1 − (c₀/c)²"
-    )
-    fig.suptitle(
-        "Synthetic pendant breast: curved vessels and lobular tissue",
-        fontsize=16,
-    )
-    return fig
-
-
-def cost_figure(rows):
-    fig, axes = plt.subplots(1, 3, figsize=(12, 4), layout="constrained")
-    colors = {10: "#0072B2", 20: "#D55E00", 40: "#009E73", 80: "#882255"}
-    for variant, style in [("vascular", "-o"), ("dense", "--s")]:
-        for waves in sorted({r["waves"] for r in rows}):
-            subset = [
-                r
-                for r in rows
-                if r["variant"] == variant
-                and r["waves"] == waves
-                and r["status"] == "converged"
-            ]
-            for ax, metric in zip(
-                axes, ["receiver_change", "process_s", "peak_device_gib"]
-            ):
-                valid = [r for r in subset if r[metric] is not None]
-                if valid:
-                    ax.plot(
-                        [r["n"] for r in valid],
-                        [r[metric] for r in valid],
-                        style,
-                        color=colors.get(waves, "#555555"),
-                        label=f"{variant}, {waves}λ",
-                    )
-            axes[0].set_yscale("log")
-    for ax, title, ylabel in zip(
-        axes,
-        [
-            "Successive-grid field change",
-            "Complete process cost",
-            "Device allocator peak",
-        ],
-        ["Relative change at 512 receivers", "Seconds", "GiB"],
-    ):
-        ax.set(title=title, xlabel="Points per box edge n", ylabel=ylabel)
-        ax.grid(alpha=0.2)
-    axes[0].legend(fontsize=7)
-    fig.suptitle(
-        "A100-80GB · complex128 · one plane wave · fixed receiver samples",
-        fontsize=13,
-    )
-    return fig
-
-
-def value(x, spec=".2f"):
-    return "—" if x is None else format(x, spec)
 
 
 def main():
@@ -211,48 +107,131 @@ def main():
         }
     )
     with PdfPages(args.out / "vascular-a100-report.pdf") as pdf:
-        fig = geometry_figure()
+        fig = plt.figure(figsize=(12, 7), layout="constrained")
+        axis = np.linspace(-1.1, 1.1, 401)
+        x, z = np.meshgrid(axis, axis)
+        norm = TwoSlopeNorm(vmin=-0.047, vcenter=0, vmax=0.174)
+        for index, variant in enumerate(("vascular", "dense")):
+            for column, fixed_y in enumerate((0, 0.3)):
+                ax = fig.add_subplot(2, 3, index * 3 + column + 1)
+                points = np.stack([x, np.full_like(x, fixed_y), z], axis=-1)
+                b = vascular_phantom(points, variant=variant)
+                im = ax.imshow(
+                    b,
+                    origin="lower",
+                    extent=[-1.1, 1.1, -1.1, 1.1],
+                    cmap="RdBu_r",
+                    norm=norm,
+                )
+                ax.set(
+                    title=f"{variant.capitalize()}: y={fixed_y:g}",
+                    xlabel="x",
+                    ylabel="z",
+                )
+            ax = fig.add_subplot(2, 3, index * 3 + 3, projection="3d")
+            branches, lobules = vascular_geometry(variant)
+            for start, middle, end, radius in branches:
+                t = np.linspace(0, 1, 30)[:, None]
+                curve = (
+                    (1 - t) ** 2 * start
+                    + 2 * t * (1 - t) * middle
+                    + t**2 * end
+                )
+                curve[:, 2] += 0.6875
+                ax.plot(
+                    *curve.T,
+                    color="#a12a32",
+                    linewidth=radius * 65,
+                    alpha=0.85,
+                )
+            centres = np.array([c for c, _, _ in lobules]) + [0, 0, 0.6875]
+            ax.scatter(*centres.T, color="#197e89", s=12, alpha=0.4)
+            ax.set(
+                title=f"{len(branches)} branches / {len(lobules)} lobules",
+                xlabel="x",
+                ylabel="y",
+                zlabel="z",
+            )
+            ax.set_box_aspect((1, 1, 1))
+            ax.view_init(22, -65)
+        fig.colorbar(
+            im, ax=fig.axes[:], shrink=0.7, label="Contrast b = 1 − (c₀/c)²"
+        )
+        fig.suptitle(
+            "Synthetic pendant breast: curved vessels and lobular tissue",
+            fontsize=16,
+        )
         fig.savefig(args.out / "geometry.png", dpi=170)
         pdf.savefig(fig)
         plt.close(fig)
-        fig = cost_figure(rows)
+        fig, axes = plt.subplots(1, 3, figsize=(12, 4), layout="constrained")
+        colors = {10: "#0072B2", 20: "#D55E00", 40: "#009E73", 80: "#882255"}
+        for variant, style in [("vascular", "-o"), ("dense", "--s")]:
+            for waves in sorted({r["waves"] for r in rows}):
+                subset = [
+                    r
+                    for r in rows
+                    if r["variant"] == variant
+                    and r["waves"] == waves
+                    and r["status"] == "converged"
+                ]
+                for ax, metric in zip(
+                    axes, ["receiver_change", "process_s", "peak_device_gib"]
+                ):
+                    valid = [r for r in subset if r[metric] is not None]
+                    if valid:
+                        ax.plot(
+                            [r["n"] for r in valid],
+                            [r[metric] for r in valid],
+                            style,
+                            color=colors.get(waves, "#555555"),
+                            label=f"{variant}, {waves}λ",
+                        )
+                axes[0].set_yscale("log")
+        for ax, title, ylabel in zip(
+            axes,
+            [
+                "Successive-grid field change",
+                "Complete process cost",
+                "Device allocator peak",
+            ],
+            ["Relative change at 512 receivers", "Seconds", "GiB"],
+        ):
+            ax.set(title=title, xlabel="Points per box edge n", ylabel=ylabel)
+            ax.grid(alpha=0.2)
+        axes[0].legend(fontsize=7)
+        fig.suptitle(
+            "A100-80GB · complex128 · one plane wave · fixed receiver samples",
+            fontsize=13,
+        )
         fig.savefig(args.out / "refinement.png", dpi=170)
         pdf.savefig(fig)
         plt.close(fig)
         for offset in range(0, len(rows), 18):
             fig, ax = plt.subplots(figsize=(12, 7))
             ax.axis("off")
-            table_rows = [
-                [
-                    r["variant"],
-                    r["waves"],
-                    r["n"],
-                    r["status"],
-                    value(r["receiver_change"], ".2e"),
-                    value(r["residual"], ".1e"),
-                    r["iterations"],
-                    value(r["setup_s"]),
-                    value(r["solve_s"]),
-                    value(r["evaluation_s"]),
-                    value(r["peak_device_gib"]),
-                ]
-                for r in rows[offset : offset + 18]
+            columns = [
+                ("variant", "Phantom", ""),
+                ("waves", "Box λ", ""),
+                ("n", "n", ""),
+                ("status", "Krylov", ""),
+                ("receiver_change", "Field Δ", ".2e"),
+                ("residual", "Residual", ".1e"),
+                ("iterations", "Iters", ""),
+                ("setup_s", "Setup s", ".2f"),
+                ("solve_s", "Solve s", ".2f"),
+                ("evaluation_s", "Eval s", ".2f"),
+                ("peak_device_gib", "GiB", ".2f"),
             ]
             table = ax.table(
-                cellText=table_rows,
-                colLabels=[
-                    "Phantom",
-                    "Box λ",
-                    "n",
-                    "Krylov",
-                    "Field Δ",
-                    "Residual",
-                    "Iters",
-                    "Setup s",
-                    "Solve s",
-                    "Eval s",
-                    "GiB",
+                cellText=[
+                    [
+                        "—" if r[key] is None else format(r[key], spec)
+                        for key, _, spec in columns
+                    ]
+                    for r in rows[offset : offset + 18]
                 ],
+                colLabels=[label for _, label, _ in columns],
                 loc="center",
             )
             table.auto_set_font_size(False)

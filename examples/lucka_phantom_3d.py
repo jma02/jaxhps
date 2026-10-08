@@ -117,14 +117,6 @@ def vascular_geometry(variant="vascular", seed=7):
     return tuple(branches), tuple(lobules)
 
 
-def _ellipsoid_union(mask, points, centre, axes, rotation):
-    extent = np.abs(rotation) @ axes
-    inside = np.all(np.abs(points - centre) < extent, axis=-1)
-    local = (points[inside] - centre) @ rotation / axes
-    profile = np.maximum(1 - np.sum(local**2, axis=-1), 0) ** 5
-    mask[inside] = 1 - (1 - mask[inside]) * (1 - profile)
-
-
 def vascular_phantom(points, a=1.25, variant="vascular", seed=7):
     """C4 synthetic pendant breast with 45/75 curved, tapering branches.
 
@@ -136,6 +128,26 @@ def vascular_phantom(points, a=1.25, variant="vascular", seed=7):
     if a <= 0 or points.shape[-1:] != (3,):
         raise ValueError("positive half-width and (..., 3) points required")
     branches, lobules = vascular_geometry(variant, seed)
+    fibro_shapes, vessel_shapes = [], []
+    for centre, axes, angle in lobules:
+        c, s = np.cos(angle), np.sin(angle)
+        rotation = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+        fibro_shapes.append((centre, axes, rotation))
+    t = np.linspace(0, 1, 6)[:, None]
+    for start, middle, end, radius in branches:
+        centres = (1 - t) ** 2 * start + 2 * t * (1 - t) * middle + t**2 * end
+        tangents = 2 * ((1 - t) * (middle - start) + t * (end - middle))
+        tangents /= np.linalg.norm(tangents, axis=-1, keepdims=True)
+        normals = np.cross(tangents, [1, 0, 0])
+        normals /= np.linalg.norm(normals, axis=-1, keepdims=True)
+        rotations = np.stack(
+            [normals, np.cross(tangents, normals), tangents], axis=-1
+        )
+        axes = np.array([radius, radius, np.linalg.norm(end - start) / 3])
+        vessel_shapes.extend(
+            (centre, axes, rotation)
+            for centre, rotation in zip(centres, rotations)
+        )
     shape = points.shape[:-1]
     normalized = (points.reshape(-1, 3) - [0, 0, 0.55 * a]) / (0.8 * a)
     result = np.zeros(len(normalized))
@@ -147,28 +159,13 @@ def vascular_phantom(points, a=1.25, variant="vascular", seed=7):
         p = pts[active]
         fibro = np.zeros(len(p))
         vessels = np.zeros(len(p))
-        for centre, axes, angle in lobules:
-            c, s = np.cos(angle), np.sin(angle)
-            rotation = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
-            _ellipsoid_union(fibro, p, centre, axes, rotation)
-        for start, middle, end, radius in branches:
-            for t in np.linspace(0, 1, 6):
-                centre = (
-                    (1 - t) ** 2 * start
-                    + 2 * t * (1 - t) * middle
-                    + t**2 * end
-                )
-                tangent = 2 * ((1 - t) * (middle - start) + t * (end - middle))
-                tangent /= np.linalg.norm(tangent)
-                normal = np.cross(tangent, [1, 0, 0])
-                normal /= np.linalg.norm(normal)
-                rotation = np.column_stack(
-                    [normal, np.cross(tangent, normal), tangent]
-                )
-                axes = np.array(
-                    [radius, radius, np.linalg.norm(end - start) / 3]
-                )
-                _ellipsoid_union(vessels, p, centre, axes, rotation)
+        for mask, shapes in ((fibro, fibro_shapes), (vessels, vessel_shapes)):
+            for centre, axes, rotation in shapes:
+                extent = np.abs(rotation) @ axes
+                inside = np.all(np.abs(p - centre) < extent, axis=-1)
+                local = (p[inside] - centre) @ rotation / axes
+                profile = np.maximum(1 - np.sum(local**2, axis=-1), 0) ** 5
+                mask[inside] = 1 - (1 - mask[inside]) * (1 - profile)
         fat = -0.041 + 0.006 * np.prod(np.cos(p * [11, 13, 9]), axis=-1)
         b = (1 - fibro) * fat + 0.020 * fibro
         b = (1 - vessels) * b + 0.103 * vessels
