@@ -31,16 +31,6 @@ from plotly.subplots import make_subplots
 PLOTLY_CDN = "https://cdn.plot.ly/plotly-2.35.2.min.js"
 
 
-def b_of_x(pts, centers, radii, amps):
-    "Volume potential ``b(x) = sum_k A_k (1-(|x-c_k|/R_k)^2)^4`` (compact)."
-    b = np.zeros(pts.shape[:-1])
-    for c, R, A in zip(centers, radii, amps):
-        d = np.linalg.norm(pts - c, axis=-1) / R
-        m = d < 1.0
-        b[m] += A * (1.0 - d[m] ** 2) ** 4
-    return b
-
-
 HEAD = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <title>Free-space Helmholtz scattering dataset</title>
@@ -303,7 +293,12 @@ strongest bump. Penetrable inclusions ($A_k < 0$, so $n > 1$).</p>
     g = np.linspace(-a, a, ng)
     (X, Y) = np.meshgrid(g, g, indexing="ij")
     pts = np.stack([X, Y, np.full_like(X, z0)], axis=-1)
-    n = np.sqrt(np.maximum(1.0 - b_of_x(pts, c, r, A), 0.0))
+    b = np.zeros(pts.shape[:-1])
+    for center, radius, amp in zip(c, r, A):
+        d = np.linalg.norm(pts - center, axis=-1) / radius
+        mask = d < 1.0
+        b[mask] += amp * (1.0 - d[mask] ** 2) ** 4
+    n = np.sqrt(np.maximum(1.0 - b, 0.0))
     fig = go.Figure(
         go.Heatmap(
             x=g, y=g, z=n.T, colorscale="Viridis", colorbar=dict(title="n(x)")

@@ -69,11 +69,6 @@ DEFAULT_RADII = np.array([0.1 * B_RADIUS, 0.1 * B_RADIUS, 0.05 * B_RADIUS])
 DEFAULT_MVALS = (1524.0 / 1500.0) ** 2 * np.array([1.2, 1.5, 1.1])
 
 
-def smoothed_indicator(d: np.ndarray, kval: float = KVAL) -> np.ndarray:
-    """``chi(d) ~ 1`` for ``d >> 1/kval``, ``~ 0`` for ``d << -1/kval``."""
-    return 0.5 * (1.0 + np.tanh(kval * np.asarray(d)))
-
-
 def breast_n_of_x(
     pts: np.ndarray,
     centers: np.ndarray = DEFAULT_CENTERS,
@@ -88,22 +83,17 @@ def breast_n_of_x(
     """Smoothed squared refractive index ``n(x)`` at ``pts`` (shape (..., 3))."""
     pts = np.asarray(pts)
     r = np.linalg.norm(pts, axis=-1)
-    y = pts[..., 1]
-
-    chi_hemi = smoothed_indicator(y, kval)
-    chi_outer = smoothed_indicator(b_radius - r, kval)
-    chi_inner = smoothed_indicator(b_radius - delta_skin - r, kval)
+    distances = np.stack(
+        [pts[..., 1], b_radius - r, b_radius - delta_skin - r]
+    )
+    chi_hemi, chi_outer, chi_inner = 0.5 * (1.0 + np.tanh(kval * distances))
 
     bump = (skinval - 1.0) * chi_outer + (tissueval - skinval) * chi_inner
     for c, rad, m in zip(centers, radii, mvals):
         d = rad - np.linalg.norm(pts - np.asarray(c), axis=-1)
-        bump = bump + (m - tissueval) * smoothed_indicator(d, kval)
+        chi = 0.5 * (1.0 + np.tanh(kval * d))
+        bump = bump + (m - tissueval) * chi
     return 1.0 + chi_hemi * bump
-
-
-def breast_b_of_x(pts: np.ndarray, **kwargs) -> np.ndarray:
-    """Scattering potential ``b(x) = 1 - n(x)`` for the HPS convention."""
-    return 1.0 - breast_n_of_x(pts, **kwargs)
 
 
 def fibonacci_cap_points(

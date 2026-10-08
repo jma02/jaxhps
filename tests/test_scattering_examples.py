@@ -3,6 +3,7 @@
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import jax
 import numpy as np
@@ -124,3 +125,43 @@ def test_fmm_solver_dispatch(monkeypatch, jax_tdtn, n_src):
         "n_src": n_src,
         "converged": True,
     }
+
+
+@pytest.mark.parametrize("push_only", [False, True])
+@pytest.mark.parametrize("publish", [False, True])
+def test_dataset_upload_modes(tmp_path, monkeypatch, push_only, publish):
+    import scattering_dataset_3d as dataset
+
+    api = Mock()
+    monkeypatch.setitem(sys.modules, "huggingface_hub", api)
+    monkeypatch.setenv("HF_TOKEN", "test-token")
+    load = Mock(return_value={"a": 0.5, "kappa": 4.0, "q": 2, "L": 1})
+    monkeypatch.setattr(dataset, "load_SD_matrices_3D", load)
+    for name in ("build_cartesian_ctx", "solve_sample", "write_shard"):
+        monkeypatch.setattr(dataset, name, Mock())
+    argv = ["dataset", "--out", str(tmp_path), "--n_samples", "1"]
+    if push_only:
+        argv.append("--push_only")
+    if publish:
+        argv.extend(["--push_to_hub", "test/dataset"])
+    monkeypatch.setattr(sys, "argv", argv)
+    if push_only and not publish:
+        with pytest.raises(SystemExit, match="--push_only requires"):
+            dataset.main()
+    else:
+        dataset.main()
+    assert load.call_count == int(not push_only)
+    assert dataset.solve_sample.call_count == int(not push_only)
+    assert dataset.write_shard.call_count == int(not push_only)
+    if publish:
+        api.HfApi.assert_called_once_with(token="test-token")
+        api.HfApi.return_value.create_repo.assert_called_once_with(
+            "test/dataset", repo_type="dataset", exist_ok=True
+        )
+        api.HfApi.return_value.upload_folder.assert_called_once_with(
+            folder_path=str(tmp_path),
+            repo_id="test/dataset",
+            repo_type="dataset",
+        )
+    else:
+        api.HfApi.assert_not_called()

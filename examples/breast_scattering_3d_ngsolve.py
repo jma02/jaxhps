@@ -71,38 +71,6 @@ ngsglobals.msg_level = 0
 SetNumThreads(16)
 
 
-def cf_chi(d, kval=KVAL):
-    """Smoothed indicator chi(d) = (1 + tanh(kval*d)) / 2."""
-    return 0.5 * (1.0 + (1.0 - 2.0 / (exp(2.0 * (kval * d)) + 1.0)))
-
-
-def smoothed_ncoef():
-    """ngsolve CF mirroring ``breast_phantom_3d.breast_n_of_x``."""
-    r = sqrt(x * x + y * y + z * z)
-    chi_hemi = cf_chi(y)
-    chi_outer = cf_chi(B_RADIUS - r)
-    chi_inner = cf_chi(B_RADIUS - DELTA_SKIN - r)
-    bump = (SKINVAL - 1.0) * chi_outer + (TISSUEVAL - SKINVAL) * chi_inner
-    for c, rad, m in zip(DEFAULT_CENTERS, DEFAULT_RADII, DEFAULT_MVALS):
-        d = rad - sqrt((x - c[0]) ** 2 + (y - c[1]) ** 2 + (z - c[2]) ** 2)
-        bump = bump + (m - TISSUEVAL) * cf_chi(d)
-    return 1.0 + chi_hemi * bump
-
-
-def make_mesh(hmax_air, hmax_breast, pmlmin, delta_pml):
-    """Full ball: breast-refinement sphere + water + PML shell."""
-    geo = CSGeometry()
-    breast_zone = Sphere(Pnt(0, 0, 0), 1.2 * B_RADIUS).maxh(hmax_breast)
-    water = Sphere(Pnt(0, 0, 0), pmlmin)
-    outer = Sphere(Pnt(0, 0, 0), pmlmin + delta_pml).bc("outer")
-    geo.Add(breast_zone.mat("Breast"))
-    geo.Add((water - breast_zone).mat("Water"))
-    geo.Add((outer - water).mat("PML"))
-    mesh = Mesh(geo.GenerateMesh(maxh=hmax_air))
-    mesh.Curve(2)
-    return mesh
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--n_sensors", type=int, default=64)
@@ -149,9 +117,31 @@ def main():
         f" n_sensors={sensors.shape[0]}"
     )
 
-    mesh = make_mesh(hmax_air, hmax_breast, pmlmin, delta_pml)
+    geo = CSGeometry()
+    breast_zone = Sphere(Pnt(0, 0, 0), 1.2 * B_RADIUS).maxh(hmax_breast)
+    water = Sphere(Pnt(0, 0, 0), pmlmin)
+    outer = Sphere(Pnt(0, 0, 0), pmlmin + delta_pml).bc("outer")
+    geo.Add(breast_zone.mat("Breast"))
+    geo.Add((water - breast_zone).mat("Water"))
+    geo.Add((outer - water).mat("PML"))
+    mesh = Mesh(geo.GenerateMesh(maxh=hmax_air))
+    mesh.Curve(2)
     mesh.SetPML(pml.Radial((0, 0, 0), rad=pmlmin, alpha=1j), "PML")
-    ncoef = smoothed_ncoef()
+
+    r = sqrt(x * x + y * y + z * z)
+    distances = [y, B_RADIUS - r, B_RADIUS - DELTA_SKIN - r]
+    distances.extend(
+        rad - sqrt((x - c[0]) ** 2 + (y - c[1]) ** 2 + (z - c[2]) ** 2)
+        for c, rad in zip(DEFAULT_CENTERS, DEFAULT_RADII)
+    )
+    chi_hemi, chi_outer, chi_inner, *chi_tumors = [
+        0.5 * (1.0 + (1.0 - 2.0 / (exp(2.0 * (KVAL * d)) + 1.0)))
+        for d in distances
+    ]
+    bump = (SKINVAL - 1.0) * chi_outer + (TISSUEVAL - SKINVAL) * chi_inner
+    for m, chi in zip(DEFAULT_MVALS, chi_tumors):
+        bump = bump + (m - TISSUEVAL) * chi
+    ncoef = 1.0 + chi_hemi * bump
 
     fes = H1(mesh, order=args.porder, complex=True)
     u, v = fes.TnT()
