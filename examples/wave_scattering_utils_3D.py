@@ -30,20 +30,6 @@ from jaxhps import (
     build_solver,
 )
 
-_TIMING = bool(os.environ.get("JAXHPS_TIMING"))
-
-
-def _tic():
-    return time.perf_counter()
-
-
-def _toc(label, t0):
-    if _TIMING:
-        print(
-            f"  [timing] {label}: {time.perf_counter() - t0:.2f}s", flush=True
-        )
-    return time.perf_counter()
-
 
 def load_SD_matrices_3D(
     fp: str,
@@ -1025,30 +1011,6 @@ def get_uin_and_dn_pointsource_3D(
 
 
 @jax.jit
-def setup_scattering_lin_system_3D(
-    S: jnp.ndarray,
-    D: jnp.ndarray,
-    T_int: jnp.ndarray,
-    bdry_pts: jnp.ndarray,
-    normals: jnp.ndarray,
-    k: float,
-    source_dirs: jnp.ndarray,
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Assemble ``A`` and ``b`` for the exterior BIE coupling.
-
-    Returns
-    -------
-    A : ``(n_bdry, n_bdry)`` complex matrix  ``= (1/2) I - D + S T_int``.
-    b : ``(n_bdry, n_src)`` right-hand side  ``= S (u^inc_n - T_int u^inc)``.
-    """
-    n = bdry_pts.shape[0]
-    uin, uin_dn = get_uin_and_dn_3D(k, bdry_pts, normals, source_dirs)
-    A = 0.5 * jnp.eye(n, dtype=S.dtype) - D + S @ T_int
-    b = S @ (uin_dn - T_int @ uin)
-    return A, b
-
-
-@jax.jit
 def get_scattering_uscat_impedance_3D(
     S: jnp.ndarray,
     D: jnp.ndarray,
@@ -1067,14 +1029,10 @@ def get_scattering_uscat_impedance_3D(
     uscat_b    : ``(n_bdry, n_src)``  scattered Dirichlet trace ``u^s``.
     uscat_dn_b : ``(n_bdry, n_src)``  scattered Neumann trace  ``u^s_n``.
     """
-    A, rhs = setup_scattering_lin_system_3D(
-        S, D, T_DtN, bdry_pts, normals, k, source_dirs
-    )
     uin, uin_dn = get_uin_and_dn_3D(k, bdry_pts, normals, source_dirs)
-    uscat_b = jnp.linalg.solve(A, rhs)
-    uscat_dn_b = T_DtN @ (uscat_b + uin) - uin_dn
-    imp = uscat_dn_b + 1j * eta * uscat_b
-    return imp, uscat_b, uscat_dn_b
+    return get_scattering_uscat_impedance_from_traces_3D(
+        S, D, T_DtN, uin, uin_dn, eta
+    )
 
 
 @jax.jit
@@ -1358,7 +1316,7 @@ def solve_scattering_bie_3D_cartesian(
     source_dirs = ctx["source_dirs"]
     dev = jax.devices()[0]
 
-    t0 = _tic()
+    times = [time.perf_counter()]
     b_int = b_cartesian(int_pts)
     I_coeffs = (kappa**2 * (1.0 - b_int)).astype(np.complex128)
     phases = np.einsum("lpd,sd->lps", int_pts, source_dirs)
@@ -1376,7 +1334,7 @@ def solve_scattering_bie_3D_cartesian(
         use_ItI=True,
         eta=eta,
     )
-    t0 = _toc("PDEProblem", t0)
+    times.append(time.perf_counter())
 
     # ``build_solver`` stores its outputs on ``host_device`` (CPU by default),
     # so the returned ItI map lands on CPU.  Move it to the compute device so
@@ -1384,10 +1342,10 @@ def solve_scattering_bie_3D_cartesian(
     T_ItI = build_solver(problem, return_top_T=True)
     R = jax.device_put(jnp.asarray(T_ItI), dev)
     jax.block_until_ready(R)
-    t0 = _toc("build_solver", t0)
+    times.append(time.perf_counter())
     T_DtN = get_DtN_from_ItI_3D(R, eta)
     jax.block_until_ready(T_DtN)
-    t0 = _toc("get_DtN_from_ItI", t0)
+    times.append(time.perf_counter())
 
     imp, uscat_b, uscat_dn_b = get_scattering_uscat_impedance_3D(
         S=ctx["dev_S"],
@@ -1400,7 +1358,19 @@ def solve_scattering_bie_3D_cartesian(
         source_dirs=ctx["dev_src"],
     )
     jax.block_until_ready(uscat_b)
-    t0 = _toc("get_scattering_uscat_impedance", t0)
+    times.append(time.perf_counter())
+    if os.environ.get("JAXHPS_TIMING"):
+        for label, start, end in zip(
+            (
+                "PDEProblem",
+                "build_solver",
+                "get_DtN_from_ItI",
+                "get_scattering_uscat_impedance",
+            ),
+            times,
+            times[1:],
+        ):
+            print(f"  [timing] {label}: {end - start:.2f}s", flush=True)
     return dict(
         problem=problem,
         boundary_points=bp,
