@@ -14,11 +14,8 @@ import os
 
 import modal
 
+from lucka_phantom_3d import tissue_phantom
 from modal_fmm_image import fmm_image
-from lucka_phantom_3d import (
-    build_lucka_phantom,
-    build_lucka_phantom_hemisphere,
-)
 
 app = modal.App("jaxhps-lucka-breast")
 
@@ -96,11 +93,7 @@ def run_lucka_solve(
     bp = np.asarray(domain.boundary_points).reshape(-1, 3)
     nrm = outward_normals_for_cube_boundary(bp, root)
 
-    # Build Lucka breast phantom
-    if geometry == "hemisphere":
-        b_int = build_lucka_phantom_hemisphere(int_pts, a)
-    else:
-        b_int = build_lucka_phantom(int_pts, a)
+    b_int = tissue_phantom(int_pts, a, geometry=geometry)
     print(f"  Phantom b(x): min={b_int.min():.4f}, max={b_int.max():.4f}")
     print(f"  Non-zero fraction: {(np.abs(b_int) > 1e-10).mean():.1%}")
 

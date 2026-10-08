@@ -71,11 +71,3 @@ def tissue_phantom(points, a=1.25, geometry="hemisphere"):
     b = (1.0 - vessel) * b + 0.103 * vessel
     b = (1.0 - skin) * b + 0.174 * skin
     return b * zcut
-
-
-def build_lucka_phantom(int_pts, a):
-    return tissue_phantom(int_pts, a, geometry="sphere")
-
-
-def build_lucka_phantom_hemisphere(int_pts, a):
-    return tissue_phantom(int_pts, a, geometry="hemisphere")
