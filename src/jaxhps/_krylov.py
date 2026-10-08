@@ -7,14 +7,6 @@ import jax.numpy as jnp
 import numpy as np
 
 
-@jax.jit
-def _orthogonalize(V: jax.Array, w: jax.Array):
-    h = V.conj() @ w
-    w = w - V.T @ h
-    correction = V.conj() @ w
-    return h + correction, w - V.T @ correction
-
-
 def fgmres(
     matvec: Callable[[jax.Array], jax.Array],
     b: jax.Array,
@@ -96,7 +88,10 @@ def fgmres(
                 raise ValueError(
                     "operator or preconditioner returned nonfinite values"
                 )
-            h, w = _orthogonalize(V, w)
+            h = V.conj() @ w
+            w = w - V.T @ h
+            correction = V.conj() @ w
+            h, w = h + correction, w - V.T @ correction
             H[: j + 1, j] = np.asarray(h)[: j + 1]
             h_norm = float(jnp.linalg.norm(w))
             H[j + 1, j] = h_norm
