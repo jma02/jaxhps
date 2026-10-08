@@ -202,11 +202,14 @@ def exp_mie(args) -> None:
             sd,
             b_radial,
             dirs,
-            method="gmres",
             tol=args.tol,
             maxiter=args.maxiter,
             restart=args.restart,
             precond=args.precond,
+            method=args.method,
+            inner_tol=args.inner_tol,
+            inner_restart=args.inner_restart,
+            inner_maxiter=args.inner_maxiter,
         )
         err = mie_error(out, sd, b_radial, dirs, args.rho)
         st = out["stats"]
@@ -264,6 +267,10 @@ def exp_kappa(args) -> None:
             maxiter=args.maxiter,
             restart=args.restart,
             precond=args.precond,
+            method=args.method,
+            inner_tol=args.inner_tol,
+            inner_restart=args.inner_restart,
+            inner_maxiter=args.inner_maxiter,
         )
         err = mie_error(out, sd, b_radial, DEFAULT_DIR, args.rho)
         st = out["stats"]
@@ -311,6 +318,10 @@ def exp_contrast(args) -> None:
             maxiter=args.maxiter,
             restart=args.restart,
             precond=args.precond,
+            method=args.method,
+            inner_tol=args.inner_tol,
+            inner_restart=args.inner_restart,
+            inner_maxiter=args.inner_maxiter,
         )
         err = mie_error(out, sd, b_radial, DEFAULT_DIR, args.rho)
         st = out["stats"]
@@ -357,6 +368,10 @@ def exp_nsrc(args) -> None:
             maxiter=args.maxiter,
             restart=args.restart,
             precond=args.precond,
+            method=args.method,
+            inner_tol=args.inner_tol,
+            inner_restart=args.inner_restart,
+            inner_maxiter=args.inner_maxiter,
         )
         st = out["stats"]
         row = dict(
@@ -381,6 +396,10 @@ def exp_nsrc(args) -> None:
                     maxiter=args.maxiter,
                     restart=args.restart,
                     precond=args.precond,
+                    method=args.method,
+                    inner_tol=args.inner_tol,
+                    inner_restart=args.inner_restart,
+                    inner_maxiter=args.inner_maxiter,
                 )
                 seq_mv += int(o1["stats"]["n_matvec"])
             row["seq_time"] = time.perf_counter() - t0
