@@ -76,7 +76,9 @@ def main():
     )
 
     def save():
-        args.out.write_text(json.dumps(row))
+        temporary = args.out.with_suffix(".tmp")
+        temporary.write_text(json.dumps(row))
+        temporary.replace(args.out)
 
     save()
     t0 = time.perf_counter()
