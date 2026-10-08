@@ -74,7 +74,6 @@ def main():
     for p in args.shards:
         t = pq.read_table(p)
         d = t.to_pydict()
-        n_tx = int(np.sqrt(len(d["u_real"][0])))
         for i in range(t.num_rows):
             ns = int(d["n_scatterers"][i])
             c = np.array(d["centers"][i], dtype=float).reshape(-1, 3)[:ns]
@@ -83,7 +82,7 @@ def main():
             M = (
                 np.array(d["u_real"][i], dtype=float)
                 + 1j * np.array(d["u_imag"][i], dtype=float)
-            ).reshape(n_tx, n_tx)
+            ).reshape(meta["n_rx"], meta["n_tx"])
             rows.append(
                 dict(
                     n=ns,

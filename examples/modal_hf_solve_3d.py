@@ -64,13 +64,13 @@ def run_hf_solve(
         a = 1.25
         q = 8
         L = 2
-        freq_khz = kappa * c_bg / (2 * np.pi * a) / 1e3
+        freq_khz = kappa * c_bg / (2 * np.pi) / 1e3
         print(
             f"Smoke test: kappa={kappa}, a={a}, q={q}, L={L} "
             f"(f={freq_khz:.1f} kHz)"
         )
     else:
-        kappa = 2 * np.pi * freq_khz * 1e3 * a / c_bg
+        kappa = 2 * np.pi * freq_khz * 1e3 / c_bg
         if L is None:
             L = max(1, int(np.ceil(np.log2(2 * kappa * a / (q + 4)))))
         print(
