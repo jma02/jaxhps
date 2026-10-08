@@ -43,34 +43,6 @@ YMIN, YMAX = -0.5, 0.5
 ZMIN, ZMAX = -0.5, 0.5
 
 
-def setup_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--plots_dir",
-        type=str,
-        default="data/examples/accuracy_check_3D_ItI",
-        help="Directory for plot/.npz outputs (created if needed).",
-    )
-    parser.add_argument("--problem_1", action="store_true")
-    parser.add_argument("--problem_2", action="store_true")
-    parser.add_argument(
-        "--p_vals",
-        type=int,
-        nargs="+",
-        default=[4, 6, 8],
-        help="Chebyshev polynomial orders to sweep.",
-    )
-    parser.add_argument(
-        "--l_vals",
-        type=int,
-        nargs="+",
-        default=[1, 2],
-        help="Octree refinement levels to sweep.",
-    )
-    parser.add_argument("--debug", action="store_true")
-    return parser.parse_args()
-
-
 class Problem3DItI(ABC):
     """Abstract base for 3D ItI accuracy-check problems.
 
@@ -296,97 +268,193 @@ class Problem2(Problem3DItI):
 
 
 # ---------------------------------------------------------------------------
-# Output
+# Problem 3 — Gaussian bump potential, plane-wave MMS.
 # ---------------------------------------------------------------------------
 
 
-def save_results(
-    errors: np.ndarray,
-    l_vals: list[int],
-    p_vals: list[int],
-    name: str,
-    plots_dir: str,
-) -> None:
-    """Save the error grid to ``<plots_dir>/<name>.npz`` (creates dir)."""
-    os.makedirs(plots_dir, exist_ok=True)
-    out = os.path.join(plots_dir, f"{name}.npz")
-    np.savez(
-        out, errors=errors, l_vals=np.array(l_vals), p_vals=np.array(p_vals)
-    )
-    logging.info("Wrote %s", out)
+class Problem3(Problem3DItI):
+    r"""Gaussian-bump variable medium with a plane-wave manufactured solution.
+
+    Mirrors the radial scattering potential from section 5.1 of Gillman,
+    Barnett, Martinsson 2014 (``arXiv:1308.5998``):
+
+        ``b(x) = A * exp(-c * |x|^2)``
+
+    with ``A = -1.5`` and ``c = 160`` (paper's Bump 1).  We solve the total-
+    field Helmholtz equation
+
+        ``Delta u + kappa^2 (1 - b(x)) u = f``
+
+    on the cube ``[-0.5, 0.5]^3`` and pick ``u(x) = exp(i kappa w . x)`` as the
+    manufactured solution; since ``Delta u = -kappa^2 u``, the required source
+    is ``f(x) = -kappa^2 b(x) u(x)``.  ``b`` is numerically zero on the cube
+    faces (``b(|x|=0.5) ~ 4e-18``), so the impedance trace is essentially that
+    of a free plane wave — but the interior solver still has to digest the
+    fast-varying ``b(x)`` and the matching complex-valued source.
+    """
+
+    kappa = 16.0
+    eta = 16.0
+    A = -1.5
+    c = 160.0
+    source_dir = jnp.array([1.0, 1.0, 1.0]) / jnp.sqrt(3)
+
+    def _b(self, pts):
+        r2 = jnp.sum(pts**2, axis=-1)
+        return self.A * jnp.exp(-self.c * r2)
+
+    def soln(self, pts):
+        return jnp.exp(1j * self.kappa * pts @ self.source_dir)
+
+    def source(self, pts):
+        return -(self.kappa**2) * self._b(pts) * self.soln(pts)
+
+    def I_coefficients(self, pts):
+        return self.kappa**2 * (1.0 - self._b(pts))
+
+    def _dx(self, pts):
+        return 1j * self.kappa * self.source_dir[0] * self.soln(pts)
+
+    def _dy(self, pts):
+        return 1j * self.kappa * self.source_dir[1] * self.soln(pts)
+
+    def _dz(self, pts):
+        return 1j * self.kappa * self.source_dir[2] * self.soln(pts)
 
 
-def maybe_plot(
-    errors: np.ndarray,
-    l_vals: list[int],
-    p_vals: list[int],
-    title: str,
-    save_path: str | None,
-) -> None:
-    """Plot max-norm relative error vs ``p`` (one curve per ``L``) if matplotlib is available."""
-    try:
-        import matplotlib.pyplot as plt
-    except ImportError:
-        logging.info("matplotlib not available; skipping plot")
-        return
+# ---------------------------------------------------------------------------
+# Problem 4 — "lens" potential, plane-wave MMS.
+# ---------------------------------------------------------------------------
 
-    fig, ax = plt.subplots()
-    for i, l in enumerate(l_vals):
-        ax.semilogy(p_vals, errors[i], marker="o", label=f"L={l}")
-    ax.set_xticks(p_vals)
-    ax.set_xlabel("p")
-    ax.set_ylabel(r"Relative $\ell_{\infty}$ error")
-    ax.legend()
-    ax.grid(True, which="both", linestyle="--", alpha=0.5)
-    if title:
-        ax.set_title(title)
-    fig.tight_layout()
-    if save_path is not None:
-        fig.savefig(save_path, dpi=150)
-        logging.info("Wrote %s", save_path)
-    plt.close(fig)
+
+class Problem4(Problem3):
+    r"""Vertically-graded lens variable medium with a plane-wave MMS.
+
+    Lifts section 5.2's lens potential to 3D by treating ``z`` as the graded
+    axis:
+
+        ``b(x) = 4 (z - 0.2) * (1 - erf(25 * (|x| - 0.3)))``
+
+    The bracket rolls off to ``0`` for ``|x| > ~0.4``, so ``b`` is essentially
+    supported in a ball of radius ``0.3`` around the origin.  Same PDE
+    ``Delta u + kappa^2 (1 - b) u = f`` and same manufactured plane-wave
+    solution as ``Problem3``; the source ``f = -kappa^2 b u`` carries a much
+    larger amplitude here (``b`` reaches ~``2``), which stresses the
+    variable-coefficient assembly more than the bump.
+    """
+
+    def _b(self, pts):
+        r = jnp.linalg.norm(pts, axis=-1)
+        z = pts[..., 2]
+        return (
+            4.0 * (z - 0.2) * (1.0 - jax.scipy.special.erf(25.0 * (r - 0.3)))
+        )
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 
 def main() -> None:
-    args = setup_args()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--plots_dir",
+        type=str,
+        default="data/examples/accuracy_check_3D_ItI",
+        help="Directory for plot/.npz outputs (created if needed).",
+    )
+    parser.add_argument("--problem_1", action="store_true")
+    parser.add_argument("--problem_2", action="store_true")
+    parser.add_argument("--problem_3", action="store_true")
+    parser.add_argument("--problem_4", action="store_true")
+    parser.add_argument(
+        "--p_vals",
+        type=int,
+        nargs="+",
+        default=[4, 6, 8],
+        help="Chebyshev polynomial orders to sweep.",
+    )
+    parser.add_argument(
+        "--l_vals",
+        type=int,
+        nargs="+",
+        default=[1, 2],
+        help="Octree refinement levels to sweep.",
+    )
+    parser.add_argument("--debug", action="store_true")
+    args = parser.parse_args()
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
     )
 
-    if not (args.problem_1 or args.problem_2):
-        # Default: run both.
-        args.problem_1 = args.problem_2 = True
-
-    if args.problem_1:
-        e = Problem1().run(args.l_vals, args.p_vals)
-        print("\nProblem1 errors (rows=L, cols=p):")
-        print(
-            np.array2string(e, formatter={"float_kind": lambda x: f"{x:.3e}"})
-        )
-        save_results(e, args.l_vals, args.p_vals, "problem_1", args.plots_dir)
-        maybe_plot(
-            e,
-            args.l_vals,
-            args.p_vals,
+    run_all = not (
+        args.problem_1 or args.problem_2 or args.problem_3 or args.problem_4
+    )
+    problems = (
+        (
+            args.problem_1,
+            Problem1,
             "Problem 1: variable-coefficient polynomial",
-            os.path.join(args.plots_dir, "problem_1.png"),
+        ),
+        (
+            args.problem_2,
+            Problem2,
+            "Problem 2: gravity Helmholtz plane wave",
+        ),
+        (
+            args.problem_3,
+            Problem3,
+            "Problem 3: Gaussian bump potential (paper 5.1)",
+        ),
+        (
+            args.problem_4,
+            Problem4,
+            "Problem 4: lens potential (paper 5.2)",
+        ),
+    )
+    for number, (enabled, problem, title) in enumerate(problems, start=1):
+        if not (enabled or run_all):
+            continue
+        errors = problem().run(args.l_vals, args.p_vals)
+        print(f"\nProblem{number} errors (rows=L, cols=p):")
+        print(
+            np.array2string(
+                errors, formatter={"float_kind": lambda x: f"{x:.3e}"}
+            )
         )
 
-    if args.problem_2:
-        e = Problem2().run(args.l_vals, args.p_vals)
-        print("\nProblem2 errors (rows=L, cols=p):")
-        print(
-            np.array2string(e, formatter={"float_kind": lambda x: f"{x:.3e}"})
+        os.makedirs(args.plots_dir, exist_ok=True)
+        out = os.path.join(args.plots_dir, f"problem_{number}.npz")
+        np.savez(
+            out,
+            errors=errors,
+            l_vals=np.array(args.l_vals),
+            p_vals=np.array(args.p_vals),
         )
-        save_results(e, args.l_vals, args.p_vals, "problem_2", args.plots_dir)
-        maybe_plot(
-            e,
-            args.l_vals,
-            args.p_vals,
-            "Problem 2: gravity Helmholtz plane wave",
-            os.path.join(args.plots_dir, "problem_2.png"),
-        )
+        logging.info("Wrote %s", out)
+
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            logging.info("matplotlib not available; skipping plot")
+            continue
+
+        fig, ax = plt.subplots()
+        for i, l in enumerate(args.l_vals):
+            ax.semilogy(args.p_vals, errors[i], marker="o", label=f"L={l}")
+        ax.set_xticks(args.p_vals)
+        ax.set_xlabel("p")
+        ax.set_ylabel(r"Relative $\ell_{\infty}$ error")
+        ax.legend()
+        ax.grid(True, which="both", linestyle="--", alpha=0.5)
+        ax.set_title(title)
+        fig.tight_layout()
+        save_path = os.path.join(args.plots_dir, f"problem_{number}.png")
+        fig.savefig(save_path, dpi=150)
+        logging.info("Wrote %s", save_path)
+        plt.close(fig)
 
 
 if __name__ == "__main__":

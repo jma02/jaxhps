@@ -15,6 +15,7 @@ one to spectral precision.
 import logging
 
 import numpy as np
+import pytest
 import jax
 import jax.numpy as jnp
 
@@ -333,4 +334,66 @@ class TestPipelineUniform3DItIPlanewave:
         err = np.max(np.abs(solns - u_int)) / np.max(np.abs(u_int))
         logging.info("manufactured-source variable-coeff err: %.3e", err)
         assert err < 1e-9, f"manufactured-source test failed: err={err}"
+        jax.clear_caches()
+
+    @pytest.mark.parametrize("potential", ["bump", "lens"])
+    def test_potential_planewave_mms(self, potential, caplog) -> None:
+        r"""Section-5.1/5.2 potentials from arXiv:1308.5998, lifted to 3D.
+
+        Gaussian bump: ``b = -1.5 exp(-40 |x|^2)`` (softened from c=160).
+        Vertical lens: ``b = 4 (z - 0.2) (1 - erf(25 (|x| - 0.3)))``.
+        Both use ``u = exp(i kappa w . x)``, ``w = (1,1,1)/sqrt(3)``,
+        with source ``f = -kappa^2 b u`` on ``[-0.5, 0.5]^3``.  The modest
+        kappa=4 is resolvable at p=12, L=1 for a fast CI test.
+        """
+        from scipy.special import erf as _erf
+
+        caplog.set_level(logging.DEBUG)
+        kappa = 4.0
+        eta = kappa
+        w = np.array([1.0, 1.0, 1.0]) / np.sqrt(3.0)
+        p, q, L = 12, 10, 1
+
+        root = DiscretizationNode3D(
+            xmin=-0.5,
+            xmax=0.5,
+            ymin=-0.5,
+            ymax=0.5,
+            zmin=-0.5,
+            zmax=0.5,
+        )
+        domain = Domain(p=p, q=q, root=root, L=L)
+        pts = np.asarray(domain.interior_points)
+        if potential == "bump":
+            b_int = -1.5 * np.exp(-40.0 * np.sum(pts**2, axis=-1))
+        else:
+            r = np.linalg.norm(pts, axis=-1)
+            b_int = 4.0 * (pts[..., 2] - 0.2) * (1.0 - _erf(25.0 * (r - 0.3)))
+        u_int = np.exp(1j * kappa * (pts @ w))
+        I_var = (kappa**2 * (1.0 - b_int)).astype(np.complex128)
+        src = (-(kappa**2) * b_int * u_int).astype(np.complex128)
+
+        n_leaves = pts.shape[0]
+        ones = np.ones((n_leaves, p**3))
+        problem = PDEProblem(
+            domain=domain,
+            D_xx_coefficients=ones,
+            D_yy_coefficients=ones,
+            D_zz_coefficients=ones,
+            I_coefficients=I_var,
+            source=src,
+            use_ItI=True,
+            eta=eta,
+        )
+        build_solver(problem)
+
+        bp = np.asarray(domain.boundary_points).reshape(-1, 3)
+        nrm = _outward_normals_for_boundary(bp, root)
+        u_b = np.exp(1j * kappa * (bp @ w))
+        dn_u = 1j * kappa * (nrm @ w) * u_b
+        g_in = (dn_u + 1j * eta * u_b).astype(np.complex128)
+        solns = np.asarray(solve(problem, jnp.asarray(g_in)))
+        err = np.max(np.abs(solns - u_int)) / np.max(np.abs(u_int))
+        logging.info("%s-potential MMS err: %.3e", potential, err)
+        assert err < 1e-6, f"{potential}-potential MMS test failed: err={err}"
         jax.clear_caches()
