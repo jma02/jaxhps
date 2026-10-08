@@ -44,10 +44,8 @@ def main() -> None:
 
     from jaxhps import DiscretizationNode3D, Domain, PDEProblem  # noqa: E402
     from jaxhps._matfree_iti_3D import build_interface_maps  # noqa: E402
-    from jaxhps.local_solve import (  # noqa: E402
-        local_solve_stage_uniform_3D_ItI,
-    )
     from wave_scattering_utils_3D import (  # noqa: E402
+        _local_impedance_maps,
         load_SD_matrices_3D,
         permute_to_domain,
     )
@@ -109,7 +107,7 @@ def main() -> None:
         )
     )
 
-    _, T_leaves, _, h_leaves = local_solve_stage_uniform_3D_ItI(problem)
+    T_leaves, h_leaves = _local_impedance_maps(problem, None)
     T_leaves.block_until_ready()
     snapshots.append(
         (

@@ -30,6 +30,8 @@ from jaxhps import (
     build_solver,
 )
 from jaxhps._krylov import fgmres
+from jaxhps._pdeproblem import _get_PDEProblem_chunk
+from jaxhps.local_solve import local_solve_stage_uniform_3D_ItI
 from jaxhps._matfree_precond_3D import (
     make_coarse_correction_preconditioner,
     make_iterative_shifted_preconditioner,
@@ -1603,6 +1605,8 @@ def solve_bie_flat_matfree(
     restart: int = 100,
     precond: Callable = None,
     stats: dict = None,
+    *,
+    operator: Callable = None,
 ) -> Tuple[np.ndarray, np.ndarray, dict]:
     r"""Solve the coupled interior/exterior problem without a dense DtN map.
 
@@ -1657,7 +1661,11 @@ def solve_bie_flat_matfree(
     else:
         raise ValueError(f"unknown formulation {formulation!r}")
 
-    matvec = make_flat_bie_operator(T_leaves, maps, eta, apply_S, apply_D)
+    matvec = operator
+    if matvec is None:
+        matvec = jax.jit(
+            make_flat_bie_operator(T_leaves, maps, eta, apply_S, apply_D)
+        )
     rhs = flat_bie_rhs(h_used, maps, eta, apply_S, apply_D, **rhs_kwargs)
 
     t0 = time.perf_counter()
@@ -1666,7 +1674,7 @@ def solve_bie_flat_matfree(
         info_code = 0
     elif method == "fgmres":
         z, info_code = fgmres(
-            jax.jit(matvec),
+            matvec,
             rhs,
             precond=precond,
             tol=tol,
@@ -1716,9 +1724,30 @@ def solve_bie_flat_matfree(
     return uscat_b, uscat_dn_b, info
 
 
+def _local_impedance_maps(problem: PDEProblem, batch_size: int | None):
+    count = problem.domain.n_leaves
+    if batch_size is not None and batch_size < 1:
+        raise ValueError("leaf_batch_size must be positive")
+    if batch_size is None or batch_size >= count:
+        _, maps, _, source = local_solve_stage_uniform_3D_ItI(problem)
+        return maps, source
+    maps, sources = [], []
+    for start in range(0, count, batch_size):
+        chunk = _get_PDEProblem_chunk(
+            problem, start, min(start + batch_size, count)
+        )
+        _, local_maps, _, local_source = local_solve_stage_uniform_3D_ItI(
+            chunk
+        )
+        jax.block_until_ready((local_maps, local_source))
+        maps.append(local_maps)
+        sources.append(local_source)
+    return jnp.concatenate(maps), jnp.concatenate(sources)
+
+
 def solve_scattering_bie_3D_matfree(
     sd: dict,
-    b_radial: Callable[[np.ndarray], np.ndarray],
+    b_radial: Callable[[np.ndarray], np.ndarray] | None,
     source_dirs: np.ndarray,
     eta: float = None,
     p: int = None,
@@ -1734,6 +1763,10 @@ def solve_scattering_bie_3D_matfree(
     inner_maxiter: int = 60,
     coarse_q: int = 2,
     coarse_limit: int = 1024,
+    *,
+    b_cartesian: Callable[[np.ndarray], np.ndarray] | None = None,
+    return_solver: bool = False,
+    leaf_batch_size: int | None = None,
 ) -> dict:
     """Matrix-free-interior counterpart of :func:`solve_scattering_bie_3D`.
 
@@ -1751,8 +1784,12 @@ def solve_scattering_bie_3D_matfree(
     ``"shift-multilevel:<eps>"`` uses a recursive polynomial/octree V-cycle.
     Both use paired-face block smoothing and ``coarse_q`` polynomial modes
     per face direction. ``coarse_limit`` bounds the final dense LU size.
+    ``b_cartesian(points)`` accepts (..., 3) coordinates instead of radii;
+    pass ``b_radial=None`` when supplying it.
+    With ``return_solver=True`` and total formulation, ``resolve(directions)``
+    in the result reuses the leaf maps and preconditioner for plane waves.
+    ``leaf_batch_size`` limits simultaneous local factorizations.
     """
-    from jaxhps.local_solve import local_solve_stage_uniform_3D_ItI
     from jaxhps._matfree_iti_3D import (
         build_interface_maps,
         flat_bie_diagonal_approx,
@@ -1765,6 +1802,9 @@ def solve_scattering_bie_3D_matfree(
         sweep_cost_matvecs,
     )
 
+    setup_start = time.perf_counter()
+    if return_solver and formulation != "total":
+        raise ValueError("reusable solves require total formulation")
     pc_kind = precond.split(":")[0]
     if pc_kind == "shift-krylov" and method != "fgmres":
         raise ValueError("shift-krylov requires method='fgmres'")
@@ -1780,7 +1820,16 @@ def solve_scattering_bie_3D_matfree(
     domain = Domain(p=p, q=q, root=root, L=L)
 
     int_pts = np.asarray(domain.interior_points)
-    b_int = b_radial(np.linalg.norm(int_pts, axis=-1))
+    if b_cartesian is not None:
+        if b_radial is not None:
+            raise ValueError("supply only one coefficient function")
+        b_int = np.asarray(b_cartesian(int_pts))
+    else:
+        if b_radial is None:
+            raise ValueError("a coefficient function is required")
+        b_int = np.asarray(b_radial(np.linalg.norm(int_pts, axis=-1)))
+    if b_int.shape != int_pts.shape[:-1] or not np.all(np.isfinite(b_int)):
+        raise ValueError("coefficient must be finite with shape points[:-1]")
     I_coeffs = (kappa**2 * (1.0 - b_int)).astype(np.complex128)
     phases = np.einsum("lpd,sd->lps", int_pts, source_dirs)
     uin_int = np.exp(1j * kappa * phases)
@@ -1802,7 +1851,10 @@ def solve_scattering_bie_3D_matfree(
     _, sdp = permute_to_domain(sd, bp)
     nrm = outward_normals_for_cube_boundary(bp, root)
 
-    _, T_leaves, _, h_leaves = local_solve_stage_uniform_3D_ItI(problem)
+    leaf_start = time.perf_counter()
+    T_leaves, h_leaves = _local_impedance_maps(problem, leaf_batch_size)
+    jax.block_until_ready((T_leaves, h_leaves))
+    leaf_seconds = time.perf_counter() - leaf_start
     maps = build_interface_maps(domain)
 
     uin, uin_dn = get_uin_and_dn_3D(
@@ -1867,7 +1919,7 @@ def solve_scattering_bie_3D_matfree(
             use_ItI=True,
             eta=eta,
         )
-        _, T_shift, _, _ = local_solve_stage_uniform_3D_ItI(shifted)
+        T_shift, _ = _local_impedance_maps(shifted, leaf_batch_size)
         shift_diagonal = flat_bie_diagonal_approx(
             T_shift,
             maps,
@@ -1946,6 +1998,11 @@ def solve_scattering_bie_3D_matfree(
     if pc_kind.startswith("shift"):
         jax.block_until_ready(T_shift)
     t_precond = time.perf_counter() - t_precond
+    operator = jax.jit(
+        make_flat_bie_operator(T_leaves, maps, eta, apply_S, apply_D)
+    )
+    setup_seconds = time.perf_counter() - setup_start
+    solve_start = time.perf_counter()
     uscat_b, uscat_dn_b, info = solve_bie_flat_matfree(
         T_leaves,
         h_leaves,
@@ -1962,7 +2019,11 @@ def solve_scattering_bie_3D_matfree(
         restart=restart,
         precond=M,
         stats=stats,
+        operator=operator,
     )
+    info["first_solve_seconds"] = time.perf_counter() - solve_start
+    info["setup_seconds"] = setup_seconds
+    info["leaf_setup_seconds"] = leaf_seconds
     info["precond"] = precond
     info["precond_cost_matvecs"] = (
         sweep_cost_matvecs(len(directions))
@@ -1977,8 +2038,41 @@ def solve_scattering_bie_3D_matfree(
         info["shift_eps"] = eps
         info["shift_leaf_bytes"] = int(T_shift.nbytes)
     if pc_kind in ("shift-coarse", "shift-krylov", "shift-multilevel"):
-        info["inner_stats"] = inner_stats
-    return dict(
+        info["inner_stats"] = dict(inner_stats)
+
+    def resolve(directions):
+        new_uin, new_dn = get_uin_and_dn_3D(
+            float(kappa),
+            jnp.asarray(bp),
+            jnp.asarray(nrm),
+            jnp.asarray(directions),
+        )
+        for key in ("n_calls", "n_matvec", "apply_seconds", "coarse_solves"):
+            if key in inner_stats:
+                inner_stats[key] = 0
+        new_stats = {}
+        u, dn, new_info = solve_bie_flat_matfree(
+            T_leaves,
+            h_leaves,
+            maps,
+            eta,
+            apply_S,
+            apply_D,
+            new_uin,
+            new_dn,
+            formulation="total",
+            method=method,
+            tol=tol,
+            maxiter=maxiter,
+            restart=restart,
+            precond=M,
+            stats=new_stats,
+            operator=operator,
+        )
+        new_info["inner_stats"] = dict(inner_stats)
+        return u, dn, new_info
+
+    result = dict(
         problem=problem,
         boundary_points=bp,
         normals=nrm,
@@ -1990,3 +2084,6 @@ def solve_scattering_bie_3D_matfree(
         uscat_dn_b=uscat_dn_b,
         info=info,
     )
+    if return_solver:
+        result["resolve"] = resolve
+    return result

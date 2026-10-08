@@ -47,4 +47,5 @@ fmm_image = (
         copy=True,
     )
     .run_commands("pip install --no-deps /root/jaxhps")
+    .env({"PYTHONPATH": "/root/jaxhps/examples"})
 )
