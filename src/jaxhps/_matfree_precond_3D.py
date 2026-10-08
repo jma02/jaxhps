@@ -35,6 +35,7 @@ from ._matfree_iti_3D import (
     materialize,
 )
 from ._discretization_tree import DiscretizationNode3D
+from ._krylov import fgmres
 
 # Sweep directions: the 8 diagonal orderings of a uniform octree, labelled by
 # the signs applied to the (x, y, z) leaf indices before sorting.
@@ -207,5 +208,70 @@ def make_shifted_operator_preconditioner(
 
     def apply(r: jax.Array) -> jax.Array:
         return jax.scipy.linalg.lu_solve((lu, piv), r)
+
+    return apply
+
+
+def make_iterative_shifted_preconditioner(
+    T_shift: jax.Array,
+    maps: InterfaceMaps,
+    eta: float,
+    apply_S: Callable[[jax.Array], jax.Array],
+    apply_D: Callable[[jax.Array], jax.Array],
+    S_diag: jax.Array,
+    D_diag: jax.Array,
+    *,
+    tol: float = 0.1,
+    restart: int = 30,
+    maxiter: int = 60,
+    stats: Optional[dict] = None,
+) -> Callable[[jax.Array], jax.Array]:
+    r"""Approximately solve the shifted flat system without materializing it.
+
+    Each application starts from zero and runs Jacobi-preconditioned GMRES,
+    stopping on the true shifted residual or the iteration budget. This is
+    a nonlinear map even with a fixed iteration budget: the outer solver
+    must be flexible, e.g. :func:`jaxhps._krylov.fgmres`.
+
+    Additional persistent storage is one shifted set of leaf ItI maps and
+    a diagonal. Inner Krylov storage is ``O(n_flat * restart)`` per RHS;
+    exterior storage depends on the supplied ``apply_S`` and ``apply_D``.
+    ``stats`` accumulates inner work and unmet tolerances across calls.
+    No frequency-independent convergence or cost reduction is assumed.
+    """
+    if not np.isfinite(tol) or not 0 < tol < 1:
+        raise ValueError("tol must be finite and between zero and one")
+    if restart < 1 or maxiter < 1:
+        raise ValueError("restart and maxiter must be positive")
+    A_shift = jax.jit(
+        make_flat_bie_operator(T_shift, maps, eta, apply_S, apply_D)
+    )
+    d_inv = 1.0 / flat_bie_diagonal_approx(T_shift, maps, eta, S_diag, D_diag)
+    if stats is None:
+        stats = {}
+    stats.update(
+        n_calls=0, n_matvec=0, n_iter=0, n_unconverged=0, rel_res_history=[]
+    )
+
+    def jacobi(v):
+        return d_inv * v if v.ndim == 1 else d_inv[:, None] * v
+
+    def apply(r: jax.Array) -> jax.Array:
+        inner_stats = {}
+        z, info = fgmres(
+            A_shift,
+            r,
+            precond=jacobi,
+            tol=tol,
+            restart=restart,
+            maxiter=maxiter,
+            stats=inner_stats,
+        )
+        stats["n_calls"] += 1
+        stats["n_matvec"] += inner_stats["n_matvec"]
+        stats["n_iter"] += inner_stats["n_iter"]
+        stats["n_unconverged"] += int(info != 0)
+        stats["rel_res_history"].append(inner_stats["final_rel_res"])
+        return z
 
     return apply
