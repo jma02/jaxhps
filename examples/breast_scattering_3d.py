@@ -75,6 +75,10 @@ def main():
         )
 
     sensors = fibonacci_cap_points(args.n_sensors)
+    if np.any(np.all(np.abs(sensors) <= a, axis=1)):
+        raise ValueError(
+            "all transmitters and receivers must lie strictly outside the SD cube"
+        )
     print(f"kappa={kappa}, a={a}, n_sensors={sensors.shape[0]}")
 
     t0 = time.perf_counter()
