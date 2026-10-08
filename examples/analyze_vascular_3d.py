@@ -31,6 +31,7 @@ def summarize(raw):
             variant=data["variant"],
             waves=data["waves"],
             n=data["n"],
+            device=data.get("environment", {}).get("device"),
             ppw=data["n"] / data["waves"],
             status="converged"
             if complete
@@ -260,11 +261,15 @@ def main():
             ax.set_title("Measured A100 results", fontsize=16)
             fig.text(
                 0.07,
-                0.06,
+                0.04,
                 "Field Δ compares successive converged grids; the finest grid is not an independent reference.\n"
                 "512 fixed receiver samples do not establish a full-aperture or volume error. First-call JIT costs are included.\n"
-                "Procedural C⁴ tissue, lossless scalar physics, one plane wave: no claim of anatomical or clinical validation.",
-                fontsize=9,
+                "Procedural C⁴ tissue, lossless scalar physics, one plane wave: no claim of anatomical or clinical validation.\n"
+                "GiB is the JAX allocator peak, not total VRAM. Device models: "
+                + ", ".join(
+                    sorted({r["device"] for r in rows if r["device"]})
+                ),
+                fontsize=8,
             )
             pdf.savefig(fig)
             plt.close(fig)
