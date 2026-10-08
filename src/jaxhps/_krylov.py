@@ -65,16 +65,13 @@ def fgmres(
         true_res_history=[],
     )
 
-    def apply(v):
-        stats["n_matvec"] += 1
-        return matvec(v.reshape(shape)).ravel()
-
     b_norm = float(jnp.linalg.norm(b))
     if b_norm == 0:
         stats["final_rel_res"] = 0.0
         stats["true_res_history"].append(0.0)
         return jnp.zeros_like(b).reshape(shape), 0
-    r = b - apply(x)
+    r = b - matvec(x.reshape(shape)).ravel()
+    stats["n_matvec"] += 1
     beta = float(jnp.linalg.norm(r))
     stats["true_res_history"].append(beta / b_norm)
     atol = tol * b_norm
@@ -92,7 +89,8 @@ def fgmres(
                 z = precond(z.reshape(shape)).ravel()
                 stats["n_precond"] += 1
             Z = Z.at[j].set(z)
-            w = apply(z)
+            w = matvec(z.reshape(shape)).ravel()
+            stats["n_matvec"] += 1
             w_norm = float(jnp.linalg.norm(w))
             if not np.isfinite(w_norm):
                 raise ValueError(
@@ -110,7 +108,8 @@ def fgmres(
             breakdown = h_norm <= np.finfo(np.float64).eps * w_norm
             if estimate <= atol or breakdown or k == m:
                 x = x + Z[:k].T @ jnp.asarray(y, dtype=x.dtype)
-                r = b - apply(x)
+                r = b - matvec(x.reshape(shape)).ravel()
+                stats["n_matvec"] += 1
                 beta = float(jnp.linalg.norm(r))
                 stats["true_res_history"].append(beta / b_norm)
                 break

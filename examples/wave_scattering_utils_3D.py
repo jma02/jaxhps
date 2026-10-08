@@ -550,12 +550,13 @@ def _gmres_python_loop(
 
     Returns ``(x, info)`` where info=0 means converged.
     """
-    if stats is not None:
-        stats.setdefault("n_matvec", 0)
-        stats.setdefault("n_precond", 0)
-        stats.setdefault("n_cycles", 0)
-        stats.setdefault("res_history", [])
-        stats.setdefault("true_res_history", [])
+    if stats is None:
+        stats = {}
+    stats.setdefault("n_matvec", 0)
+    stats.setdefault("n_precond", 0)
+    stats.setdefault("n_cycles", 0)
+    stats.setdefault("res_history", [])
+    stats.setdefault("true_res_history", [])
     if x0 is None:
         x0 = jnp.zeros_like(b)
     if M is None:
@@ -567,29 +568,21 @@ def _gmres_python_loop(
 
     atol = tol * b_norm
     precond_atol = tol * float(jnp.linalg.norm(M(b)))
-    if stats is not None:
-        stats["n_precond"] += 1
+    stats["n_precond"] += 1
     x = x0
-    n_outer = (maxiter + restart - 1) // restart
-
-    for _cycle in range(n_outer):
+    for start in range(0, maxiter, restart):
         r_true = b - A_matvec(x)
         true_norm = float(jnp.linalg.norm(r_true))
-        if stats is not None:
-            stats["n_matvec"] += 1
-            stats["n_cycles"] += 1
-            stats["true_res_history"].append(true_norm / b_norm)
+        stats["n_matvec"] += 1
+        stats["n_cycles"] += 1
+        stats["true_res_history"].append(true_norm / b_norm)
+        stats["final_rel_res"] = true_norm / b_norm
         if true_norm <= atol:
-            if stats is not None:
-                stats["final_rel_res"] = true_norm / b_norm
             return x, 0
         r = M(r_true)
-        if stats is not None:
-            stats["n_precond"] += 1
+        stats["n_precond"] += 1
         beta = float(jnp.linalg.norm(r))
         if beta == 0 or not np.isfinite(beta):
-            if stats is not None:
-                stats["final_rel_res"] = true_norm / b_norm
             return x, 1
 
         # Arnoldi process: build orthonormal basis V and Hessenberg H
@@ -597,11 +590,10 @@ def _gmres_python_loop(
         H = np.zeros((restart + 1, restart), dtype=np.complex128)
 
         k = 0
-        for j in range(min(restart, maxiter - _cycle * restart)):
+        for j in range(min(restart, maxiter - start)):
             w = M(A_matvec(V_list[j]))
-            if stats is not None:
-                stats["n_matvec"] += 1
-                stats["n_precond"] += 1
+            stats["n_matvec"] += 1
+            stats["n_precond"] += 1
             # Modified Gram-Schmidt
             for i in range(j + 1):
                 H[i, j] = complex(jnp.vdot(V_list[i], w))
@@ -619,8 +611,7 @@ def _gmres_python_loop(
             e1[0] = beta
             y_ls, _, _, _ = np.linalg.lstsq(H[: k + 1, :k], e1, rcond=None)
             ls_res = np.linalg.norm(H[: k + 1, :k] @ y_ls - e1)
-            if stats is not None:
-                stats["res_history"].append(float(ls_res / b_norm))
+            stats["res_history"].append(float(ls_res / b_norm))
             if ls_res <= precond_atol or h_norm <= 1e-30:
                 break
 
@@ -633,10 +624,9 @@ def _gmres_python_loop(
 
     # Final residual check
     r_final = float(jnp.linalg.norm(b - A_matvec(x)))
-    if stats is not None:
-        stats["n_matvec"] += 1
-        stats["final_rel_res"] = r_final / b_norm
-        stats["true_res_history"].append(r_final / b_norm)
+    stats["n_matvec"] += 1
+    stats["final_rel_res"] = r_final / b_norm
+    stats["true_res_history"].append(r_final / b_norm)
     info = 0 if r_final < atol else 1
     return x, info
 
