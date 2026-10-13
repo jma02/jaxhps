@@ -1,11 +1,14 @@
 # Higher-frequency vascular phantom experiments
 
 `vascular_phantom` adds asymmetry, smooth fat heterogeneity, overlapping
-fibroglandular lobules, a skin shell, and curved binary vascular trees to the
-synthetic pendant geometry. The `vascular` and `dense` variants have 45 and
-75 branches, and 18 and 36 lobules, respectively. The random seed is fixed at
-7. Branch radii taper across four generations. Overlapping compact C4
-ellipsoids form the vessels; products form smooth unions. The contrast
+fibroglandular lobules, a skin shell, and curved vascular trees to the
+synthetic pendant geometry. The `vascular` and `dense` variants have 62 and
+108 branches, and 18 and 36 lobules, respectively. The random seed is fixed
+at 7. Vessels start at radius 0.032 and narrow by 0.78 along every branch
+over five generations, so the tips have radius 0.0092 (diameters 2.6 mm to
+0.74 mm under the 10 cm reading); branch ends stay inside normalized radius
+0.78, away from the skin blend. Overlapping compact C4 ellipsoids form the
+vessels; products form smooth unions. The contrast
 stays in `[-0.047, 0.174]` and vanishes near the computational box faces.
 
 This adds geometric detail, not clinical validation. There is no segmented

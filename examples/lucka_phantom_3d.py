@@ -75,9 +75,17 @@ def tissue_phantom(points, a=1.25, geometry="hemisphere"):
     return b * zcut
 
 
+VESSEL_TAPER = 0.78
+
+
 @lru_cache(maxsize=8)
 def vascular_geometry(variant="vascular", seed=7):
-    """Return normalized branching centre lines and lobular ellipsoids."""
+    """Return normalized branching centre lines and lobular ellipsoids.
+
+    Each branch is ``(start, middle, end, radius)`` with ``radius`` at its
+    start; it narrows to ``VESSEL_TAPER * radius`` at its end, where its
+    children begin. Ends are kept inside normalized radius 0.78.
+    """
     if variant not in ("vascular", "dense"):
         raise ValueError("variant must be vascular or dense")
     rng = np.random.default_rng(seed)
@@ -85,21 +93,32 @@ def vascular_geometry(variant="vascular", seed=7):
     branches = []
     for angle in np.arange(roots) * (2 * np.pi / roots):
         start = np.array([0.42 * np.cos(angle), 0.36 * np.sin(angle), -0.12])
-        pending = [(start, angle, 0)]
+        pending = [(start, angle, 0, 0.032)]
         while pending:
-            start, heading, level = pending.pop()
-            length = 0.23 * 0.84**level
+            start, heading, level, radius = pending.pop()
+            length = 0.15 * 0.85**level
             direction = np.array(
-                [0.32 * np.cos(heading), 0.32 * np.sin(heading), -1.0]
+                [0.30 * np.cos(heading), 0.30 * np.sin(heading), -1.0]
             )
             end = start + length * direction
+            rho = np.hypot(end[0] / 0.92, end[1] / 0.82)
+            limit = np.sqrt(max(0.78**2 - end[2] ** 2, 0))
+            if rho > limit:
+                end[:2] *= limit / rho
+                heading = np.arctan2(end[1] - start[1], end[0] - start[0])
             middle = (start + end) / 2
-            middle[:2] += rng.uniform(-0.035, 0.035, 2)
-            radius = 0.045 * 0.8**level
+            middle[:2] += rng.uniform(-0.03, 0.03, 2)
             branches.append((start, middle, end, radius))
-            if level < 3:
-                for sign in (-1, 1):
-                    pending.append((end, heading + sign * 1.15, level + 1))
+            if level < 4:
+                turns = (
+                    (-1.15, 1.15) if level < 2 else (rng.uniform(-0.3, 0.3),)
+                )
+                if level >= 2 and rng.uniform() < 0.5:
+                    turns += (rng.choice((-1.3, 1.3)),)
+                for turn in turns:
+                    pending.append(
+                        (end, heading + turn, level + 1, VESSEL_TAPER * radius)
+                    )
     lobules = []
     for _ in range(18 if variant == "vascular" else 36):
         centre = rng.uniform([-0.4, -0.32, -0.65], [0.4, 0.32, -0.18])
@@ -110,7 +129,7 @@ def vascular_geometry(variant="vascular", seed=7):
 
 
 def vascular_phantom(points, a=1.25, variant="vascular", seed=7):
-    """C4 synthetic pendant breast with 45/75 curved, tapering branches.
+    """C4 synthetic pendant breast with tapering, curved vascular trees.
 
     Coordinates are normalized by R=0.8a around z=0.55a. Overlapping
     ellipsoidal bumps form vessels without nearest-segment distance joins.
@@ -120,11 +139,11 @@ def vascular_phantom(points, a=1.25, variant="vascular", seed=7):
     if a <= 0 or points.shape[-1:] != (3,):
         raise ValueError("positive half-width and (..., 3) points required")
     branches, lobules = vascular_geometry(variant, seed)
-    fibro_shapes, vessel_shapes = [], []
+    fibro_groups, vessel_groups = [], []
     for centre, axes, angle in lobules:
         c, s = np.cos(angle), np.sin(angle)
         rotation = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
-        fibro_shapes.append((centre, axes, rotation))
+        fibro_groups.append([(centre, axes, rotation)])
     t = np.linspace(0, 1, 6)[:, None]
     for start, middle, end, radius in branches:
         centres = (1 - t) ** 2 * start + 2 * t * (1 - t) * middle + t**2 * end
@@ -135,10 +154,16 @@ def vascular_phantom(points, a=1.25, variant="vascular", seed=7):
         rotations = np.stack(
             [normals, np.cross(tangents, normals), tangents], axis=-1
         )
-        axes = np.array([radius, radius, np.linalg.norm(end - start) / 3])
-        vessel_shapes.extend(
-            (centre, axes, rotation)
-            for centre, rotation in zip(centres, rotations)
+        radii = radius * (1 - (1 - VESSEL_TAPER) * t[:, 0])
+        vessel_groups.append(
+            [
+                (
+                    centre,
+                    np.array([r, r, np.linalg.norm(end - start) / 3]),
+                    rotation,
+                )
+                for centre, r, rotation in zip(centres, radii, rotations)
+            ]
         )
     shape = points.shape[:-1]
     normalized = (points.reshape(-1, 3) - [0, 0, 0.55 * a]) / (0.8 * a)
@@ -151,13 +176,22 @@ def vascular_phantom(points, a=1.25, variant="vascular", seed=7):
         p = pts[active]
         fibro = np.zeros(len(p))
         vessels = np.zeros(len(p))
-        for mask, shapes in ((fibro, fibro_shapes), (vessels, vessel_shapes)):
-            for centre, axes, rotation in shapes:
-                extent = np.abs(rotation) @ axes
-                inside = np.all(np.abs(p - centre) < extent, axis=-1)
-                local = (p[inside] - centre) @ rotation / axes
-                profile = np.maximum(1 - np.sum(local**2, axis=-1), 0) ** 5
-                mask[inside] = 1 - (1 - mask[inside]) * (1 - profile)
+        for mask, groups in ((fibro, fibro_groups), (vessels, vessel_groups)):
+            for shapes in groups:
+                extents = [np.abs(rot) @ axes for _, axes, rot in shapes]
+                low = np.min(
+                    [c - e for (c, _, _), e in zip(shapes, extents)], 0
+                )
+                high = np.max(
+                    [c + e for (c, _, _), e in zip(shapes, extents)], 0
+                )
+                box = np.all((p > low) & (p < high), axis=-1)
+                q, m = p[box], mask[box]
+                for centre, axes, rotation in shapes:
+                    local = (q - centre) @ rotation / axes
+                    profile = np.maximum(1 - np.sum(local**2, axis=-1), 0) ** 5
+                    m = 1 - (1 - m) * (1 - profile)
+                mask[box] = m
         fat = -0.041 + 0.006 * np.prod(np.cos(p * [11, 13, 9]), axis=-1)
         b = (1 - fibro) * fat + 0.020 * fibro
         b = (1 - vessels) * b + 0.103 * vessels

@@ -7,19 +7,26 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
-from lucka_phantom_3d import vascular_geometry, vascular_phantom  # noqa: E402
+from lucka_phantom_3d import (  # noqa: E402
+    VESSEL_TAPER,
+    vascular_geometry,
+    vascular_phantom,
+)
 
 
-@pytest.mark.parametrize("variant,count", [("vascular", 45), ("dense", 75)])
+@pytest.mark.parametrize("variant,count", [("vascular", 62), ("dense", 108)])
 def test_branch_connectivity_and_taper(variant, count):
     branches, _ = vascular_geometry(variant)
     assert len(branches) == count
+    radii = {round(b[3], 6) for b in branches}
+    assert len(radii) == 5 and max(radii) == 0.032
     for start, _, end, radius in branches:
         assert end[2] < start[2]
+        assert np.linalg.norm(end / [0.92, 0.82, 1.0]) <= 0.78 + 1e-12
         if start[2] < -0.13:
             parents = [b for b in branches if np.array_equal(b[2], start)]
             assert len(parents) == 1
-            assert radius < parents[0][3]
+            assert radius == pytest.approx(VESSEL_TAPER * parents[0][3])
 
 
 @pytest.mark.parametrize("variant", ["vascular", "dense"])

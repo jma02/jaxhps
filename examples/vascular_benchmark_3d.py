@@ -17,7 +17,7 @@ from fft_volume_3d import (
     prepare_volume_solver,
     solve_volume,
 )
-from lucka_phantom_3d import vascular_geometry, vascular_phantom
+from lucka_phantom_3d import VESSEL_TAPER, vascular_geometry, vascular_phantom
 
 
 def main():
@@ -59,6 +59,7 @@ def main():
         lobules=len(lobules),
         points_per_background_wavelength=args.n / args.waves,
         minimum_vessel_support_diameter=2
+        * VESSEL_TAPER
         * min(b[3] for b in branches)
         * 0.8
         * a,
