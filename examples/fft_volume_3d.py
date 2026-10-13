@@ -71,11 +71,18 @@ def prepare_volume_solver(n, a, kappa, coefficient):
     return points, b, kernel, matvec
 
 
-def solve_volume(matvec, points, kappa, direction, tol=1e-8, restart=30):
+def solve_volume(
+    matvec, points, kappa, direction, tol=1e-8, restart=30, maxiter=600
+):
     incident = jnp.exp(1j * kappa * jnp.asarray(points @ direction)).ravel()
     stats = {}
     total, info = fgmres(
-        matvec, incident, tol=tol, restart=restart, maxiter=600, stats=stats
+        matvec,
+        incident,
+        tol=tol,
+        restart=restart,
+        maxiter=maxiter,
+        stats=stats,
     )
     total.block_until_ready()
     return total.reshape(points.shape[:-1]), dict(stats, info=int(info))
