@@ -50,7 +50,9 @@ def analyze(folder: Path) -> None:
             ((truth, "True phantom"), (fitted, "Reconstructed"))
         ):
             speed = 1500 / np.sqrt(1 - array)
-            shown = np.max(speed, axis=projection_axis).T
+            shown = np.max(
+                np.where(interior, speed, 1460), axis=projection_axis
+            ).T
             im = axes[row, col].imshow(
                 shown,
                 origin="lower",
@@ -61,7 +63,11 @@ def analyze(folder: Path) -> None:
             )
             axes[row, col].set_title(f"{label}: view along {'yx'[row]}")
         error = np.max(
-            np.abs(1500 / np.sqrt(1 - fitted) - 1500 / np.sqrt(1 - truth)),
+            np.where(
+                interior,
+                np.abs(1500 / np.sqrt(1 - fitted) - 1500 / np.sqrt(1 - truth)),
+                0,
+            ),
             axis=projection_axis,
         ).T
         err = axes[row, 2].imshow(
@@ -79,7 +85,7 @@ def analyze(folder: Path) -> None:
     fig.colorbar(im, ax=axes[:, :2], label="Sound speed (m/s)", shrink=0.7)
     fig.colorbar(err, ax=axes[:, 2], label="Error (m/s)", shrink=0.7)
     fig.suptitle(
-        f"Measurement-only full-wave fit | {rows[-1]['wavelength_mm']:.2f} mm wavelength"
+        f"Full-wave fit | {rows[-1]['wavelength_mm']:.2f} mm wavelength | skin and taper excluded"
     )
     fig.savefig(folder / "reconstruction.png", dpi=180)
     fig.savefig(folder / "reconstruction.pdf")
@@ -97,6 +103,7 @@ def analyze(folder: Path) -> None:
         n=n,
         truth=np.round(truth * 10000).astype(int).ravel().tolist(),
         fits=volumes,
+        interior=interior.astype(int).ravel().tolist(),
         colors=np.round(
             255 * plt.get_cmap("viridis")(np.linspace(0, 1, 256))[:, :3]
         )
@@ -112,6 +119,7 @@ def analyze(folder: Path) -> None:
 <label>Stage <select id="stage">OPTIONS</select></label>
 <label>View along <select id="axis"><option value="0">x</option><option value="1" selected>y</option><option value="2">z</option></select></label>
 <label>Display <select id="mode"><option value="projection">Maximum-intensity projection</option><option value="slice">Single slice</option></select></label>
+<label><input id="interior" type="checkbox" checked>Exclude skin and taper</label>
 <label>Slice <input id="slice" type="range" min="0" max="NMAX" value="NMID" disabled></label></div>
 <div class="a-grid a-grid--halves"><figure><figcaption>True phantom</figcaption><canvas id="truth" width="N" height="N" aria-label="True sound-speed volume" style="width:100%;image-rendering:pixelated"></canvas></figure><figure><figcaption>Fitted from wave measurements</figcaption><canvas id="fit" width="N" height="N" aria-label="Reconstructed sound-speed volume" style="width:100%;image-rendering:pixelated"></canvas></figure></div>
 <canvas id="colorbar" width="256" height="14" aria-label="Common sound-speed scale" style="width:100%;height:14px"></canvas><div style="display:flex;justify-content:space-between"><span>1460 m/s</span><span>Common color scale</span><span>1590 m/s</span></div><p id="viewlabel" class="a-section__note" aria-live="polite"></p></section>
@@ -127,10 +135,10 @@ const controls=['stage','axis','mode','slice'].map(id=>document.getElementById(i
 function draw(){const axis=+controls[1].value, slice=+controls[3].value, projection=controls[2].value==='projection';controls[3].disabled=projection;
 for(const [id,values] of [['truth',d.truth],['fit',d.fits[+controls[0].value]]]){const ctx=document.getElementById(id).getContext('2d'), img=ctx.createImageData(n,n);
 for(let row=0;row<n;row++)for(let col=0;col<n;col++){let b=-1;const p=[0,0,0], other=[0,1,2].filter(a=>a!==axis);p[other[0]]=col;p[other[1]]=n-1-row;
-for(let s=projection?0:slice;s<(projection?n:slice+1);s++){p[axis]=s;b=Math.max(b,values[p[0]*n*n+p[1]*n+p[2]]/10000);}
-const c=1500/Math.sqrt(1-b), k=Math.max(0,Math.min(255,Math.round((c-1460)/130*255))), at=4*(row*n+col);img.data.set([...d.colors[k],255],at);}ctx.putImageData(img,0,0);}
-document.getElementById('viewlabel').textContent=(projection?'Maximum-intensity projection along '+ 'xyz'[axis]:('xyz'[axis]+' = '+(-8+16*(slice+.5)/n).toFixed(2)+' mm from crop center'))+'. Each image spans 16 mm × 16 mm.';}
-controls.forEach(e=>e.addEventListener('input',draw));const ctx=document.getElementById('colorbar').getContext('2d');d.colors.forEach((c,i)=>{ctx.fillStyle='rgb('+c.join(',')+')';ctx.fillRect(i,0,1,14);});draw();})();
+for(let s=projection?0:slice;s<(projection?n:slice+1);s++){p[axis]=s;const idx=p[0]*n*n+p[1]*n+p[2];if(document.getElementById('interior').checked&&!d.interior[idx])continue;b=Math.max(b,values[idx]/10000);}
+const c=1500/Math.sqrt(1-b), k=Math.max(0,Math.min(255,Math.round((c-1460)/130*255))), at=4*(row*n+col);img.data.set([...(b===-1?[128,128,128]:d.colors[k]),255],at);}ctx.putImageData(img,0,0);}
+document.getElementById('viewlabel').textContent=(projection?'Maximum-intensity projection along '+ 'xyz'[axis]:('xyz'[axis]+' = '+(-8+16*(slice+.5)/n).toFixed(2)+' mm from crop center'))+'. Each image spans 16 mm × 16 mm. Gray marks the excluded region when skin and taper are hidden.';}
+controls.forEach(e=>e.addEventListener('input',draw));document.getElementById('interior').addEventListener('input',draw);const ctx=document.getElementById('colorbar').getContext('2d');d.colors.forEach((c,i)=>{ctx.fillStyle='rgb('+c.join(',')+')';ctx.fillRect(i,0,1,14);});draw();})();
 </script>
 """
     validation_path = folder / "validation.json"
