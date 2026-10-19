@@ -87,8 +87,8 @@ def analyze(folder: Path) -> None:
     fig.suptitle(
         f"Full-wave fit | {rows[-1]['wavelength_mm']:.2f} mm wavelength | skin and taper excluded"
     )
-    fig.savefig(folder / "reconstruction.png", dpi=180)
-    fig.savefig(folder / "reconstruction.pdf")
+    fig.savefig(folder / "reconstruction.png", dpi=180, bbox_inches="tight")
+    fig.savefig(folder / "reconstruction.pdf", bbox_inches="tight")
     plt.close(fig)
 
     options = "".join(
