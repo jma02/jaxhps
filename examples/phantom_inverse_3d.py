@@ -75,14 +75,19 @@ def make_forward(
             return u + kappa**2 * potential.ravel()
 
         def solve(inc: jax.Array) -> tuple[jax.Array, jax.Array]:
-            total, _ = gmres(
-                operator,
-                inc,
-                x0=inc,
-                tol=tol,
-                restart=20,
-                maxiter=10,
-                solve_method="incremental",
+            def krylov(matvec, rhs):
+                solution, _ = gmres(
+                    matvec,
+                    rhs,
+                    tol=tol,
+                    restart=20,
+                    maxiter=10,
+                    solve_method="incremental",
+                )
+                return solution
+
+            total = jax.lax.custom_linear_solve(
+                operator, inc, solve=krylov, transpose_solve=krylov
             )
             residual = jnp.linalg.norm(
                 operator(total) - inc

@@ -57,6 +57,10 @@ def test_implicit_gradient_matches_finite_difference():
         return objective(x, forward, observed, jnp.asarray(window), 0.001)[0]
 
     analytic = float(jnp.vdot(jax.grad(loss)(theta), direction))
+    scaled_gradient = jax.grad(lambda x: 1e-10 * loss(x))(theta) / 1e-10
+    np.testing.assert_allclose(
+        scaled_gradient, jax.grad(loss)(theta), rtol=1e-5, atol=1e-9
+    )
     epsilon = 1e-4
     numerical = float(
         (loss(theta + epsilon * direction) - loss(theta - epsilon * direction))
