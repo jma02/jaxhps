@@ -12,17 +12,7 @@ from modal_vascular_3d import image
 app = modal.App("jaxhps-phantom-inverse-fit")
 
 
-@app.function(
-    image=image,
-    gpu="A100-80GB",
-    cpu=4,
-    memory=49152,
-    timeout=3300,
-    max_containers=1,
-    min_containers=0,
-    scaledown_window=2,
-)
-def fit(script: str, extra: list[str], payload: bytes = b"") -> bytes:
+def _run(script: str, extra: list[str], payload: bytes = b"") -> bytes:
     output = Path("/root/inverse-results")
     output.mkdir(exist_ok=True)
     command = [
@@ -31,8 +21,6 @@ def fit(script: str, extra: list[str], payload: bytes = b"") -> bytes:
         f"/root/jaxhps/examples/{script}",
         "--out",
         str(output),
-        "--seconds",
-        "3000",
         *extra,
     ]
     if payload:
@@ -56,6 +44,34 @@ def fit(script: str, extra: list[str], payload: bytes = b"") -> bytes:
         for path in output.iterdir():
             zipped.write(path, path.name)
     return archive.getvalue()
+
+
+@app.function(
+    image=image,
+    gpu="A100-80GB",
+    cpu=4,
+    memory=49152,
+    timeout=3300,
+    max_containers=1,
+    min_containers=0,
+    scaledown_window=2,
+)
+def fit(script: str, extra: list[str], payload: bytes = b"") -> bytes:
+    return _run(script, extra, payload)
+
+
+@app.function(
+    image=image,
+    gpu="A100-80GB",
+    cpu=4,
+    memory=49152,
+    timeout=11400,
+    max_containers=1,
+    min_containers=0,
+    scaledown_window=2,
+)
+def fit_long(script: str, extra: list[str]) -> bytes:
+    return _run(script, extra)
 
 
 @app.function(
@@ -96,6 +112,7 @@ def main(
     smoke: bool = False,
     learn: bool = False,
     images: str = "",
+    breast: bool = False,
     fitted: str = "",
     waves: float = 12.0,
 ) -> None:
@@ -106,21 +123,27 @@ def main(
         (destination / "validation.json").write_text(result)
         print(result)
         return
-    if images:
-        script, extra = "phantom_dataset_fit_3d.py", []
+    if breast:
+        extra = ["--waves", "4", "--grids", "32", "--seconds", "300"]
+        extra += ["--sources", "4", "--receivers", "64", "--iterations", "3"]
+        payload = fit_long.remote(
+            "breast_inverse_3d.py", extra if smoke else []
+        )
+    elif images:
+        script, extra = "phantom_dataset_fit_3d.py", ["--seconds", "3000"]
         if smoke:
             extra = ["--count", "2", "--sources", "6", "--receivers", "32"]
             extra += ["--waves", "2", "3", "--iterations", "5"]
         payload = fit.remote(script, extra, Path(images).read_bytes())
     elif learn:
-        script, extra = "phantom_dataset_learn_3d.py", []
+        script, extra = "phantom_dataset_learn_3d.py", ["--seconds", "3000"]
         if smoke:
             extra = ["--n", "16", "--train", "8", "--test", "4"]
             extra += ["--sources", "6", "--receivers", "32", "--waves", "3"]
             extra += ["--epochs", "3", "--minimum-core", "1"]
         payload = fit.remote(script, extra)
     else:
-        script, extra = "phantom_inverse_3d.py", []
+        script, extra = "phantom_inverse_3d.py", ["--seconds", "3000"]
         if smoke:
             extra = ["--n", "32", "--sources", "8", "--receivers", "64"]
             extra += ["--waves", "2", "4", "--iterations", "10"]
