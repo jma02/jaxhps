@@ -49,9 +49,8 @@ def make_forward(
     dtype = jnp.complex128 if jax.config.x64_enabled else jnp.complex64
     kernel = green_kernel(n, a, kappa).astype(dtype)
     xyz = jnp.asarray(points.reshape(-1, 3))
-    incident = jnp.exp(1j * kappa * (jnp.asarray(directions) @ xyz.T)).astype(
-        dtype
-    )
+    directions = jnp.asarray(directions)
+    receivers = jnp.asarray(receivers)
 
     def receiver_row(target: jax.Array) -> jax.Array:
         distance = jnp.linalg.norm(target - xyz, axis=-1)
@@ -61,8 +60,6 @@ def make_forward(
             * jnp.exp(1j * kappa * distance)
             / (4 * jnp.pi * distance)
         ).astype(dtype)
-
-    receiver_map = jax.lax.map(receiver_row, jnp.asarray(receivers))
 
     @jax.jit
     def forward(b: jax.Array) -> tuple[jax.Array, jax.Array]:
@@ -74,7 +71,9 @@ def make_forward(
             ]
             return u + kappa**2 * potential.ravel()
 
-        def solve(inc: jax.Array) -> tuple[jax.Array, jax.Array]:
+        def solve(direction: jax.Array) -> tuple[jax.Array, jax.Array]:
+            inc = jnp.exp(1j * kappa * (xyz @ direction)).astype(dtype)
+
             def krylov(matvec, rhs):
                 solution, _ = gmres(
                     matvec,
@@ -92,9 +91,13 @@ def make_forward(
             residual = jnp.linalg.norm(
                 operator(total) - inc
             ) / jnp.linalg.norm(inc)
-            return receiver_map @ (b.ravel() * total), residual
+            charge = b.ravel() * total
+            return jax.lax.map(
+                lambda target: jnp.sum(receiver_row(target) * charge),
+                receivers,
+            ), residual
 
-        return jax.lax.map(solve, incident)
+        return jax.lax.map(solve, directions)
 
     return forward
 
