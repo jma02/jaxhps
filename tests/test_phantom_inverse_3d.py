@@ -67,3 +67,22 @@ def test_implicit_gradient_matches_finite_difference():
         / (2 * epsilon)
     )
     np.testing.assert_allclose(analytic, numerical, rtol=1e-4, atol=1e-7)
+
+
+def test_born_operator_matches_forward_linearization():
+    from phantom_dataset_learn_3d import make_born
+
+    n = 6
+    axis = -0.2 + (np.arange(n) + 0.5) * 0.4 / n
+    points = np.stack(np.meshgrid(axis, axis, axis, indexing="ij"), -1)
+    directions = sphere(3)
+    receivers = 0.36 * sphere(7, 0.3)
+    forward = make_forward(points, 9.0, directions, receivers, 1e-10)
+    linear, _ = make_born(points, 9.0, directions, receivers, 1, 0.0)
+    b = jnp.asarray(np.random.default_rng(1).random((n, n, n)))
+    _, tangent = jax.jvp(
+        lambda x: forward(x)[0], (jnp.zeros((n, n, n)),), (b,)
+    )
+    assert jnp.linalg.norm(tangent - linear(b)) < 1e-6 * jnp.linalg.norm(
+        tangent
+    )

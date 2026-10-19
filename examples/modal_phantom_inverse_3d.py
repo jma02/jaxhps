@@ -22,32 +22,22 @@ app = modal.App("jaxhps-phantom-inverse-fit")
     min_containers=0,
     scaledown_window=2,
 )
-def fit(smoke: bool) -> bytes:
+def fit(script: str, extra: list[str], payload: bytes = b"") -> bytes:
     output = Path("/root/inverse-results")
     output.mkdir(exist_ok=True)
     command = [
         "python",
         "-u",
-        "/root/jaxhps/examples/phantom_inverse_3d.py",
+        f"/root/jaxhps/examples/{script}",
         "--out",
         str(output),
         "--seconds",
         "3000",
+        *extra,
     ]
-    if smoke:
-        command += [
-            "--n",
-            "32",
-            "--sources",
-            "8",
-            "--receivers",
-            "64",
-            "--waves",
-            "2",
-            "4",
-            "--iterations",
-            "10",
-        ]
+    if payload:
+        Path("/root/images.npz").write_bytes(payload)
+        command += ["--images", "/root/images.npz"]
     with (output / "run.log").open("w") as log:
         process = subprocess.Popen(
             command,
@@ -102,7 +92,12 @@ def validate(payload: bytes, waves: float) -> str:
 
 @app.local_entrypoint()
 def main(
-    out: str, smoke: bool = False, fitted: str = "", waves: float = 12.0
+    out: str,
+    smoke: bool = False,
+    learn: bool = False,
+    images: str = "",
+    fitted: str = "",
+    waves: float = 12.0,
 ) -> None:
     destination = Path(out)
     destination.mkdir(parents=True, exist_ok=True)
@@ -111,7 +106,25 @@ def main(
         (destination / "validation.json").write_text(result)
         print(result)
         return
-    payload = fit.remote(smoke)
+    if images:
+        script, extra = "phantom_dataset_fit_3d.py", []
+        if smoke:
+            extra = ["--count", "2", "--sources", "6", "--receivers", "32"]
+            extra += ["--waves", "2", "3", "--iterations", "5"]
+        payload = fit.remote(script, extra, Path(images).read_bytes())
+    elif learn:
+        script, extra = "phantom_dataset_learn_3d.py", []
+        if smoke:
+            extra = ["--n", "16", "--train", "8", "--test", "4"]
+            extra += ["--sources", "6", "--receivers", "32", "--waves", "3"]
+            extra += ["--epochs", "3", "--minimum-core", "1"]
+        payload = fit.remote(script, extra)
+    else:
+        script, extra = "phantom_inverse_3d.py", []
+        if smoke:
+            extra = ["--n", "32", "--sources", "8", "--receivers", "64"]
+            extra += ["--waves", "2", "4", "--iterations", "10"]
+        payload = fit.remote(script, extra)
     (destination / "results.zip").write_bytes(payload)
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         archive.extractall(destination)
