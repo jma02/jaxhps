@@ -94,8 +94,11 @@ def run(args: argparse.Namespace) -> None:
     background_dev = jnp.asarray(background, dtype=jnp.float32)
     window_dev = jnp.asarray(window, dtype=jnp.float32)
     reference, residuals = forward(background_dev)
+    residual = float(jnp.max(residuals))
+    if not np.isfinite(residual) or residual > 5 * args.tolerance:
+        raise RuntimeError(f"Background solve residual {residual}")
     print(
-        f"BACKGROUND residual={float(jnp.max(residuals)):.2g}, "
+        f"BACKGROUND residual={residual:.2g}, "
         f"seconds={time.monotonic() - start:.0f}",
         flush=True,
     )
@@ -155,14 +158,26 @@ def run(args: argparse.Namespace) -> None:
                 flush=True,
             )
     observed = jnp.stack(observed)
-    images = jnp.stack(images)
+    images = jnp.stack(images).astype(jnp.float32)
+    if not np.isfinite(np.asarray(images)).all():
+        raise RuntimeError("Born reconstructions are not finite")
     target = jnp.asarray(delta_truth)
     train = slice(0, args.train)
     test = slice(args.train, args.train + args.test)
     data_seconds = time.monotonic() - start
+    np.savez_compressed(
+        args.out / "dataset.npz",
+        truth=delta_truth,
+        born=np.asarray(images),
+        observed=np.asarray(observed),
+        background=background.astype(np.float32),
+        window=window.astype(np.float32),
+    )
+    print(f"DATA complete, seconds={data_seconds:.1f}", flush=True)
 
-    params = init_network(
-        jax.random.PRNGKey(args.seed), args.width, args.depth
+    params = jax.tree.map(
+        lambda x: x.astype(jnp.float32),
+        init_network(jax.random.PRNGKey(args.seed), args.width, args.depth),
     )
     m = [(jnp.zeros_like(k), jnp.zeros_like(b)) for k, b in params]
     v = [(jnp.zeros_like(k), jnp.zeros_like(b)) for k, b in params]
@@ -186,7 +201,10 @@ def run(args: argparse.Namespace) -> None:
     deadline = start + args.seconds
     t = 0
     for epoch in range(args.epochs):
+        if time.monotonic() > deadline:
+            break
         order = order_rng.permutation(args.train)
+        losses = []
         for batch in range(0, args.train, args.batch):
             if time.monotonic() > deadline:
                 break
@@ -195,11 +213,19 @@ def run(args: argparse.Namespace) -> None:
             params, m, v, value = step(
                 params, m, v, images[idx], target[idx], t
             )
-        value = float(value)
-        if not np.isfinite(value):
-            raise RuntimeError("Training loss is not finite")
+            losses.append(float(value))
+            if not np.isfinite(losses[-1]):
+                raise RuntimeError("Training loss is not finite")
+        if not losses:
+            break
+        value = float(np.mean(losses))
         history.append(
-            dict(epoch=epoch, loss=value, seconds=time.monotonic() - start)
+            dict(
+                epoch=epoch,
+                loss=value,
+                batches=len(losses),
+                seconds=time.monotonic() - start,
+            )
         )
         if epoch % 10 == 0 or epoch == args.epochs - 1:
             print(
@@ -210,9 +236,37 @@ def run(args: argparse.Namespace) -> None:
         if time.monotonic() > deadline:
             break
 
-    corrected = jax.jit(lambda x: network(params, x, window_dev))(images)
-    corrected_np = np.asarray(corrected)
+    if not history:
+        raise RuntimeError("Time budget exhausted before network training")
+    predict = jax.jit(lambda x: network(params, x, window_dev))
+    corrected_np = np.concatenate(
+        [
+            np.asarray(predict(images[i : i + args.batch]))
+            for i in range(0, len(images), args.batch)
+        ]
+    )
+    if not np.isfinite(corrected_np).all():
+        raise RuntimeError("Network reconstructions are not finite")
     born_np = np.asarray(images)
+    (args.out / "training.json").write_text(json.dumps(history, indent=1))
+    np.savez_compressed(
+        args.out / "network.npz",
+        **{
+            f"layer_{i}_{name}": np.asarray(value)
+            for i, layer in enumerate(params)
+            for name, value in zip(("kernel", "bias"), layer)
+        },
+    )
+    np.savez_compressed(
+        args.out / "images.npz",
+        background=background.astype(np.float32),
+        window=window.astype(np.float32),
+        truth=delta_truth[test],
+        born=born_np[test],
+        corrected=corrected_np[test],
+        fits=np.zeros((0,) + window.shape),
+    )
+    print(f"TRAIN complete, epochs={len(history)}", flush=True)
 
     def measurement_error(delta: jax.Array, index: int) -> float:
         data, _ = forward(background_dev + delta)
@@ -254,6 +308,7 @@ def run(args: argparse.Namespace) -> None:
             dict(
                 index=index,
                 evaluations=int(result.nfev),
+                optimizer_message=str(result.message),
                 seconds=time.monotonic() - fit_start,
                 measurement_error=measurement_error(jnp.asarray(delta), index),
                 **sphere_scores(
@@ -290,7 +345,7 @@ def run(args: argparse.Namespace) -> None:
             corrected_measurement_error=float(
                 np.mean(
                     [
-                        measurement_error(corrected[i], i)
+                        measurement_error(jnp.asarray(corrected_np[i]), i)
                         for i in range(args.train, args.train + args.test)
                     ]
                 )
