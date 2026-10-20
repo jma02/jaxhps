@@ -88,16 +88,16 @@ def make_forward(
             total = jax.lax.custom_linear_solve(
                 operator, inc, solve=krylov, transpose_solve=krylov
             )
-            residual = jnp.linalg.norm(
-                operator(total) - inc
-            ) / jnp.linalg.norm(inc)
+            residual = jax.lax.stop_gradient(
+                jnp.linalg.norm(operator(total) - inc) / jnp.linalg.norm(inc)
+            )
             charge = b.ravel() * total
             measure = jax.checkpoint(
                 lambda target: jnp.sum(receiver_row(target) * charge)
             )
             return jax.lax.map(measure, receivers), residual
 
-        return jax.lax.map(solve, directions)
+        return jax.lax.map(jax.checkpoint(solve), directions)
 
     return forward
 
