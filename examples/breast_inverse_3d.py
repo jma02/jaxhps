@@ -156,8 +156,8 @@ def run(args: argparse.Namespace) -> None:
                 options=dict(
                     maxiter=args.iterations,
                     maxls=12,
-                    ftol=1e-10,
-                    gtol=1e-7,
+                    ftol=0.0,
+                    gtol=0.0,
                     maxcor=10,
                 ),
             )
