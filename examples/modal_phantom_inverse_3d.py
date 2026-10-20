@@ -2,6 +2,7 @@
 
 import io
 import subprocess
+import time
 import zipfile
 from pathlib import Path
 
@@ -10,11 +11,14 @@ import modal
 from modal_vascular_3d import image
 
 app = modal.App("jaxhps-phantom-inverse-fit")
+results_volume = modal.Volume.from_name(
+    "jaxhps-phantom-inverse-results", create_if_missing=True
+)
 
 
 def _run(script: str, extra: list[str], payload: bytes = b"") -> bytes:
-    output = Path("/root/inverse-results")
-    output.mkdir(exist_ok=True)
+    output = Path("/root/inverse-results") / Path(script).stem
+    output.mkdir(parents=True, exist_ok=True)
     command = [
         "python",
         "-u",
@@ -27,6 +31,8 @@ def _run(script: str, extra: list[str], payload: bytes = b"") -> bytes:
         Path("/root/images.npz").write_bytes(payload)
         command += ["--images", "/root/images.npz"]
     with (output / "run.log").open("w") as log:
+        results_volume.commit()
+        last_commit = time.monotonic()
         process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
@@ -37,13 +43,23 @@ def _run(script: str, extra: list[str], payload: bytes = b"") -> bytes:
             print(line, end="", flush=True)
             log.write(line)
             log.flush()
+            if (
+                line.startswith("STAGE ")
+                or time.monotonic() - last_commit >= 60
+            ):
+                results_volume.commit()
+                last_commit = time.monotonic()
         status = process.wait()
     (output / "exit-status.txt").write_text(str(status))
     archive = io.BytesIO()
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zipped:
-        for path in output.iterdir():
-            zipped.write(path, path.name)
-    return archive.getvalue()
+        for path in sorted(output.iterdir()):
+            if path.is_file() and path.name != "results.zip":
+                zipped.write(path, path.name)
+    payload = archive.getvalue()
+    (output / "results.zip").write_bytes(payload)
+    results_volume.commit()
+    return payload
 
 
 @app.function(
@@ -55,6 +71,7 @@ def _run(script: str, extra: list[str], payload: bytes = b"") -> bytes:
     max_containers=1,
     min_containers=0,
     scaledown_window=2,
+    volumes={"/root/inverse-results": results_volume},
 )
 def fit(script: str, extra: list[str], payload: bytes = b"") -> bytes:
     return _run(script, extra, payload)
@@ -69,6 +86,7 @@ def fit(script: str, extra: list[str], payload: bytes = b"") -> bytes:
     max_containers=1,
     min_containers=0,
     scaledown_window=2,
+    volumes={"/root/inverse-results": results_volume},
 )
 def fit_long(script: str, extra: list[str]) -> bytes:
     return _run(script, extra)
