@@ -113,6 +113,7 @@ def main(
     learn: bool = False,
     images: str = "",
     breast: bool = False,
+    spheres: bool = False,
     fitted: str = "",
     waves: float = 12.0,
 ) -> None:
@@ -123,7 +124,14 @@ def main(
         (destination / "validation.json").write_text(result)
         print(result)
         return
-    if breast:
+    if spheres:
+        extra = ["--n", "24", "--wavelength-mm", "30", "--train", "6"]
+        extra += ["--test", "2", "--fits", "1", "--sources", "4"]
+        extra += ["--receivers", "32", "--epochs", "2", "--iterations", "3"]
+        payload = fit_long.remote(
+            "breast_spheres_learn_3d.py", extra if smoke else []
+        )
+    elif breast:
         extra = ["--waves", "4", "--grids", "32", "--seconds", "300"]
         extra += ["--sources", "4", "--receivers", "64", "--iterations", "3"]
         payload = fit_long.remote(
