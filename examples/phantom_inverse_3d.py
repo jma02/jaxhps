@@ -92,10 +92,10 @@ def make_forward(
                 operator(total) - inc
             ) / jnp.linalg.norm(inc)
             charge = b.ravel() * total
-            return jax.lax.map(
-                lambda target: jnp.sum(receiver_row(target) * charge),
-                receivers,
-            ), residual
+            measure = jax.checkpoint(
+                lambda target: jnp.sum(receiver_row(target) * charge)
+            )
+            return jax.lax.map(measure, receivers), residual
 
         return jax.lax.map(solve, directions)
 
