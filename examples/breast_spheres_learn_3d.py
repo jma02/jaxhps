@@ -22,7 +22,7 @@ from scipy.optimize import minimize
 
 from breast_phantom_3d import breast_n_of_x, fibonacci_cap_points
 from phantom_dataset_learn_3d import init_network, network
-from phantom_inverse_3d import make_forward
+from phantom_inverse_3d import make_background_born, make_forward
 
 A = 1.2
 KVAL = 25.0
@@ -102,14 +102,12 @@ def run(args: argparse.Namespace) -> None:
         f"seconds={time.monotonic() - start:.0f}",
         flush=True,
     )
-    _, jacobian = jax.linearize(lambda b: forward(b)[0], background_dev)
-    jacobian = jax.jit(jacobian)
-    adjoint = jax.jit(
-        lambda d: jnp.real(
-            jax.linear_transpose(jacobian, background_dev)(
-                jnp.conj(d).astype(reference.dtype)
-            )[0]
-        ).astype(jnp.float32)
+    jacobian, adjoint = make_background_born(
+        points, kappa, directions, sensors, background_dev, args.tolerance
+    )
+    print(
+        f"BORN fields cached, seconds={time.monotonic() - start:.1f}",
+        flush=True,
     )
 
     @jax.jit
@@ -139,6 +137,7 @@ def run(args: argparse.Namespace) -> None:
 
     observed, images = [], []
     for index, image in enumerate(truth):
+        sample_start = time.monotonic()
         data, residuals = forward(jnp.asarray(image))
         residual = float(jnp.max(residuals))
         if not np.isfinite(residual) or residual > 5 * args.tolerance:
@@ -150,10 +149,27 @@ def run(args: argparse.Namespace) -> None:
                 key, data.shape, dtype=data.dtype
             )
         observed.append(data)
-        images.append(born(data - reference))
+        forward_seconds = time.monotonic() - sample_start
+        born_start = time.monotonic()
+        images.append(born(data - reference).block_until_ready())
+        born_seconds = time.monotonic() - born_start
+        if (index + 1) % 20 == 0 or index + 1 == len(truth):
+            np.savez_compressed(
+                args.out / "dataset-partial.npz",
+                truth=delta_truth[: index + 1],
+                born=np.asarray(images),
+                observed=np.asarray(observed),
+                background=background.astype(np.float32),
+                window=window.astype(np.float32),
+            )
+            (args.out / "dataset-partial.npz").replace(
+                args.out / "dataset.npz"
+            )
+            print(f"DATA saved={index + 1}", flush=True)
         if index % 20 == 0:
             print(
                 f"DATA sample={index}, residual={residual:.2g}, "
+                f"forward={forward_seconds:.2f}s, born={born_seconds:.2f}s, "
                 f"seconds={time.monotonic() - start:.1f}",
                 flush=True,
             )
@@ -165,14 +181,6 @@ def run(args: argparse.Namespace) -> None:
     train = slice(0, args.train)
     test = slice(args.train, args.train + args.test)
     data_seconds = time.monotonic() - start
-    np.savez_compressed(
-        args.out / "dataset.npz",
-        truth=delta_truth,
-        born=np.asarray(images),
-        observed=np.asarray(observed),
-        background=background.astype(np.float32),
-        window=window.astype(np.float32),
-    )
     print(f"DATA complete, seconds={data_seconds:.1f}", flush=True)
 
     params = jax.tree.map(

@@ -44,7 +44,7 @@ def _run(script: str, extra: list[str], payload: bytes = b"") -> bytes:
             log.write(line)
             log.flush()
             if (
-                line.startswith("STAGE ")
+                line.startswith(("STAGE ", "DATA saved="))
                 or time.monotonic() - last_commit >= 60
             ):
                 results_volume.commit()

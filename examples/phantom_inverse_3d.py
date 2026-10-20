@@ -121,6 +121,102 @@ def objective(
     )
 
 
+def make_background_born(
+    points: np.ndarray,
+    kappa: float,
+    directions: np.ndarray,
+    receivers: np.ndarray,
+    background: jax.Array,
+    tol: float = 1e-6,
+) -> tuple[Callable[[jax.Array], jax.Array], Callable[[jax.Array], jax.Array]]:
+    """Cache source/reciprocal fields for a fixed-background Jacobian.
+
+    With A = I + K diag(b), reciprocity gives J[s,r,v] = u[s,v] w[r,v],
+    where A u[s] = incident[s] and A w[r] = receiver_row[r]. This avoids
+    wave solves in subsequent Jacobian and real-adjoint applications.
+    """
+    n = points.shape[0]
+    h = float(points[1, 0, 0, 0] - points[0, 0, 0, 0])
+    dtype = jnp.complex128 if jax.config.x64_enabled else jnp.complex64
+    kernel = green_kernel(n, n * h / 2, kappa).astype(dtype)
+    xyz = jnp.asarray(points.reshape(-1, 3))
+
+    def operator(u: jax.Array) -> jax.Array:
+        charge = background * u.reshape(background.shape)
+        padded = jnp.pad(charge, ((0, n),) * 3)
+        potential = jnp.fft.ifftn(jnp.fft.fftn(padded) * kernel)[:n, :n, :n]
+        return u + kappa**2 * potential.ravel()
+
+    def solve(rhs: jax.Array) -> tuple[jax.Array, jax.Array]:
+        total, _ = gmres(
+            operator,
+            rhs,
+            tol=tol,
+            restart=20,
+            maxiter=10,
+            solve_method="incremental",
+        )
+        residual = jnp.linalg.norm(operator(total) - rhs) / jnp.linalg.norm(
+            rhs
+        )
+        return total, residual
+
+    @jax.jit
+    def prepare() -> tuple[jax.Array, jax.Array, jax.Array]:
+        sources, source_residuals = jax.lax.map(
+            lambda direction: solve(
+                jnp.exp(1j * kappa * (xyz @ direction)).astype(dtype)
+            ),
+            jnp.asarray(directions),
+        )
+
+        def reciprocal(target: jax.Array) -> tuple[jax.Array, jax.Array]:
+            distance = jnp.linalg.norm(target - xyz, axis=-1)
+            row = (
+                -(kappa**2)
+                * h**3
+                * jnp.exp(1j * kappa * distance)
+                / (4 * jnp.pi * distance)
+            ).astype(dtype)
+            return solve(row)
+
+        reciprocal_fields, receiver_residuals = jax.lax.map(
+            reciprocal, jnp.asarray(receivers)
+        )
+        return (
+            sources,
+            reciprocal_fields,
+            jnp.maximum(source_residuals.max(), receiver_residuals.max()),
+        )
+
+    sources, reciprocal_fields, residual = prepare()
+    if not np.isfinite(float(residual)) or float(residual) > 5 * tol:
+        raise RuntimeError(f"Born background-field residual {float(residual)}")
+
+    @jax.jit
+    def jacobian(delta: jax.Array) -> jax.Array:
+        return jnp.matmul(
+            sources * delta.ravel(),
+            reciprocal_fields.T,
+            precision=jax.lax.Precision.HIGHEST,
+        )
+
+    @jax.jit
+    def adjoint(data: jax.Array) -> jax.Array:
+        weighted = jnp.matmul(
+            data,
+            jnp.conj(reciprocal_fields),
+            precision=jax.lax.Precision.HIGHEST,
+        )
+        return (
+            jnp.real(jnp.sum(jnp.conj(sources) * weighted, axis=0))
+            .reshape(background.shape)
+            .astype(background.dtype)
+        )
+
+    return jacobian, adjoint
+
+
 def run(args: argparse.Namespace) -> None:
     jax.config.update("jax_enable_x64", args.double)
     args.out.mkdir(parents=True, exist_ok=True)

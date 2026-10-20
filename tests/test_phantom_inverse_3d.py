@@ -4,6 +4,7 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 from fft_volume_3d import (
@@ -11,7 +12,13 @@ from fft_volume_3d import (
     prepare_volume_solver,
     solve_volume,
 )
-from phantom_inverse_3d import crop, make_forward, objective, sphere
+from phantom_inverse_3d import (
+    crop,
+    make_background_born,
+    make_forward,
+    objective,
+    sphere,
+)
 
 jax.config.update("jax_enable_x64", True)
 
@@ -86,3 +93,40 @@ def test_born_operator_matches_forward_linearization():
     assert jnp.linalg.norm(tangent - linear(b)) < 1e-6 * jnp.linalg.norm(
         tangent
     )
+
+
+@pytest.mark.parametrize("double", [False, True])
+def test_cached_background_born_matches_jvp_and_adjoint(double):
+    with jax.enable_x64(double):
+        points, _, _ = crop(8)
+        directions, receivers = sphere(3), 0.36 * sphere(7, 0.3)
+        background = jnp.asarray(-0.06 * np.exp(-np.sum(points**2, -1) / 0.02))
+        tol = 1e-10 if double else 1e-6
+        forward = make_forward(points, 15.0, directions, receivers, tol)
+        linear, adjoint = make_background_born(
+            points, 15.0, directions, receivers, background, tol
+        )
+        rng = np.random.default_rng(7)
+        delta = jnp.asarray(rng.normal(size=background.shape))
+        _, tangent = jax.jvp(lambda b: forward(b)[0], (background,), (delta,))
+        error = jnp.linalg.norm(linear(delta) - tangent) / jnp.linalg.norm(
+            tangent
+        )
+        assert float(error) < 20 * tol
+        data = jnp.asarray(
+            rng.normal(size=tangent.shape)
+            + 1j * rng.normal(size=tangent.shape)
+        )
+        reference_adjoint = jax.grad(
+            lambda b: jnp.real(jnp.vdot(data, forward(b)[0]))
+        )(background)
+        error = jnp.linalg.norm(
+            adjoint(data) - reference_adjoint
+        ) / jnp.linalg.norm(reference_adjoint)
+        assert float(error) < 20 * tol
+        np.testing.assert_allclose(
+            jnp.vdot(delta, adjoint(data)),
+            jnp.real(jnp.vdot(linear(delta), data)),
+            rtol=20 * tol,
+            atol=tol,
+        )
