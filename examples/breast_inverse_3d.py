@@ -213,9 +213,9 @@ def run(args: argparse.Namespace) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--waves", type=float, nargs="+", default=[20, 40])
-    parser.add_argument("--grids", type=int, nargs="+", default=[128, 256])
+    parser.add_argument("--grids", type=int, nargs="+", default=[128, 192])
     parser.add_argument(
-        "--seconds", type=float, nargs="+", default=[2400, 7800]
+        "--seconds", type=float, nargs="+", default=[2400, 5400]
     )
     parser.add_argument("--sources", type=int, default=24)
     parser.add_argument("--receivers", type=int, default=512)
