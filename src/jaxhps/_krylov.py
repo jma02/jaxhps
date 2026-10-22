@@ -1,10 +1,31 @@
 """Restarted flexible GMRES for matrix-free JAX operators."""
 
+from functools import partial
 from typing import Callable, Optional
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+
+@partial(jax.jit, donate_argnums=(0,))
+def _store_basis_vector(
+    basis: jax.Array, index: int, value: jax.Array
+) -> jax.Array:
+    return basis.at[index].set(value)
+
+
+@jax.jit
+def _orthogonalize(
+    basis: jax.Array, w: jax.Array
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    w_norm = jnp.linalg.norm(w)
+    # Conjugate vectors, not the much larger basis matrix.
+    h = jnp.conj(basis @ jnp.conj(w))
+    w = w - basis.T @ h
+    correction = jnp.conj(basis @ jnp.conj(w))
+    w = w - basis.T @ correction
+    return h + correction, w, w_norm, jnp.linalg.norm(w)
 
 
 def fgmres(
@@ -27,8 +48,9 @@ def fgmres(
     separately in ``stats['n_matvec']``. Arrays of right-hand sides use one
     shared scalar Krylov space with the Frobenius norm (global FGMRES).
 
-    Retains at most ``2 * restart + 1`` vectors plus a small Hessenberg
-    matrix. Python controls iterations; vector operations stay on device.
+    Retains at most ``2 * restart + 1`` basis vectors (``restart + 1``
+    without a preconditioner) plus a small Hessenberg matrix. Python
+    controls iterations; vector operations stay on device.
     ``stats`` is overwritten for each solve. ``true_res_history`` records
     recomputed residuals; ``res_history`` records least-squares estimates.
     """
@@ -71,7 +93,11 @@ def fgmres(
         stats["n_cycles"] += 1
         m = min(restart, maxiter - stats["n_iter"])
         V = jnp.zeros((m + 1, b.size), dtype=b.dtype).at[0].set(r / beta)
-        Z = jnp.zeros((m, b.size), dtype=b.dtype)
+        Z = (
+            jnp.zeros((m, b.size), dtype=b.dtype)
+            if precond is not None
+            else None
+        )
         H = np.zeros((m + 1, m), dtype=np.complex128)
         e1 = np.zeros(m + 1, dtype=np.complex128)
         e1[0] = beta
@@ -80,20 +106,17 @@ def fgmres(
             if precond is not None:
                 z = precond(z.reshape(shape)).ravel()
                 stats["n_precond"] += 1
-            Z = Z.at[j].set(z)
+                Z = _store_basis_vector(Z, j, z)
             w = matvec(z.reshape(shape)).ravel()
             stats["n_matvec"] += 1
-            w_norm = float(jnp.linalg.norm(w))
+            h, w, w_norm, h_norm = _orthogonalize(V, w)
+            w_norm = float(w_norm)
             if not np.isfinite(w_norm):
                 raise ValueError(
                     "operator or preconditioner returned nonfinite values"
                 )
-            h = V.conj() @ w
-            w = w - V.T @ h
-            correction = V.conj() @ w
-            h, w = h + correction, w - V.T @ correction
             H[: j + 1, j] = np.asarray(h)[: j + 1]
-            h_norm = float(jnp.linalg.norm(w))
+            h_norm = float(h_norm)
             H[j + 1, j] = h_norm
             k = j + 1
             stats["n_iter"] += 1
@@ -102,13 +125,15 @@ def fgmres(
             stats["res_history"].append(float(estimate / b_norm))
             breakdown = h_norm <= np.finfo(np.float64).eps * w_norm
             if estimate <= atol or breakdown or k == m:
-                x = x + Z[:k].T @ jnp.asarray(y, dtype=x.dtype)
+                x = x + (V[:k] if Z is None else Z[:k]).T @ jnp.asarray(
+                    y, dtype=x.dtype
+                )
                 r = b - matvec(x.reshape(shape)).ravel()
                 stats["n_matvec"] += 1
                 beta = float(jnp.linalg.norm(r))
                 stats["true_res_history"].append(beta / b_norm)
                 break
-            V = V.at[k].set(w / h_norm)
+            V = _store_basis_vector(V, k, w / h_norm)
         if breakdown and beta > atol:
             break
     stats["final_rel_res"] = beta / b_norm

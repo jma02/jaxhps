@@ -32,20 +32,36 @@ def truncated_green_transform(s, kappa, radius):
     )
 
 
-@partial(jax.jit, static_argnames=("n",))
-def green_kernel(n, a, kappa):
-    """Return Fourier weights for a zero-padded 2n convolution."""
+@partial(jax.jit, static_argnames=("n", "batch_size"))
+def green_kernel(n, a, kappa, batch_size=16):
+    """Build the same 4n quadrature in bounded batches of frequency planes.
+
+    Crop each spatial axis immediately after its inverse FFT. Only a
+    (4n, 2n, 2n) intermediate is retained, not the full (4n)^3 cube.
+    """
     h = 2 * a / n
     freq = 2 * jnp.pi * jnp.fft.fftfreq(4 * n, d=h)
-    s = jnp.sqrt(
-        freq[:, None, None] ** 2
-        + freq[None, :, None] ** 2
-        + freq[None, None, :] ** 2
-    )
-    weights = jnp.fft.ifftn(truncated_green_transform(s, kappa, 3.6 * a))
     indices = jnp.concatenate([jnp.arange(n), jnp.arange(3 * n, 4 * n)])
-    cropped = weights[jnp.ix_(indices, indices, indices)]
+
+    def plane(fx):
+        s = jnp.sqrt(fx**2 + freq[:, None] ** 2 + freq[None, :] ** 2)
+        weights = truncated_green_transform(s, kappa, 3.6 * a)
+        spatial_z = jnp.fft.ifft(weights, axis=-1)[:, indices]
+        return jnp.fft.ifft(spatial_z, axis=0)[indices, :]
+
+    planes = jax.lax.map(plane, freq, batch_size=batch_size)
+    cropped = jnp.fft.ifft(planes, axis=0)[indices, :, :]
     return jnp.fft.fftn(cropped)
+
+
+@jax.jit
+def _volume_matvec(u, b, kernel, kappa):
+    """Keep large device arrays as arguments, not compilation constants."""
+    n = b.shape[0]
+    charge = b * u.reshape(b.shape)
+    padded = jnp.pad(charge, ((0, n),) * 3)
+    potential = jnp.fft.ifftn(jnp.fft.fftn(padded) * kernel)[:n, :n, :n]
+    return (u.reshape(b.shape) + kappa**2 * potential).ravel()
 
 
 def prepare_volume_solver(n, a, kappa, coefficient):
@@ -60,14 +76,8 @@ def prepare_volume_solver(n, a, kappa, coefficient):
     b = jnp.asarray(b)
     kernel = green_kernel(n, a, kappa)
 
-    @jax.jit
-    def matvec(u):
-        charge = b * u.reshape(b.shape)
-        padded = jnp.pad(charge, ((0, n),) * 3)
-        potential = jnp.fft.ifftn(jnp.fft.fftn(padded) * kernel)[:n, :n, :n]
-        return (u.reshape(b.shape) + kappa**2 * potential).ravel()
-
     jax.block_until_ready(kernel)
+    matvec = partial(_volume_matvec, b=b, kernel=kernel, kappa=kappa)
     return points, b, kernel, matvec
 
 

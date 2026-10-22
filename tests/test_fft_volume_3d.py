@@ -6,11 +6,13 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from scipy.integrate import quad_vec
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 from fft_volume_3d import (  # noqa: E402
     evaluate_volume_field,
+    green_kernel,
     prepare_volume_solver,
     solve_volume,
     truncated_green_transform,
@@ -18,6 +20,47 @@ from fft_volume_3d import (  # noqa: E402
 from radial_reference_3d import radial_reference  # noqa: E402
 
 jax.config.update("jax_enable_x64", True)
+
+
+@pytest.mark.parametrize("n,batch_size", [(4, 1), (7, 16), (8, 3)])
+@pytest.mark.parametrize("kappa", [4.0, 201.06192982974676])
+def test_batched_kernel_matches_full_quadrature(n, batch_size, kappa):
+    a = 1.25
+    freq = 2 * jnp.pi * jnp.fft.fftfreq(4 * n, d=2 * a / n)
+    s = jnp.sqrt(
+        freq[:, None, None] ** 2
+        + freq[None, :, None] ** 2
+        + freq[None, None, :] ** 2
+    )
+    full = jnp.fft.ifftn(truncated_green_transform(s, kappa, 3.6 * a))
+    indices = jnp.concatenate([jnp.arange(n), jnp.arange(3 * n, 4 * n)])
+    expected = jnp.fft.fftn(full[jnp.ix_(indices, indices, indices)])
+    np.testing.assert_allclose(
+        green_kernel(n, a, kappa, batch_size),
+        expected,
+        rtol=1e-12,
+        atol=1e-14,
+    )
+
+
+def test_matvec_uses_dynamic_coefficients_and_kernel():
+    from fft_volume_3d import _volume_matvec
+
+    rng = np.random.default_rng(3)
+    n, a, kappa = 7, 1.25, 4.0
+    u = jnp.asarray(rng.normal(size=n**3) + 1j * rng.normal(size=n**3))
+    for scale in (0.2, 0.4):
+        _, b, kernel, operator = prepare_volume_solver(
+            n, a, kappa, lambda p: scale * np.exp(-np.sum(p**2, axis=-1))
+        )
+        charge = jnp.pad(b * u.reshape(b.shape), ((0, n),) * 3)
+        expected = (
+            u
+            + kappa**2
+            * jnp.fft.ifftn(jnp.fft.fftn(charge) * kernel)[:n, :n, :n].ravel()
+        )
+        np.testing.assert_allclose(operator(u), expected, rtol=1e-12)
+        assert not jax.make_jaxpr(_volume_matvec)(u, b, kernel, kappa).consts
 
 
 def test_multiplier_removable_singularities():
