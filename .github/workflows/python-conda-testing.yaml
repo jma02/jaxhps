@@ -25,6 +25,7 @@ jobs:
     - name: Install dependencies
       run: |
         conda env update --file env.yaml --name base
+        python -m pip install 'jax[cpu]==0.6.2'
 # Run tests in small chunks to avoid hanging.
     - name: Test accuracy
       run: |
@@ -44,6 +45,9 @@ jobs:
     - name: Test recomputation methods
       run: |
         pytest tests/test_subtree_recomp.py tests/test_solve.py
+    - name: Test FFT and Krylov optimizations
+      run: |
+        pytest tests/test_fft_volume_3d.py tests/test_krylov.py tests/test_phantom_inverse_3d.py tests/test_matfree_iti_3D.py tests/test_matfree_precond_3D.py
     # - name: Test others
     #   run: |
     #     pytest tests/test_*.py
