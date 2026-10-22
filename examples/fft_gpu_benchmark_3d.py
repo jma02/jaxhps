@@ -17,6 +17,8 @@ from vascular_phantom_device import vascular_phantom_device
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline", action="store_true")
+    parser.add_argument("--save-reference", action="store_true")
+    parser.add_argument("--warm-repeats", type=int, default=0)
     parser.add_argument("--n", type=int, default=288)
     parser.add_argument("--waves", type=float, default=80)
     parser.add_argument("--reference", type=Path, required=True)
@@ -97,7 +99,23 @@ def main() -> None:
         flush=True,
     )
 
-    if args.baseline:
+    row["warm_solves"] = []
+    for _ in range(args.warm_repeats):
+        start = time.perf_counter()
+        repeated, repeated_stats = fft.solve_volume(
+            operator,
+            points,
+            kappa,
+            np.array([0, 0, 1]),
+            tol=1e-8,
+            restart=30,
+            maxiter=300,
+        )
+        elapsed = time.perf_counter() - start
+        row["warm_solves"].append(dict(seconds=elapsed, **repeated_stats))
+        del repeated
+
+    if args.baseline or args.save_reference:
         np.save(args.reference, np.asarray(u))
         np.save(args.reference.with_suffix(".coefficient.npy"), np.asarray(b))
     else:
@@ -141,6 +159,10 @@ def main() -> None:
     args.out.write_text(json.dumps(row, indent=2))
     if not row["converged"]:
         raise RuntimeError("true residual exceeds tolerance")
+    if any(
+        s["info"] != 0 or s["final_rel_res"] > 1e-8 for s in row["warm_solves"]
+    ):
+        raise RuntimeError("warm-solve true residual exceeds tolerance")
 
 
 if __name__ == "__main__":

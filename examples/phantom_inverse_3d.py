@@ -8,6 +8,8 @@ import argparse
 import json
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 import jax
@@ -42,6 +44,7 @@ def make_forward(
     directions: np.ndarray,
     receivers: np.ndarray,
     tol: float = 1e-6,
+    receiver_batch_size: int = 16,
 ) -> Callable[[jax.Array], tuple[jax.Array, jax.Array]]:
     n = points.shape[0]
     h = float(points[1, 0, 0, 0] - points[0, 0, 0, 0])
@@ -52,17 +55,14 @@ def make_forward(
     directions = jnp.asarray(directions)
     receivers = jnp.asarray(receivers)
 
-    def receiver_row(target: jax.Array) -> jax.Array:
-        distance = jnp.linalg.norm(target - xyz, axis=-1)
-        return (
-            -(kappa**2)
-            * h**3
-            * jnp.exp(1j * kappa * distance)
-            / (4 * jnp.pi * distance)
-        ).astype(dtype)
-
     @jax.jit
-    def forward(b: jax.Array) -> tuple[jax.Array, jax.Array]:
+    def evaluate(
+        b: jax.Array,
+        kernel: jax.Array,
+        xyz: jax.Array,
+        directions: jax.Array,
+        receivers: jax.Array,
+    ) -> tuple[jax.Array, jax.Array]:
         def operator(u: jax.Array) -> jax.Array:
             charge = b * u.reshape((n, n, n))
             padded = jnp.pad(charge, ((0, n),) * 3)
@@ -91,13 +91,30 @@ def make_forward(
             residual = jax.lax.stop_gradient(
                 jnp.linalg.norm(operator(total) - inc) / jnp.linalg.norm(inc)
             )
-            charge = b.ravel() * total
-            measure = jax.checkpoint(
-                lambda target: jnp.sum(receiver_row(target) * charge)
-            )
-            return jax.lax.map(measure, receivers), residual
+            return b.ravel() * total, residual
 
-        return jax.lax.map(jax.checkpoint(solve), directions)
+        charges, residuals = jax.lax.map(jax.checkpoint(solve), directions)
+
+        @jax.checkpoint
+        def measure(target: jax.Array) -> jax.Array:
+            distance = jnp.linalg.norm(target - xyz, axis=-1)
+            row = (
+                -(kappa**2)
+                * h**3
+                * jnp.exp(1j * kappa * distance)
+                / (4 * jnp.pi * distance)
+            ).astype(dtype)
+            return jnp.matmul(
+                charges, row, precision=jax.lax.Precision.HIGHEST
+            )
+
+        measurements = jax.lax.map(
+            measure, receivers, batch_size=receiver_batch_size
+        )
+        return measurements.T, residuals
+
+    def forward(b: jax.Array) -> tuple[jax.Array, jax.Array]:
+        return evaluate(b, kernel, xyz, directions, receivers)
 
     return forward
 
@@ -121,6 +138,43 @@ def objective(
     )
 
 
+@partial(
+    jax.tree_util.register_dataclass,
+    data_fields=["sources", "reciprocal_fields"],
+    meta_fields=["shape", "dtype"],
+)
+@dataclass(frozen=True)
+class BackgroundBorn:
+    """Cached wave fields passed as device arguments, not JIT constants."""
+
+    sources: jax.Array
+    reciprocal_fields: jax.Array
+    shape: tuple[int, ...]
+    dtype: np.dtype
+
+    @jax.jit
+    def __call__(self, delta: jax.Array) -> jax.Array:
+        return jnp.matmul(
+            self.sources * delta.ravel(),
+            self.reciprocal_fields.T,
+            precision=jax.lax.Precision.HIGHEST,
+        )
+
+    @jax.jit
+    def adjoint(self, data: jax.Array) -> jax.Array:
+        # Conjugate the small measurement array, not the cached volume fields.
+        weighted = jnp.matmul(
+            jnp.conj(data),
+            self.reciprocal_fields,
+            precision=jax.lax.Precision.HIGHEST,
+        )
+        return (
+            jnp.real(jnp.sum(self.sources * weighted, axis=0))
+            .reshape(self.shape)
+            .astype(self.dtype)
+        )
+
+
 def make_background_born(
     points: np.ndarray,
     kappa: float,
@@ -128,7 +182,7 @@ def make_background_born(
     receivers: np.ndarray,
     background: jax.Array,
     tol: float = 1e-6,
-) -> tuple[Callable[[jax.Array], jax.Array], Callable[[jax.Array], jax.Array]]:
+) -> BackgroundBorn:
     """Cache source/reciprocal fields for a fixed-background Jacobian.
 
     With A = I + K diag(b), reciprocity gives J[s,r,v] = u[s,v] w[r,v],
@@ -141,28 +195,36 @@ def make_background_born(
     kernel = green_kernel(n, n * h / 2, kappa).astype(dtype)
     xyz = jnp.asarray(points.reshape(-1, 3))
 
-    def operator(u: jax.Array) -> jax.Array:
-        charge = background * u.reshape(background.shape)
-        padded = jnp.pad(charge, ((0, n),) * 3)
-        potential = jnp.fft.ifftn(jnp.fft.fftn(padded) * kernel)[:n, :n, :n]
-        return u + kappa**2 * potential.ravel()
-
-    def solve(rhs: jax.Array) -> tuple[jax.Array, jax.Array]:
-        total, _ = gmres(
-            operator,
-            rhs,
-            tol=tol,
-            restart=20,
-            maxiter=10,
-            solve_method="incremental",
-        )
-        residual = jnp.linalg.norm(operator(total) - rhs) / jnp.linalg.norm(
-            rhs
-        )
-        return total, residual
-
     @jax.jit
-    def prepare() -> tuple[jax.Array, jax.Array, jax.Array]:
+    def prepare(
+        kernel: jax.Array,
+        background: jax.Array,
+        xyz: jax.Array,
+        directions: jax.Array,
+        receivers: jax.Array,
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
+        def operator(u: jax.Array) -> jax.Array:
+            charge = background * u.reshape(background.shape)
+            padded = jnp.pad(charge, ((0, n),) * 3)
+            potential = jnp.fft.ifftn(jnp.fft.fftn(padded) * kernel)[
+                :n, :n, :n
+            ]
+            return u + kappa**2 * potential.ravel()
+
+        def solve(rhs: jax.Array) -> tuple[jax.Array, jax.Array]:
+            total, _ = gmres(
+                operator,
+                rhs,
+                tol=tol,
+                restart=20,
+                maxiter=10,
+                solve_method="incremental",
+            )
+            residual = jnp.linalg.norm(
+                operator(total) - rhs
+            ) / jnp.linalg.norm(rhs)
+            return total, residual
+
         sources, source_residuals = jax.lax.map(
             lambda direction: solve(
                 jnp.exp(1j * kappa * (xyz @ direction)).astype(dtype)
@@ -189,32 +251,22 @@ def make_background_born(
             jnp.maximum(source_residuals.max(), receiver_residuals.max()),
         )
 
-    sources, reciprocal_fields, residual = prepare()
+    sources, reciprocal_fields, residual = prepare(
+        kernel,
+        background,
+        xyz,
+        jnp.asarray(directions),
+        jnp.asarray(receivers),
+    )
     if not np.isfinite(float(residual)) or float(residual) > 5 * tol:
         raise RuntimeError(f"Born background-field residual {float(residual)}")
 
-    @jax.jit
-    def jacobian(delta: jax.Array) -> jax.Array:
-        return jnp.matmul(
-            sources * delta.ravel(),
-            reciprocal_fields.T,
-            precision=jax.lax.Precision.HIGHEST,
-        )
-
-    @jax.jit
-    def adjoint(data: jax.Array) -> jax.Array:
-        weighted = jnp.matmul(
-            data,
-            jnp.conj(reciprocal_fields),
-            precision=jax.lax.Precision.HIGHEST,
-        )
-        return (
-            jnp.real(jnp.sum(jnp.conj(sources) * weighted, axis=0))
-            .reshape(background.shape)
-            .astype(background.dtype)
-        )
-
-    return jacobian, adjoint
+    return BackgroundBorn(
+        sources,
+        reciprocal_fields,
+        background.shape,
+        np.dtype(background.dtype),
+    )
 
 
 def run(args: argparse.Namespace) -> None:

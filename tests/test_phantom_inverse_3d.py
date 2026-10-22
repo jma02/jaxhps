@@ -13,6 +13,7 @@ from fft_volume_3d import (
     solve_volume,
 )
 from phantom_inverse_3d import (
+    BackgroundBorn,
     crop,
     make_background_born,
     make_forward,
@@ -105,7 +106,7 @@ def test_cached_background_born_matches_jvp_and_adjoint(double):
         background = jnp.asarray(-0.06 * np.exp(-np.sum(points**2, -1) / 0.02))
         tol = 1e-10 if double else 1e-6
         forward = make_forward(points, 15.0, directions, receivers, tol)
-        linear, adjoint = make_background_born(
+        linear = make_background_born(
             points, 15.0, directions, receivers, background, tol
         )
         rng = np.random.default_rng(7)
@@ -123,14 +124,92 @@ def test_cached_background_born_matches_jvp_and_adjoint(double):
             lambda b: jnp.real(jnp.vdot(data, forward(b)[0]))
         )(background)
         error = jnp.linalg.norm(
-            adjoint(data) - reference_adjoint
+            linear.adjoint(data) - reference_adjoint
         ) / jnp.linalg.norm(reference_adjoint)
         assert float(error) < 20 * tol
         np.testing.assert_allclose(
-            jnp.vdot(delta, adjoint(data)),
+            jnp.vdot(delta, linear.adjoint(data)),
             jnp.real(jnp.vdot(linear(delta), data)),
             rtol=20 * tol,
             atol=tol,
         )
     finally:
         jax.config.update("jax_enable_x64", previous)
+
+
+@pytest.mark.parametrize("batch_size", [1, 4])
+def test_receiver_batches_match_independent_source_solves(batch_size):
+    n, a, kappa = 8, 0.2, 10.0
+
+    def coefficient(p):
+        return -0.04 * np.exp(-np.sum(p**2, -1) / 0.01)
+
+    points, b, _, operator = prepare_volume_solver(n, a, kappa, coefficient)
+    directions, receivers = sphere(3), 0.36 * sphere(7)
+    forward = make_forward(
+        points, kappa, directions, receivers, 1e-10, batch_size
+    )
+    observed, residuals = forward(b)
+    assert float(residuals.max()) < 1e-9
+    for index, direction in enumerate(directions):
+        total, stats = solve_volume(
+            operator, points, kappa, direction, tol=1e-10
+        )
+        assert stats["info"] == 0
+        expected = evaluate_volume_field(
+            jnp.asarray(receivers),
+            jnp.asarray(points),
+            b * total,
+            kappa,
+            2 * a / n,
+        )
+        np.testing.assert_allclose(
+            observed[index], expected, rtol=1e-8, atol=1e-11
+        )
+
+
+def test_born_cg_uses_dynamic_fields_and_matches_dense_normal_equations():
+    from breast_spheres_learn_3d import reconstruct_born
+
+    rng = np.random.default_rng(12)
+    shape = (3, 3, 3)
+    sources = jnp.asarray(
+        rng.normal(size=(3, 27)) + 1j * rng.normal(size=(3, 27))
+    )
+    receivers = jnp.asarray(
+        rng.normal(size=(7, 27)) + 1j * rng.normal(size=(7, 27))
+    )
+    data = jnp.asarray(rng.normal(size=(3, 7)) + 1j * rng.normal(size=(3, 7)))
+    window = jnp.asarray(rng.uniform(0.1, 1.0, shape))
+
+    def reconstruct(operator, data, window):
+        return reconstruct_born(operator, data, window, 8, 0.1)
+
+    for factor in (1.0, 0.7):
+        operator = BackgroundBorn(
+            sources * factor, receivers, shape, np.dtype("float64")
+        )
+        matrix = np.asarray(
+            operator.sources[:, None, :] * receivers[None, :, :]
+        )
+        matrix = matrix.reshape(-1, 27) * np.asarray(window).ravel()
+        normal = np.real(matrix.conj().T @ matrix)
+        normal += 0.1 * float(jnp.sum(jnp.abs(data) ** 2)) * np.eye(27)
+        rhs = np.real(matrix.conj().T @ np.asarray(data).ravel())
+        x = np.zeros_like(rhs)
+        r, p = rhs.copy(), rhs.copy()
+        rr = r @ r
+        for _ in range(8):
+            q = normal @ p
+            alpha = rr / (p @ q)
+            x += alpha * p
+            r -= alpha * q
+            rr_new = r @ r
+            p = r + (rr_new / rr) * p
+            rr = rr_new
+        result = reconstruct(operator, data, window)
+        np.testing.assert_allclose(
+            result, window * x.reshape(shape), rtol=1e-9, atol=1e-11
+        )
+        traced = jax.make_jaxpr(reconstruct)(operator, data, window)
+        assert not traced.consts
