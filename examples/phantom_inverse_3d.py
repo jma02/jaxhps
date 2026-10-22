@@ -162,13 +162,14 @@ class BackgroundBorn:
 
     @jax.jit
     def adjoint(self, data: jax.Array) -> jax.Array:
+        # Conjugate the small measurement array, not the cached volume fields.
         weighted = jnp.matmul(
-            data,
-            jnp.conj(self.reciprocal_fields),
+            jnp.conj(data),
+            self.reciprocal_fields,
             precision=jax.lax.Precision.HIGHEST,
         )
         return (
-            jnp.real(jnp.sum(jnp.conj(self.sources) * weighted, axis=0))
+            jnp.real(jnp.sum(self.sources * weighted, axis=0))
             .reshape(self.shape)
             .astype(self.dtype)
         )
