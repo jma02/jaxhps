@@ -26,7 +26,7 @@ The solver is the existing complex128 Vico–Greengard–Ferrando FFT volume
 integral implementation, with unpreconditioned FGMRES, restart 30, at most
 300 Arnoldi steps, and true relative residual tolerance 1e-8. It uses one
 plane wave in the +z direction. No repeated solves are timed. Setup includes
-CPU phantom sampling, kernel preparation, and synchronization; solve and
+phantom sampling, kernel preparation, and synchronization; solve and
 receiver evaluation are timed separately with their first JIT compilation.
 Process time includes imports and device startup. Memory is the JAX device
 allocator peak and process host RSS, not total GPU driver memory.
@@ -82,32 +82,36 @@ Following the memory/data-movement emphasis of
   embedding large device arrays in the compiled operator.
 - Reuses the Arnoldi basis when no preconditioner is present, donates basis
   updates, and conjugates vectors instead of the full basis matrix.
+- Samples the unchanged phantom ellipsoids on the GPU in bounded point
+  tiles, retaining coefficients on device rather than copying them back.
 
 These are implementation changes, not HPS subtree recomputation, adaptive
 meshing, or a new FFT quadrature. Setup and each operator application remain
 O(N log N); bounded-restart K-iteration solve work remains O(K N log N).
 
-On one A100 80GB PCIe, three fresh-process trials per implementation gave:
+On one A100-SXM4-80GB, three fresh-process trials per implementation gave:
 
 | Metric | Baseline | Optimized |
 | --- | ---: | ---: |
-| Median setup + first solve | 51.87 s | 26.30 s |
-| Range, setup + first solve | 50.58–52.01 s | 24.92–26.59 s |
-| Median first solve, including compilation | 31.44 s | 6.23 s |
+| Median setup + first solve | 57.59 s | 12.90 s |
+| Range, setup + first solve | 57.55–59.26 s | 12.86–13.03 s |
+| Median phantom sampling, including compilation | 21.82 s | 5.15 s |
+| Median first solve, including compilation | 34.38 s | 6.42 s |
 | Peak live JAX allocation during setup | 76.63 GB | 15.48 GB |
 | Peak live JAX allocation through solve | 76.63 GB | 42.23 GB |
 
 The benchmark uses the same dense seed-7 phantom, 288³ grid, 80 wavelengths
 across the box (1.25 mm for a 10 cm box), complex128, restart 30, and 1e-8
 true residual tolerance. Every solve took 40 iterations; final residuals
-were 9.59e-9. Relative differences were 3.38e-16 in the volume field and
-5.63e-16 or less at 512 receivers. This checks implementation equivalence,
+were 9.59e-9. Relative differences were 1.92e-16 in the sampled coefficient,
+3.21e-16 or less in the volume field and 5.03e-16 or less at 512 receivers.
+This checks implementation equivalence,
 not grid accuracy or thin-vessel recovery.
 
-Timings include CPU phantom sampling and initial compilation, but exclude
-process/device startup and receiver evaluation (about 1.4 s in both).
-The dominant runtime improvement is cold compilation/data handling, not a
-faster FFT primitive. Memory is peak *live JAX allocation*, not reserved or
+Timings include phantom sampling and initial compilation, but exclude
+process/device startup and receiver evaluation (1.3–1.4 s).
+The improvements are phantom sampling and cold compilation/data handling,
+not a faster FFT primitive. Memory is peak *live JAX allocation*, not reserved or
 driver memory: both processes used the same 95% preallocation setting.
 Trials ran sequentially, alternating order, with the persistent compilation
 cache disabled. No warmed repeated-solve timings enter this comparison;
@@ -124,4 +128,5 @@ Reproduce with the pre-optimization research branch as the baseline:
 This runs six fresh processes sequentially on one GPU, saves per-case
 JSON/logs, and stops automatically. Each process is capped at four minutes;
 the function is capped at thirty minutes. Baseline FFT/Krylov sources come
-from the requested git ref; phantom generation is shared and unchanged.
+from the requested git ref. Baseline sampling uses the CPU evaluator;
+optimized sampling uses the device evaluator with shared, unchanged geometry.

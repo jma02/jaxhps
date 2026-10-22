@@ -11,6 +11,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from lucka_phantom_3d import vascular_phantom
+from vascular_phantom_device import vascular_phantom_device
 
 
 def main() -> None:
@@ -58,9 +59,11 @@ def main() -> None:
         row["setup_memory"] = device.memory_stats()
         return result
 
-    def coefficient(points: np.ndarray) -> np.ndarray:
+    def coefficient(points: np.ndarray) -> np.ndarray | jax.Array:
         start = time.perf_counter()
-        result = vascular_phantom(points, a, "dense", 7)
+        sample = vascular_phantom if args.baseline else vascular_phantom_device
+        result = sample(points, a, "dense", 7)
+        jax.block_until_ready(result)
         row["coefficient_seconds"] = time.perf_counter() - start
         return result
 
@@ -96,11 +99,21 @@ def main() -> None:
 
     if args.baseline:
         np.save(args.reference, np.asarray(u))
+        np.save(args.reference.with_suffix(".coefficient.npy"), np.asarray(b))
     else:
         reference = np.load(args.reference)
         row["volume_relative_difference"] = float(
             np.linalg.norm(np.asarray(u) - reference)
             / np.linalg.norm(reference)
+        )
+        del reference
+        reference = np.load(args.reference.with_suffix(".coefficient.npy"))
+        row["coefficient_relative_difference"] = float(
+            np.linalg.norm(np.asarray(b) - reference)
+            / np.linalg.norm(reference)
+        )
+        row["coefficient_max_difference"] = float(
+            np.max(np.abs(np.asarray(b) - reference))
         )
         del reference
     index = np.arange(512)

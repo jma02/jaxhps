@@ -128,16 +128,9 @@ def vascular_geometry(variant="vascular", seed=7):
     return tuple(branches), tuple(lobules)
 
 
-def vascular_phantom(points, a=1.25, variant="vascular", seed=7):
-    """C4 synthetic pendant breast with tapering, curved vascular trees.
-
-    Coordinates are normalized by R=0.8a around z=0.55a. Overlapping
-    ellipsoidal bumps form vessels without nearest-segment distance joins.
-    This is a lossless scalar model, not a segmented anatomical phantom.
-    """
-    points = np.asarray(points, dtype=float)
-    if a <= 0 or points.shape[-1:] != (3,):
-        raise ValueError("positive half-width and (..., 3) points required")
+@lru_cache(maxsize=8)
+def vascular_ellipsoids(variant="vascular", seed=7):
+    """Return the normalized ellipsoids defining tissue and vessel unions."""
     branches, lobules = vascular_geometry(variant, seed)
     fibro_groups, vessel_groups = [], []
     for centre, axes, angle in lobules:
@@ -165,6 +158,20 @@ def vascular_phantom(points, a=1.25, variant="vascular", seed=7):
                 for centre, r, rotation in zip(centres, radii, rotations)
             ]
         )
+    return fibro_groups, vessel_groups
+
+
+def vascular_phantom(points, a=1.25, variant="vascular", seed=7):
+    """C4 synthetic pendant breast with tapering, curved vascular trees.
+
+    Coordinates are normalized by R=0.8a around z=0.55a. Overlapping
+    ellipsoidal bumps form vessels without nearest-segment distance joins.
+    This is a lossless scalar model, not a segmented anatomical phantom.
+    """
+    points = np.asarray(points, dtype=float)
+    if a <= 0 or points.shape[-1:] != (3,):
+        raise ValueError("positive half-width and (..., 3) points required")
+    fibro_groups, vessel_groups = vascular_ellipsoids(variant, seed)
     shape = points.shape[:-1]
     normalized = (points.reshape(-1, 3) - [0, 0, 0.55 * a]) / (0.8 * a)
     result = np.zeros(len(normalized))

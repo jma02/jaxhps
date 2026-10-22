@@ -70,10 +70,9 @@ def prepare_volume_solver(n, a, kappa, coefficient):
         raise ValueError("n>=4 and positive a,kappa required")
     axis = -a + (np.arange(n) + 0.5) * (2 * a / n)
     points = np.stack(np.meshgrid(axis, axis, axis, indexing="ij"), axis=-1)
-    b = np.asarray(coefficient(points))
-    if b.shape != points.shape[:-1] or not np.all(np.isfinite(b)):
+    b = jnp.asarray(coefficient(points))
+    if b.shape != points.shape[:-1] or not bool(jnp.all(jnp.isfinite(b))):
         raise ValueError("coefficient must be finite with shape (n,n,n)")
-    b = jnp.asarray(b)
     kernel = green_kernel(n, a, kappa)
 
     jax.block_until_ready(kernel)
