@@ -97,7 +97,9 @@ def test_born_operator_matches_forward_linearization():
 
 @pytest.mark.parametrize("double", [False, True])
 def test_cached_background_born_matches_jvp_and_adjoint(double):
-    with jax.enable_x64(double):
+    previous = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", double)
+    try:
         points, _, _ = crop(8)
         directions, receivers = sphere(3), 0.36 * sphere(7, 0.3)
         background = jnp.asarray(-0.06 * np.exp(-np.sum(points**2, -1) / 0.02))
@@ -130,3 +132,5 @@ def test_cached_background_born_matches_jvp_and_adjoint(double):
             rtol=20 * tol,
             atol=tol,
         )
+    finally:
+        jax.config.update("jax_enable_x64", previous)
