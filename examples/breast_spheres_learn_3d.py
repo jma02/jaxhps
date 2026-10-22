@@ -13,6 +13,7 @@ samples gives the classical comparison.
 import argparse
 import json
 import time
+from functools import partial
 from pathlib import Path
 
 import jax
@@ -22,12 +23,45 @@ from scipy.optimize import minimize
 
 from breast_phantom_3d import breast_n_of_x, fibonacci_cap_points
 from phantom_dataset_learn_3d import init_network, network
-from phantom_inverse_3d import make_background_born, make_forward
+from phantom_inverse_3d import (
+    BackgroundBorn,
+    make_background_born,
+    make_forward,
+)
 
 A = 1.2
 KVAL = 25.0
 THRESHOLD = 0.02
 Fields = tuple[jax.Array, jax.Array]
+
+
+@partial(jax.jit, static_argnames=("iterations",))
+def reconstruct_born(
+    operator: BackgroundBorn,
+    data: jax.Array,
+    window: jax.Array,
+    iterations: int,
+    damping: float,
+) -> jax.Array:
+    scale = jnp.sum(jnp.abs(data) ** 2)
+    rhs = window * operator.adjoint(data)
+
+    def step(_, state):
+        x, r, p, rr = state
+        q = window * operator.adjoint(
+            operator((window * p).astype(window.dtype))
+        )
+        q = q + damping * scale * p
+        alpha = rr / jnp.sum(p * q)
+        x = x + alpha * p
+        r = r - alpha * q
+        rr_new = jnp.sum(r * r)
+        p = r + (rr_new / rr) * p
+        return x, r, p, rr_new
+
+    state = (jnp.zeros_like(rhs), rhs, rhs, jnp.sum(rhs * rhs))
+    x, _, _, _ = jax.lax.fori_loop(0, iterations, step, state)
+    return window * x
 
 
 def sample_spheres(
@@ -102,7 +136,7 @@ def run(args: argparse.Namespace) -> None:
         f"seconds={time.monotonic() - start:.0f}",
         flush=True,
     )
-    jacobian, adjoint = make_background_born(
+    operator = make_background_born(
         points, kappa, directions, sensors, background_dev, args.tolerance
     )
     print(
@@ -110,30 +144,10 @@ def run(args: argparse.Namespace) -> None:
         flush=True,
     )
 
-    @jax.jit
     def born(data: jax.Array) -> jax.Array:
-        scale = jnp.sum(jnp.abs(data) ** 2)
-        rhs = window_dev * adjoint(data)
-
-        def normal(x: jax.Array) -> jax.Array:
-            y = window_dev * adjoint(
-                jacobian((window_dev * x).astype(jnp.float32))
-            )
-            return y + args.damping * scale * x
-
-        x = jnp.zeros_like(rhs)
-        r = rhs
-        p = r
-        rr = jnp.sum(r * r)
-        for _ in range(args.born_iterations):
-            q = normal(p)
-            alpha = rr / jnp.sum(p * q)
-            x = x + alpha * p
-            r = r - alpha * q
-            rr_new = jnp.sum(r * r)
-            p = r + (rr_new / rr) * p
-            rr = rr_new
-        return window_dev * x
+        return reconstruct_born(
+            operator, data, window_dev, args.born_iterations, args.damping
+        )
 
     observed, images = [], []
     for index, image in enumerate(truth):
