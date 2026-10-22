@@ -109,3 +109,37 @@ def test_fgmres_zero_rhs_and_breakdown(zero_rhs):
     x, info = fgmres(lambda v: v, b, precond=jnp.zeros_like)
     assert (info == 0) == zero_rhs
     np.testing.assert_array_equal(x, np.zeros(4))
+
+
+@pytest.mark.parametrize("preconditioned", [False, True])
+def test_restarted_complex_solve_preserves_inputs(preconditioned):
+    rng = np.random.default_rng(9)
+    A = jnp.asarray(
+        5 * np.eye(12)
+        + 0.3 * rng.normal(size=(12, 12))
+        + 0.3j * rng.normal(size=(12, 12))
+    )
+    rhs = jnp.asarray(rng.normal(size=(12, 2)) + 1j * rng.normal(size=(12, 2)))
+    x0 = jnp.ones_like(rhs) * (0.2 + 0.1j)
+    saved_rhs, saved_x0 = np.asarray(rhs).copy(), np.asarray(x0).copy()
+    stats = {}
+    x, info = fgmres(
+        lambda v: A @ v,
+        rhs,
+        x0=x0,
+        restart=3,
+        maxiter=60,
+        precond=(lambda v: v / jnp.diag(A)[:, None])
+        if preconditioned
+        else None,
+        tol=1e-11,
+        stats=stats,
+    )
+    assert info == 0
+    assert stats["n_cycles"] > 1
+    assert stats["final_rel_res"] <= 1e-11
+    np.testing.assert_allclose(
+        x, np.linalg.solve(A, rhs), rtol=1e-9, atol=1e-11
+    )
+    np.testing.assert_array_equal(rhs, saved_rhs)
+    np.testing.assert_array_equal(x0, saved_x0)

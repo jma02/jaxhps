@@ -17,7 +17,8 @@ from fft_volume_3d import (
     prepare_volume_solver,
     solve_volume,
 )
-from lucka_phantom_3d import VESSEL_TAPER, vascular_geometry, vascular_phantom
+from lucka_phantom_3d import VESSEL_TAPER, vascular_geometry
+from vascular_phantom_device import vascular_phantom_device
 
 
 def main():
@@ -72,7 +73,7 @@ def main():
         args.n,
         a,
         kappa,
-        lambda pts: vascular_phantom(pts, a, args.variant, args.seed),
+        lambda pts: vascular_phantom_device(pts, a, args.variant, args.seed),
     )
     row["setup_seconds"] = time.perf_counter() - t0
     row["coefficient_range"] = [float(b.min()), float(b.max())]
