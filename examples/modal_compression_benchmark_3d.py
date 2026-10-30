@@ -133,7 +133,7 @@ def main(
     sources: int = 24,
     receivers: int = 256,
     wavelength_mm: float = 1.25,
-    cases: str = "tucker-64,tucker-128,block-8-32,block-8-64,cp-256",
+    cases: str = "tucker-128,block-4-32,cp-256",
     budget_seconds: int = 5400,
     iterations: int = 50,
 ):

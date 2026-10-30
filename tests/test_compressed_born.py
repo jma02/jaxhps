@@ -9,6 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 from breast_spheres_learn_3d import reconstruct_born
 from compressed_born import (
+    CPFields,
     compress_blocks,
     compress_spatial,
     cp_fields,
@@ -17,6 +18,29 @@ from compressed_born import (
     tucker_fields,
 )
 from phantom_inverse_3d import BackgroundBorn
+
+
+def test_cp_slabs_with_rank_larger_than_spatial_modes():
+    rng = np.random.default_rng(31)
+    factors = [
+        jnp.asarray(
+            rng.normal(size=(2, n, 8)) + 1j * rng.normal(size=(2, n, 8)),
+            dtype=jnp.complex64,
+        )
+        for n in (5, 4, 3)
+    ]
+    fields = CPFields(*factors)
+    reference = np.pad(
+        np.einsum("fxa,fya,fza->fxyz", *map(np.asarray, factors)),
+        ((0, 0), (0, 1), (0, 0), (0, 0)),
+    )
+    for index in range(3):
+        np.testing.assert_allclose(
+            fields.slab(jnp.int32(index), 2).reshape(2, 2, 4, 3),
+            reference[:, 2 * index : 2 * index + 2],
+            atol=3e-5,
+            rtol=2e-5,
+        )
 
 
 @pytest.mark.parametrize("method", ["tucker", "block"])

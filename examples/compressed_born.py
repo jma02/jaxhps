@@ -106,10 +106,12 @@ class CPFields:
             self.first, ((0, 0), (0, (-self.shape[0]) % size), (0, 0))
         )
         first = jax.lax.dynamic_slice_in_dim(first, index * size, size, 1)
+        values = jnp.einsum(
+            "fxa,fya->fxya", first, self.second, precision=PRECISION
+        )
         return jnp.einsum(
-            "fxa,fya,fza->fxyz",
-            first,
-            self.second,
+            "fxya,fza->fxyz",
+            values,
             self.third,
             precision=PRECISION,
         ).reshape(self.first.shape[0], -1)
