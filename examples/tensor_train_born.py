@@ -6,12 +6,25 @@ Compression of an existing cache still requires that dense cache at setup.
 
 from dataclasses import dataclass
 from functools import partial
+from typing import Protocol
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 from phantom_inverse_3d import BackgroundBorn
+
+
+class SpatialFields(Protocol):
+    first: jax.Array
+
+    @property
+    def shape(self) -> tuple[int, int, int]: ...
+
+    @property
+    def nbytes(self) -> int: ...
+
+    def slab(self, index: jax.Array, size: int) -> jax.Array: ...
 
 
 @partial(
@@ -84,9 +97,9 @@ def compress_fields(
     meta_fields=["shape", "dtype", "slab_size"],
 )
 @dataclass(frozen=True)
-class TensorTrainBorn:
-    sources: TensorTrainFields
-    reciprocal_fields: TensorTrainFields
+class SlabBorn:
+    sources: SpatialFields
+    reciprocal_fields: SpatialFields
     shape: tuple[int, int, int]
     dtype: np.dtype
     slab_size: int = 4
@@ -123,7 +136,9 @@ class TensorTrainBorn:
                 self.sources.first.shape[0],
                 self.reciprocal_fields.first.shape[0],
             ),
-            dtype=self.sources.first.dtype,
+            dtype=jnp.result_type(
+                self.sources.first, self.reciprocal_fields.first, delta
+            ),
         )
         return jax.lax.fori_loop(
             0, (nx + padding) // self.slab_size, step, data
@@ -159,8 +174,8 @@ class TensorTrainBorn:
 
 def compress_born(
     operator: BackgroundBorn, rank: int, slab_size: int = 4
-) -> TensorTrainBorn:
-    return TensorTrainBorn(
+) -> SlabBorn:
+    return SlabBorn(
         compress_fields(operator.sources, operator.shape, rank),
         compress_fields(operator.reciprocal_fields, operator.shape, rank),
         operator.shape,

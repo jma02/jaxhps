@@ -18,7 +18,7 @@ import numpy as np
 
 from born_capacity_benchmark_3d import run as baseline_run
 from breast_spheres_learn_3d import reconstruct_born
-from tensor_train_born import TensorTrainBorn, TensorTrainFields, compress_born
+from tensor_train_born import SlabBorn, TensorTrainFields, compress_born
 
 
 def relative_error(actual, reference) -> float:
@@ -150,14 +150,19 @@ def evaluate(args) -> None:
             )
             for group in ("sources", "reciprocal_fields")
         ]
-    operator = TensorTrainBorn(
+    operator = SlabBorn(
         *fields, fields[0].shape, np.dtype("float32"), args.slab_size
     )
+    evaluate_operator(operator, args)
+
+
+def evaluate_operator(operator, args) -> None:
     with np.load(args.directory / "reference.npz") as stored:
         reference = {key: jnp.asarray(stored[key]) for key in stored.files}
     jax.block_until_ready((operator, reference))
     row = dict(
-        rank=rank,
+        rank=args.rank,
+        method=getattr(args, "method", "tt"),
         slab_size=args.slab_size,
         field_storage_bytes=operator.nbytes,
         device=jax.devices()[0].device_kind,
@@ -171,7 +176,12 @@ def evaluate(args) -> None:
             dict(stage=stage, memory=jax.devices()[0].memory_stats())
         )
         (
-            args.directory / f"evaluation-{rank}-slab-{args.slab_size}.json"
+            args.directory
+            / getattr(
+                args,
+                "report_name",
+                f"evaluation-{args.rank}-slab-{args.slab_size}.json",
+            )
         ).write_text(json.dumps(row, indent=2))
         print(json.dumps(row), flush=True)
 
