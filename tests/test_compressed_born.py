@@ -113,7 +113,9 @@ def test_truncated_adjoint_and_differentiation(method):
                 for s in range(3)
             ]
         )
-        receivers = operator.receiver_basis @ operator.receiver_core
+        receivers = (
+            operator.receiver_basis.swapaxes(0, 1) @ operator.receiver_core
+        )
         receivers = np.stack(
             [
                 np.asarray(from_blocks(receivers[:, r], shape, 2)).ravel()

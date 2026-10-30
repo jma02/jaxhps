@@ -101,7 +101,7 @@ def compress(args: argparse.Namespace) -> None:
                 shape=shape,
             )
             for name, shape in (
-                ("basis", (count, operator.reciprocal_fields.shape[0], rank)),
+                ("basis", (operator.reciprocal_fields.shape[0], count, rank)),
                 ("core", (count, rank, args.block_size**3)),
             )
         ]
@@ -109,13 +109,14 @@ def compress(args: argparse.Namespace) -> None:
         for first in range(0, count, 1024):
             last = min(first + 1024, count)
             factors = compress_receiver_blocks(
-                operator.reciprocal_fields.reshape((-1, *operator.shape)),
+                operator.reciprocal_fields,
                 jnp.arange(first, last),
+                operator.shape,
                 rank,
                 args.block_size,
             )
-            for output, factor in zip(outputs, factors):
-                output[first:last] = np.asarray(factor)
+            outputs[0][:, first:last] = np.asarray(factors[0]).swapaxes(0, 1)
+            outputs[1][first:last] = np.asarray(factors[1])
             if first % (16 * 1024) == 0:
                 print(
                     f"Compressed receiver blocks: {last}/{count}", flush=True

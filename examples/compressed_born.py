@@ -276,13 +276,13 @@ class BlockBorn:
             weighted, self.receiver_core.swapaxes(-1, -2), precision=PRECISION
         )
         return jnp.einsum(
-            "bsk,brk->sr", reduced, self.receiver_basis, precision=PRECISION
+            "bsk,rbk->sr", reduced, self.receiver_basis, precision=PRECISION
         )
 
     @jax.jit
     def adjoint(self, data: jax.Array) -> jax.Array:
         reduced = jnp.einsum(
-            "sr,brk->bsk",
+            "sr,rbk->bsk",
             data.conj(),
             self.receiver_basis,
             precision=PRECISION,
@@ -304,15 +304,16 @@ def compress_blocks(
         np.prod([(n + block_size - 1) // block_size for n in operator.shape])
     )
     basis, core = compress_receiver_blocks(
-        operator.reciprocal_fields.reshape((-1, *operator.shape)),
+        operator.reciprocal_fields,
         jnp.arange(count),
+        operator.shape,
         rank,
         block_size,
         batch_size,
     )
     return BlockBorn(
         to_blocks(operator.sources.reshape((-1, *operator.shape)), block_size),
-        basis,
+        basis.swapaxes(0, 1),
         core,
         operator.shape,
         operator.dtype,
@@ -320,10 +321,13 @@ def compress_blocks(
     )
 
 
-@partial(jax.jit, static_argnames=("rank", "block_size", "batch_size"))
+@partial(
+    jax.jit, static_argnames=("shape", "rank", "block_size", "batch_size")
+)
 def compress_receiver_blocks(
     fields: jax.Array,
     indices: jax.Array,
+    shape: tuple[int, int, int],
     rank: int,
     block_size: int,
     batch_size: int = 16,
@@ -332,8 +336,8 @@ def compress_receiver_blocks(
         raise ValueError("rank, block_size, and batch_size must be positive")
     # Padding and extracting small batches avoids a second full receiver cache.
     receivers = jnp.pad(
-        fields,
-        [(0, 0), *((0, (-n) % block_size) for n in fields.shape[-3:])],
+        fields.reshape((-1, *shape)),
+        [(0, 0), *((0, (-n) % block_size) for n in shape)],
     )
     _, ny, nz = (n // block_size for n in receivers.shape[-3:])
     r = min(rank, receivers.shape[0], block_size**3)
