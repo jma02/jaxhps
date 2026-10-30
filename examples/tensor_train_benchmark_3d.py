@@ -204,6 +204,14 @@ def evaluate_operator(operator, args) -> None:
     row["adjoint_application_relative_error"] = relative_error(
         adjoint, reference["adjoint"]
     )
+    row["masked_adjoint_application_relative_error"] = relative_error(
+        window * adjoint, window * reference["adjoint"]
+    )
+    if "normal_random" in reference:
+        row["masked_normal_application_relative_error"] = relative_error(
+            window * operator.adjoint(operator(reference["random_image"])),
+            reference["normal_random"],
+        )
     lhs = float(jnp.real(jnp.vdot(vessel_data, reference["probe"])))
     right = float(jnp.vdot(delta, adjoint))
     row["adjoint_identity_relative_error"] = abs(lhs - right) / max(

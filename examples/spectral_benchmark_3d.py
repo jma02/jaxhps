@@ -255,6 +255,9 @@ def dense_reference(args: argparse.Namespace) -> None:
     reference.update(
         full_random_image=full_random, full_random_data=operator(full_random)
     )
+    reference["normal_random"] = window * operator.adjoint(
+        reference["random_data"]
+    )
     np.savez(args.directory / "reference.npz", **jax.device_get(reference))
     args.method = "dense"
     args.report_name = "evaluation-dense.json"
