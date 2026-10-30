@@ -170,9 +170,9 @@ def evaluate(args) -> None:
         row["stages"].append(
             dict(stage=stage, memory=jax.devices()[0].memory_stats())
         )
-        (args.directory / f"evaluation-{rank}.json").write_text(
-            json.dumps(row, indent=2)
-        )
+        (
+            args.directory / f"evaluation-{rank}-slab-{args.slab_size}.json"
+        ).write_text(json.dumps(row, indent=2))
         print(json.dumps(row), flush=True)
 
     checkpoint("loaded_compressed_only")

@@ -1,4 +1,4 @@
-"""Bounded TT rank sweep on one A100; evaluation uses fresh GPU processes."""
+"""Bounded TT rank/slab sweep on one A100 with fresh evaluation processes."""
 
 import json
 import os
@@ -24,7 +24,9 @@ app = modal.App("jaxhps-born-tensor-train")
     scaledown_window=2,
     retries=0,
 )
-def measure(n, sources, receivers, wavelength_mm, ranks, budget_seconds):
+def measure(
+    n, sources, receivers, wavelength_mm, ranks, slab_sizes, budget_seconds
+):
     if not 1 <= budget_seconds <= 5400:
         raise ValueError("budget must be between 1 and 5400 seconds")
     directory = Path("/root/tt-born")
@@ -60,8 +62,11 @@ def measure(n, sources, receivers, wavelength_mm, ranks, budget_seconds):
             str(directory),
             "--rank",
             str(rank),
+            "--slab-size",
+            str(slab_size),
         ]
         for rank in ranks
+        for slab_size in slab_sizes
     ]
     deadline = time.monotonic() + budget_seconds
     results = []
@@ -121,6 +126,7 @@ def main(
     receivers: int = 256,
     wavelength_mm: float = 1.25,
     ranks: str = "32,64,128",
+    slab_sizes: str = "4",
     budget_seconds: int = 5400,
 ):
     destination = Path(out)
@@ -132,6 +138,7 @@ def main(
         receivers,
         wavelength_mm,
         [int(r) for r in ranks.split(",")],
+        [int(s) for s in slab_sizes.split(",")],
         budget_seconds,
     )
     destination.write_text(json.dumps(row, indent=2))
