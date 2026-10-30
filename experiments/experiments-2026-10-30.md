@@ -200,3 +200,153 @@ to the existing dense-field CG implementation. The 32³ A100 end-to-end smoke
 passes at all three ranks; its accuracy is not target-resolution evidence.
 Ruff, formatting, syntax compilation, and pre-commit pass; the project has no
 configured static type-checker command.
+
+## Tucker, CP, and directly contracted receiver blocks
+
+| Time (UTC) | Motivation | What Tried / Evidence | Correctness | Timing | Merge Decision |
+| --- | --- | --- | --- | --- | --- |
+| 06:43 | Test whether alternative spatial decompositions improve TT's storage/accuracy trade-off, and whether direct contractions avoid its expansion overhead. | Sequential Tucker/HOSVD, complex CP-ALS on Tucker cores, and local receiver SVDs; compare against dense fields and TT at 288³. Tucker 128 stores 4.945 GB with 0.342% whole-vessel signal error. CP 256 stores 0.495 GB but introduces 11.44% signal error. | All real-adjoint checks and 41 focused tests pass. Stabilized overcomplete CP fits and bounded its slab contraction. Every reconstructed image still has about 99.93% vessel-contrast error. | Field preparation ≈00:08; direct-block factorization 00:26. Per-solve timings below. | Retain as opt-in experiments. Tucker is the strongest tested storage/fidelity option; none is a compelling speed replacement for dense fields. No anatomical-recovery claim. |
+
+### Matched problem and application results
+
+Same 288³ grid, 100 mm box, 1.25 mm wavelength, dense vascular phantom seed 7,
+24 plane waves, 256 receivers, lower-hemispherical aperture, complex64 fields,
+and eight regularized CG iterations as the TT experiment above. Spatial tensor
+methods use 32-plane slabs. Times below are **medians of three warm repetitions**,
+not the means used in the earlier TT table. All storage is decimal GB and excludes
+workspace. The dense reference is the uncompressed matrix-free field cache,
+not an explicitly stored 1.17 TB Born matrix.
+
+| Representation | Storage (GB) | Whole-vessel signal error | Random-image signal error | Adjoint application error | Eight-step CG (s) | CG / own dense baseline |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Dense fields | 53.509 | Reference | Reference | Reference | 1.529–1.643 | 1.00 |
+| TT 128 | 10.735 | 0.256% | 0.208% | 0.0754% | 12.263 | 7.46 |
+| Tucker 64 | 0.711 | 6.569% | 10.112% | 4.744% | 7.134 | 4.34 |
+| Tucker 128 | 4.945 | 0.342% | 0.270% | 0.0989% | 14.678 | 8.93 |
+| CP 256, Tucker core 64³ | 0.495 | 11.441% | 19.513% | 10.477% | 16.291 | 10.61 |
+| Direct blocks 4³, rank 32 | 35.163 | 1.991% | 1.015% | 2.323% | 1.474 | 0.964 |
+
+TT/Tucker ran on an A100 80GB PCIe (dense median 1.643 s); blocks ran on an
+A100-SXM4-80GB (1.529 s); CP ran on another SXM4 allocation (1.535 s).
+Ratios use each allocation's own dense baseline. Cross-method wall-clock
+comparisons remain approximate, not perfectly matched-device measurements.
+
+Tucker 128 gives **10.8× less stored-field memory**, versus TT 128's 5.0×,
+while maintaining sub-percent signal fidelity for these probes. Both still
+reconstruct spatial slabs, so neither accelerates CG here. Direct blocks are
+only 3.6% faster in this run, while adding 1.99% signal error and expensive setup.
+The much smaller CP representation is inaccurate at the tested core/rank/budget;
+this does not rule out different CP ranks, cores, initialization, or solvers.
+
+### Field and inverse-problem checks
+
+| Representation | Source-field error, global / worst | Receiver-field error, global / worst | Normal residual | Data residual | Change from dense CG image |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| TT 128 | 0.0719% / 0.202% | 0.0431% / 0.128% | 1.86e-6 | 4.36e-5 | 0.265% |
+| Tucker 64 | 2.949% / 5.272% | 4.053% / 6.514% | 1.71e-6 | 4.42e-5 | 11.533% |
+| Tucker 128 | 0.0856% / 0.217% | 0.0647% / 0.153% | 1.84e-6 | 4.36e-5 | 0.336% |
+| CP 256 | 5.766% / 7.290% | 9.339% / 11.910% | 1.80e-6 | 4.59e-5 | 21.093% |
+| Direct blocks 4³, rank 32 | Exact | Not measured globally | 2.25e-6 | 4.36e-5 | 1.092% |
+
+The maximum relative real-adjoint identity error is 1.58e-6. Application errors
+above compare against the dense operator; adjoint identities instead test each
+approximate operator against its own adjoint. Residuals are for the corresponding
+compressed normal equation and data fit. **All contrast-image errors remain
+99.928–99.931% relative to the vessel ground truth.** A small residual or small
+change from the dense image therefore does not establish vessel recovery.
+
+### Setup and memory
+
+| Representation | Compression (s) | Compression peak live (GB) | Evaluation peak live (GB) | Evaluation peak pool (GB) |
+| --- | ---: | ---: | ---: | ---: |
+| TT 128 | 34.00 | 74.267 | 20.163 | 35.442 |
+| Tucker 64 | 38.25 | 55.042 | 9.027 | 11.023 |
+| Tucker 128 | 43.61 | 63.034 | 14.427 | 35.467 |
+| CP 256 | 114.88 | 55.047 | 12.572 | 19.394 |
+| Direct blocks 4³, rank 32 | 1536.64 | 76.441 | 43.003 | 77.309 |
+
+Dense field preparation took 474.63 s for TT/Tucker, 455.57 s for blocks, and
+456.24 s for CP, with a 63.231 GB live-allocation peak and 80.862 GB reserved
+pool. Compression starts from that dense cache; **none of these builders removes
+its memory requirement or preparation cost**. Compression peaks are sampled
+before subsequent field-error validation, not peaks of the entire workflow.
+The block timing includes streamed factor writes; other compression timings
+exclude serialization and field-error checks. Evaluation uses fresh processes
+without dense fields, and includes comparison fixtures and CG workspace.
+These are JAX allocator high-water marks, not total driver usage or minimum GPU
+capacity. In particular, 4.945 GB of Tucker factors does not mean a 5 GB GPU can
+run this pipeline.
+
+### What is compressed
+
+- **Tucker:** sequential spatial HOSVD per stored source/receiver field, retaining
+  three factor matrices and a core. This is field-cache compression, not a
+  factorization of the full source–receiver Born matrix.
+- **CP:** rank-256 complex CP-ALS on a rank-64 Tucker core, with 50 sweeps and two
+  deterministic restarts. Trace-scaled ridge regularization and selection of the
+  best finite iterate prevent unstable overcomplete fits. A complex64 rank-64
+  fit to a separable 8×7×6 field produced NaNs before this fix and relative error
+  8.84e-7 afterward. Earlier unstable CP measurements are superseded, not evidence
+  about attainable CP accuracy. Explicit slab-local contractions also resolve
+  the full-size validation OOM, which requested a 59.2 GB temporary allocation.
+- **Direct blocks:** approximate reciprocal fields within each spatial block as
+  `W[r,v] ≈ sum_a U[r,b,a] V[b,a,v]`, while retaining source samples exactly.
+  Apply `d[s,r] = sum_(b,a) U[r,b,a] sum_(v in b) S[s,v] delta[v] V[b,a,v]`.
+  No full receiver field is reconstructed during application. This is a directly
+  contracted local receiver-mode factorization, not a full Born-matrix SVD.
+  Compression streams factors to disk and keeps receiver reshaping inside JIT
+  to avoid an extra 48.9 GB dense-cache copy.
+
+At full resolution, three sampled **8³** blocks give these numerical ranks for
+relative Frobenius tails (not worst-case operator bounds):
+
+| Tail tolerance | Receiver block, 256×512 | Full source–receiver Born block, 6144×512 |
+| --- | ---: | ---: |
+| 10% | 50–56 | 220–238 |
+| 1% | 85–93 | 340–355 |
+| 0.1% | 118–128 | 442–445 |
+
+The full local Born blocks are much less compressible than receiver blocks.
+These three samples do not establish ranks across the whole volume, nor rule
+out phase-aware hierarchical methods. A larger 6³/rank-48 block case was stopped
+before completion after the 4³ result showed limited benefit and high setup
+cost; no full-volume result is claimed for it.
+
+No hierarchical Tucker, QTT, tensor-butterfly, phase-compensated interpolation,
+FMM, or MLFMA implementation is included. Published Green-function and
+translation-tensor compression results concern different operators and are not
+evidence that this heterogeneous breast Born map has the same ranks or speedups.
+There is no learned-recovery, training-memory, clinical-count, or multi-frequency
+evaluation here. The next speed question is whether phase-aware/hierarchical
+structure permits fast direct application, rather than further slab tuning.
+
+### Reproduce the comparison
+
+The default bounded run includes Tucker 128, direct blocks 4³/rank 32, and CP 256:
+
+```sh
+.venv/bin/modal run examples/modal_compression_benchmark_3d.py \
+  --out /existing/directory/new-comparison.json
+```
+
+To include the additional TT/Tucker reference points:
+
+```sh
+.venv/bin/modal run examples/modal_compression_benchmark_3d.py \
+  --cases tt-128,tucker-64,tucker-128,block-4-32,cp-256 \
+  --out /existing/directory/new-expanded-comparison.json
+```
+
+Each allocation is capped at one A100-80GB, no retries, 5,400 seconds of subprocess
+work, and fresh evaluation processes. A small interface smoke test can use
+`--n 48 --wavelength-mm 7.5 --cases tucker-16,cp-32,block-4-16`.
+Stages `prepare`, `compress`, `evaluate`, and `screen` are also available through
+`examples/compression_benchmark_3d.py`; use a new process for each evaluation.
+No neural network is trained.
+
+Forty-one focused tests pass across compressed Born operators, TT, inverse/FFT,
+and phantom sampling. Coverage includes complex64/128, rectangular grids,
+non-dividing slabs/blocks, real adjoints, truncated operators, gradients through
+applications and CG, complex known-rank CP fits, overcomplete CP stability, and
+slab contraction with rank larger than spatial modes. Ruff, formatting, syntax
+compilation, and pre-commit pass. No static type-checker is configured.
