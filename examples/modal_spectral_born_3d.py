@@ -139,10 +139,10 @@ def main(
     sources: int = 24,
     receivers: int = 256,
     wavelength_mm: float = 1.25,
-    tolerances: str = "0.01,0.003",
-    batches: str = "2",
+    tolerances: str = "0.003",
+    batches: str = "8,24",
     budget_seconds: int = 5400,
-    basis: str = "dct",
+    basis: str = "fft",
     taper_floor: float = 0.01,
     tucker_rank: int = 0,
 ):

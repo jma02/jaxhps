@@ -353,9 +353,16 @@ compilation, and pre-commit pass. No static type-checker is configured.
 
 ## Streamed setup and directly contracted spectral receiver fields
 
+**Best tested choices:** streamed Tucker for compact storage; direct Fourier
+contraction for faster breast-masked solves. The final Fourier batch sweep
+reaches **1.095 s versus 1.529 s dense CG** (1.40× speedup), with **17.312 GB
+stored versus 53.509 GB** and **0.256% whole-vessel Born-signal error**. This is
+not uniform full-grid accuracy, and it does not improve vessel recovery.
+
 | Time (UTC) | Motivation | What Tried / Evidence | Correctness | Timing | Merge Decision |
 | --- | --- | --- | --- | --- | --- |
 | 08:16 | Avoid the dense GPU field cache during setup and repeated receiver-field expansion during CG. | Solve one background field at a time; build Tucker factors and shared Fourier coefficients incrementally. Compare direct spectral applications against dense fields on the same A100-SXM4-80GB. | Setup peaks at 14.142 GB live GPU allocation. Tucker preserves its previous field/signal accuracy. Fourier truncation has much larger errors outside the reconstruction region than inside it. | Combined streamed field generation, both representations, checks, and disk writes: 688.90 s. Four-source Fourier batches: 1.461 s at 1.424% vessel-signal error or 2.191 s at 0.256%; dense: 1.528 s. | Retain streamed Tucker as the compact, accurate option; retain Fourier as an experimental speed/memory trade-off, not a uniformly accurate full-grid operator. |
+| 08:30 | Reuse receiver coefficients across more sources per contraction, and check errors on the actual masked inverse problem. | Repeat the 0.3% tapered-field tail with source batches 4/8/12/24 and add masked-adjoint and masked-normal probes. Same A100-SXM4-80GB model, fresh dense reference. | Vessel/random masked signal errors 0.256%/0.299%; masked adjoint 0.297%; masked normal application 0.431%. Full-grid errors remain about 4.95%. | Best eight-step CG 1.095 s, versus 1.529 s dense, at 27.632 GB peak live allocation. | Prefer larger source batches when workspace permits; preserve the explicit mask-dependent accuracy limitation. |
 
 ### What changed
 
@@ -455,12 +462,51 @@ errors were 0.0647%/0.153%. These match the preceding dense-cache construction.
 Its larger allocation-pool figure is workspace/allocator overhead, not stored
 factor size.
 
+### Source-batch tuning and masked-operator checks
+
+The second full-resolution allocation used the same geometry, data, 6,201,432
+retained modes, and taper. It omitted Tucker compression during preparation and
+added two diagnostics: `P B*` on a random data probe and `P B* B P` on a random
+contrast, where `P` is the fixed breast reconstruction mask. These are sampled
+application errors, not operator-norm estimates. The additional stored normal
+probe adds approximately 0.096 GB to evaluation memory relative to the first run.
+
+| Source batch | Warm eight-step CG (s) | Time / same-run dense | Peak live evaluation (GB) | Allocator high-water mark (GB) |
+| --- | ---: | ---: | ---: | ---: |
+| Dense reference | 1.529 | 1.000 | 59.433 | 80.862 |
+| 4 | 2.182 | 1.427 | 20.179 | 25.770 |
+| 8 | 1.421 | 0.930 | 21.708 | 25.770 |
+| 12 | 1.198 | 0.783 | 23.236 | 38.303 |
+| 24 | 1.095 | 0.716 | 27.632 | 38.303 |
+
+For every batch, masked-adjoint error is **0.297%**, masked-normal application
+error **0.431%**, and image change from dense approximately **0.341%**. The
+full-grid random-image/adjoint errors remain **4.942%/4.950%**. Thus the speed
+gain does not require relaxing the retained-mode tolerance, but the accuracy
+case is specifically for the existing breast-masked problem. This is not a
+drop-in guarantee for other contrast supports, phantoms, or frequencies.
+
+The batch-24 real-adjoint identity error is 7.98e-6 and its normal-equation
+residual 4.11e-6; both pass the existing numerical gates. All images retain
+approximately 99.93% vessel-contrast error. No improved anatomical recovery or
+network-training memory claim follows from these timings.
+
+Streamed field preparation without Tucker took 624.61 s, including dense and
+spectral disk writes; compact coefficient selection/writes took 50.61 s. Setup
+again peaked at 14.142 GB live / 30.065 GB allocated-pool memory. These timings
+include different disk work from the earlier dense-cache-only setup and should
+not be interpreted as eliminating setup cost.
+
 ### Reproduction and validation
 
 ```sh
 .venv/bin/modal run examples/modal_spectral_born_3d.py \
   --basis fft --tolerances 0.01,0.003 --batches 2,4 --tucker-rank 128 \
   --out /existing/directory/new-spectral-comparison.json
+
+.venv/bin/modal run examples/modal_spectral_born_3d.py \
+  --basis fft --tolerances 0.003 --batches 4,8,12,24 \
+  --out /existing/directory/new-spectral-batches.json
 ```
 
 The runner uses one A100-80GB, sequential cases, no retries, and a 5,400-second

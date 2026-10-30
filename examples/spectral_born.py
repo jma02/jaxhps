@@ -57,6 +57,7 @@ class SpectralBorn:
     """Store DCT(receiver) or FFT(taper * receiver) coefficients.
 
     For the Fourier basis, sources must be divided by the same positive taper.
+    Forward uses IFFT because the Born field contraction is bilinear.
     Truncation errors can be amplified where the taper is small; its spectral
     tail tolerance is not an error bound for the original Born operator.
     """
