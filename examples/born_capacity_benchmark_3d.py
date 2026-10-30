@@ -25,6 +25,46 @@ from phantom_inverse_3d import (
 from vascular_phantom_device import _sample
 
 
+def capacity_problem(
+    n: int, wavelength_mm: float, sources: int, receivers: int
+) -> tuple[
+    np.ndarray, float, np.ndarray, np.ndarray, jax.Array, jax.Array, jax.Array
+]:
+    a = 1.25
+    axis = -a + (np.arange(n) + 0.5) * (2 * a / n)
+    points = np.stack(np.meshgrid(axis, axis, axis, indexing="ij"), -1)
+    families = vascular_ellipsoids("dense", 7)
+    jax.config.update("jax_enable_x64", True)
+    xyz = jnp.asarray(points)
+    fibro, vessels = (
+        tuple(
+            jnp.asarray(np.stack(values))
+            for values in zip(*(shape for group in family for shape in group))
+        )
+        for family in families
+    )
+    truth = _sample(xyz, a, fibro, vessels, 8192).astype(jnp.float32)
+    background = _sample(
+        xyz, a, fibro, tuple(value[:0] for value in vessels), 8192
+    ).astype(jnp.float32)
+    p = (xyz - jnp.array([0, 0, 0.55 * a])) / (0.8 * a)
+    window = (
+        (jnp.linalg.norm(p / jnp.array([0.92, 0.82, 1]), axis=-1) < 0.97)
+        & (p[..., 2] < 0)
+    ).astype(jnp.float32)
+    jax.block_until_ready((truth, background, window))
+    jax.config.update("jax_enable_x64", False)
+    if float(jnp.linalg.norm(truth - background)) == 0:
+        raise RuntimeError("Grid does not sample the vessel contrast")
+    kappa = 2 * np.pi / (wavelength_mm / 40)
+    targets = fibonacci_cap_points(receivers, 2.5, 0.1)[:, [0, 2, 1]]
+    emitters = fibonacci_cap_points(sources, 2.5, 0.1)[:, [0, 2, 1]]
+    targets[:, 2] *= -1
+    emitters[:, 2] *= -1
+    directions = -emitters / np.linalg.norm(emitters, axis=-1, keepdims=True)
+    return points, kappa, directions, targets, truth, background, window
+
+
 def run(
     args: argparse.Namespace,
 ) -> tuple[BackgroundBorn, jax.Array, jax.Array, jax.Array]:
@@ -62,43 +102,14 @@ def run(
         print(json.dumps(row["stages"][-1]), flush=True)
 
     checkpoint("starting")
-    n, a = args.n, 1.25
-    axis = -a + (np.arange(n) + 0.5) * (2 * a / n)
-    points = np.stack(np.meshgrid(axis, axis, axis, indexing="ij"), -1)
-    families = vascular_ellipsoids("dense", 7)
-    jax.config.update("jax_enable_x64", True)
-    xyz = jnp.asarray(points)
-    fibro, vessels = (
-        tuple(
-            jnp.asarray(np.stack(values))
-            for values in zip(*(shape for group in family for shape in group))
+    points, kappa, directions, receivers, truth, background, window = (
+        capacity_problem(
+            args.n, args.wavelength_mm, args.sources, args.receivers
         )
-        for family in families
     )
-    truth = _sample(xyz, a, fibro, vessels, 8192).astype(jnp.float32)
-    background = _sample(
-        xyz, a, fibro, tuple(value[:0] for value in vessels), 8192
-    ).astype(jnp.float32)
-    p = (xyz - jnp.array([0, 0, 0.55 * a])) / (0.8 * a)
-    window = (
-        (jnp.linalg.norm(p / jnp.array([0.92, 0.82, 1]), axis=-1) < 0.97)
-        & (p[..., 2] < 0)
-    ).astype(jnp.float32)
-    jax.block_until_ready((truth, background, window))
-    jax.config.update("jax_enable_x64", False)
     delta = truth - background
-    if float(jnp.linalg.norm(delta)) == 0:
-        raise RuntimeError("Grid does not sample the vessel contrast")
-    del xyz, p, fibro, vessels
     gc.collect()
     checkpoint("phantom_sampled")
-
-    kappa = 2 * np.pi / (args.wavelength_mm / 40)
-    receivers = fibonacci_cap_points(args.receivers, 2.5, 0.1)[:, [0, 2, 1]]
-    emitters = fibonacci_cap_points(args.sources, 2.5, 0.1)[:, [0, 2, 1]]
-    receivers[:, 2] *= -1
-    emitters[:, 2] *= -1
-    directions = -emitters / np.linalg.norm(emitters, axis=-1, keepdims=True)
     checkpoint("forward_setup_started")
     start = time.perf_counter()
     forward = make_forward(points, kappa, directions, receivers, 1e-6)

@@ -30,6 +30,7 @@ from phantom_inverse_3d import (
 )
 from tensor_train_born import SlabBorn
 from compressed_born import BlockBorn
+from spectral_born import SpectralBorn
 
 A = 1.2
 KVAL = 25.0
@@ -39,7 +40,7 @@ Fields = tuple[jax.Array, jax.Array]
 
 @partial(jax.jit, static_argnames=("iterations",))
 def reconstruct_born(
-    operator: BackgroundBorn | SlabBorn | BlockBorn,
+    operator: BackgroundBorn | SlabBorn | BlockBorn | SpectralBorn,
     data: jax.Array,
     window: jax.Array,
     iterations: int,

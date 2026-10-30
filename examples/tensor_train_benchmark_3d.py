@@ -196,6 +196,11 @@ def evaluate_operator(operator, args) -> None:
     row["random_image_signal_relative_error"] = relative_error(
         operator(reference["random_image"]), reference["random_data"]
     )
+    if "full_random_image" in reference:
+        row["full_grid_random_signal_relative_error"] = relative_error(
+            operator(reference["full_random_image"]),
+            reference["full_random_data"],
+        )
     row["adjoint_application_relative_error"] = relative_error(
         adjoint, reference["adjoint"]
     )
@@ -208,6 +213,7 @@ def evaluate_operator(operator, args) -> None:
         not np.isfinite(row["adjoint_identity_relative_error"])
         or row["adjoint_identity_relative_error"] > 1e-4
     ):
+        checkpoint("operator_check_failed")
         raise RuntimeError("Real-adjoint identity failed")
     checkpoint("operator_checked")
     for name, call in (
