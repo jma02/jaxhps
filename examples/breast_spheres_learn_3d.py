@@ -28,7 +28,8 @@ from phantom_inverse_3d import (
     make_background_born,
     make_forward,
 )
-from tensor_train_born import TensorTrainBorn
+from tensor_train_born import SlabBorn
+from compressed_born import BlockBorn
 
 A = 1.2
 KVAL = 25.0
@@ -38,7 +39,7 @@ Fields = tuple[jax.Array, jax.Array]
 
 @partial(jax.jit, static_argnames=("iterations",))
 def reconstruct_born(
-    operator: BackgroundBorn | TensorTrainBorn,
+    operator: BackgroundBorn | SlabBorn | BlockBorn,
     data: jax.Array,
     window: jax.Array,
     iterations: int,
