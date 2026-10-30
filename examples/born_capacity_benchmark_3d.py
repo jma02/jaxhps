@@ -17,11 +17,17 @@ import numpy as np
 from breast_phantom_3d import fibonacci_cap_points
 from breast_spheres_learn_3d import reconstruct_born
 from lucka_phantom_3d import vascular_ellipsoids
-from phantom_inverse_3d import make_background_born, make_forward
+from phantom_inverse_3d import (
+    BackgroundBorn,
+    make_background_born,
+    make_forward,
+)
 from vascular_phantom_device import _sample
 
 
-def run(args: argparse.Namespace) -> None:
+def run(
+    args: argparse.Namespace,
+) -> tuple[BackgroundBorn, jax.Array, jax.Array, jax.Array]:
     jax.config.update("jax_enable_x64", False)
     device = jax.devices()[0]
     started = time.perf_counter()
@@ -205,6 +211,7 @@ def run(args: argparse.Namespace) -> None:
     row["completed"] = True
     row["cg_converged"] = row["cg"][-1]["normal_relative_residual"] < 1e-4
     checkpoint("finished")
+    return operator, data, window, delta
 
 
 if __name__ == "__main__":
