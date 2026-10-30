@@ -121,7 +121,7 @@ class CPFields:
 def cp_fields(
     tucker: TuckerFields, rank: int, iterations: int = 50, restarts: int = 2
 ) -> CPFields:
-    """Complex CP-ALS on a Tucker core; retain the best deterministic restart."""
+    """Complex CP-ALS on a Tucker core; retain the best finite iterate."""
     if min(rank, iterations, restarts) < 1:
         raise ValueError("rank, iterations, and restarts must be positive")
 
@@ -129,13 +129,21 @@ def cp_fields(
         scale = jnp.maximum(jnp.linalg.norm(core), 1e-30)
         target = core / scale
 
-        def restart(key: jax.Array) -> tuple[jax.Array, ...]:
+        def restart(
+            key: jax.Array,
+        ) -> tuple[tuple[jax.Array, ...], jax.Array]:
             factors = tuple(
                 jax.random.normal(k, (n, rank), dtype=core.dtype) / jnp.sqrt(n)
                 for k, n in zip(jax.random.split(key, 3), core.shape)
             )
 
-            def step(_: int, factors: tuple[jax.Array, ...]):
+            def step(
+                _: int,
+                state: tuple[
+                    tuple[jax.Array, ...], tuple[jax.Array, ...], jax.Array
+                ],
+            ):
+                factors, best, best_error = state
                 factors = list(factors)
                 for axis in range(3):
                     others = [factors[i] for i in range(3) if i != axis]
@@ -149,9 +157,7 @@ def cp_fields(
                         others[1].conj(),
                         precision=PRECISION,
                     )
-                    ridge = 1e-6 * jnp.maximum(
-                        jnp.trace(gram).real / rank, 1e-12
-                    )
+                    ridge = 1e-6 * jnp.maximum(jnp.trace(gram).real, 1e-12)
                     factors[axis] = jnp.linalg.solve(
                         gram + ridge * jnp.eye(rank, dtype=core.dtype), rhs.T
                     ).T
@@ -162,22 +168,36 @@ def cp_fields(
                     ]
                 )
                 balanced = jnp.exp(jnp.mean(jnp.log(norms), axis=0))
-                return tuple(
+                factors = tuple(
                     x * (balanced / norms[i])[None, :]
                     for i, x in enumerate(factors)
                 )
+                error = jnp.linalg.norm(
+                    jnp.einsum("ia,ja,ka->ijk", *factors, precision=PRECISION)
+                    - target
+                )
+                improved = jnp.isfinite(error) & (error < best_error)
+                best = tuple(
+                    jnp.where(improved, new, old)
+                    for new, old in zip(factors, best)
+                )
+                return factors, best, jnp.where(improved, error, best_error)
 
-            return jax.lax.fori_loop(0, iterations, step, factors)
+            _, best, error = jax.lax.fori_loop(
+                0,
+                iterations,
+                step,
+                (
+                    factors,
+                    tuple(jnp.zeros_like(x) for x in factors),
+                    jnp.linalg.norm(target),
+                ),
+            )
+            return best, error
 
-        candidates = jax.lax.map(
+        candidates, errors = jax.lax.map(
             restart, jax.random.split(jax.random.PRNGKey(41), restarts)
         )
-        errors = jax.vmap(
-            lambda a, b, c: jnp.linalg.norm(
-                jnp.einsum("ia,ja,ka->ijk", a, b, c, precision=PRECISION)
-                - target
-            )
-        )(*candidates)
         best = jnp.argmin(errors)
         a, b, c = (x[best] for x in candidates)
         return a * scale, b, c

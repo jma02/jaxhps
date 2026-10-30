@@ -43,6 +43,24 @@ def test_cp_slabs_with_rank_larger_than_spatial_modes():
         )
 
 
+def test_overcomplete_complex_cp_fit_remains_finite():
+    rng = np.random.default_rng(43)
+    factors = [
+        rng.normal(size=(2, n)) + 1j * rng.normal(size=(2, n))
+        for n in (8, 7, 6)
+    ]
+    fields = jnp.asarray(
+        np.einsum("fx,fy,fz->fxyz", *factors), dtype=jnp.complex64
+    )
+    compressed = cp_fields(
+        tucker_fields(fields.reshape(2, -1), (8, 7, 6), 8), 64, 25
+    )
+    relative_error = jnp.linalg.norm(
+        compressed.slab(jnp.int32(0), 8) - fields.reshape(2, -1)
+    ) / jnp.linalg.norm(fields)
+    assert float(relative_error) < 0.01
+
+
 @pytest.mark.parametrize("method", ["tucker", "block"])
 @pytest.mark.parametrize("double", [False, True])
 def test_exact_operator_real_adjoint_and_cg(method, double):
