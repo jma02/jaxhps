@@ -158,7 +158,7 @@ checkpointed slab loops support differentiation with respect to contrast/data.
 
 Compression currently starts from the **entire dense cache**. It therefore does
 not reduce preparation's memory requirement, and its factorization cost is added
-to Helmholtz field preparation. A streaming solve-and-compress builder remains
+to Helmholtz field preparation. A batched solve-and-compress builder remains
 necessary to scale setup beyond the dense cache's capacity.
 
 Each compressed evaluation runs in a fresh Python process after the preparation
@@ -351,9 +351,9 @@ applications and CG, complex known-rank CP fits, overcomplete CP stability, and
 slab contraction with rank larger than spatial modes. Ruff, formatting, syntax
 compilation, and pre-commit pass. No static type-checker is configured.
 
-## Streamed setup and directly contracted spectral receiver fields
+## Batched setup and directly contracted spectral receiver fields
 
-**Best tested choices:** streamed Tucker for compact storage; direct Fourier
+**Best tested choices:** batched Tucker compression for compact storage; direct Fourier
 contraction for faster breast-masked solves. The final Fourier batch sweep
 reaches **1.095 s versus 1.529 s dense CG** (1.40× speedup), with **17.312 GB
 stored versus 53.509 GB** and **0.256% whole-vessel Born-signal error**. This is
@@ -361,7 +361,7 @@ not uniform full-grid accuracy, and it does not improve vessel recovery.
 
 | Time (UTC) | Motivation | What Tried / Evidence | Correctness | Timing | Merge Decision |
 | --- | --- | --- | --- | --- | --- |
-| 08:16 | Avoid the dense GPU field cache during setup and repeated receiver-field expansion during CG. | Solve one background field at a time; build Tucker factors and shared Fourier coefficients incrementally. Compare direct spectral applications against dense fields on the same A100-SXM4-80GB. | Setup peaks at 14.142 GB live GPU allocation. Tucker preserves its previous field/signal accuracy. Fourier truncation has much larger errors outside the reconstruction region than inside it. | Combined streamed field generation, both representations, checks, and disk writes: 688.90 s. Four-source Fourier batches: 1.461 s at 1.424% vessel-signal error or 2.191 s at 0.256%; dense: 1.528 s. | Retain streamed Tucker as the compact, accurate option; retain Fourier as an experimental speed/memory trade-off, not a uniformly accurate full-grid operator. |
+| 08:16 | Avoid the dense GPU field cache during setup and repeated receiver-field expansion during CG. | Solve one background field at a time; factorize each complete field independently with Tucker and collect Fourier coefficients in batches. Compare direct spectral applications against dense fields on the same A100-SXM4-80GB. | Setup peaks at 14.142 GB live GPU allocation. Tucker preserves its previous field/signal accuracy. Fourier truncation has much larger errors outside the reconstruction region than inside it. | Combined batched field generation, both representations, checks, and disk writes: 688.90 s. Four-source Fourier batches: 1.461 s at 1.424% vessel-signal error or 2.191 s at 0.256%; dense: 1.528 s. | Retain batched Tucker compression as the compact, accurate option; retain Fourier as an experimental speed/memory trade-off, not a uniformly accurate full-grid operator. |
 | 08:30 | Reuse receiver coefficients across more sources per contraction, and check errors on the actual masked inverse problem. | Repeat the 0.3% tapered-field tail with source batches 4/8/12/24 and add masked-adjoint and masked-normal probes. Same A100-SXM4-80GB model, fresh dense reference. | Vessel/random masked signal errors 0.256%/0.299%; masked adjoint 0.297%; masked normal application 0.431%. Full-grid errors remain about 4.95%. | Best eight-step CG 1.095 s, versus 1.529 s dense, at 27.632 GB peak live allocation. | Prefer larger source batches when workspace permits; preserve the explicit mask-dependent accuracy limitation. |
 
 ### What changed
@@ -370,6 +370,9 @@ not uniform full-grid accuracy, and it does not improve vessel recovery.
 The benchmark compresses each batch before generating the next. Tucker no
 longer needs the complete GPU cache before compression; its application still
 uses the existing slab reconstruction, so this change does not accelerate it.
+Each complete field is factorized independently. Batching limits how many fields
+are held in memory; it does not update a shared Tucker factorization as new data
+arrive.
 
 `SpectralBorn` instead uses a **shared spatial basis for all receivers**. It
 transforms each source-weighted image, gathers retained modes, and contracts
@@ -403,7 +406,7 @@ GB denotes decimal bytes. The Fourier rows below use four-source batches.
 | Representation | Storage (GB) | Vessel-signal error | Breast-masked random-image error | Full-grid random-image error | Eight-step CG (s) | Image change from dense |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | Dense fields | 53.509 | Reference | Reference | Reference | 1.528 | Reference |
-| Streamed Tucker 128 | 4.945 | 0.342% | 0.270% | 0.099% | 13.803 | 0.336% |
+| Batched Tucker 128 | 4.945 | 0.342% | 0.270% | 0.099% | 13.803 | 0.336% |
 | Fourier, 1% tapered-field tail | 11.001 | 1.424% | 1.268% | 8.221% | 1.461 | 1.384% |
 | Fourier, 0.3% tapered-field tail | 17.312 | 0.256% | 0.299% | 4.942% | 2.191 | 0.341% |
 
@@ -416,7 +419,7 @@ dense speed, not a compelling measured speedup, and has greater signal error.
 | Representation | Peak live evaluation (GB) | Allocator high-water mark (GB) | Full-grid adjoint-application error |
 | --- | ---: | ---: | ---: |
 | Dense fields | 59.338 | 80.862 | Reference |
-| Streamed Tucker 128 | 14.523 | 35.467 | 0.099% |
+| Batched Tucker 128 | 14.523 | 35.467 | 0.099% |
 | Fourier, 1% tail, batch 4 | 13.772 | 17.180 | 8.203% |
 | Fourier, 0.3% tail, batch 4 | 20.083 | 25.770 | 4.950% |
 
@@ -430,7 +433,7 @@ error**; this is a representation/capacity experiment, not vessel recovery.
 
 ### Setup memory and cost
 
-The entire streamed preparation, including phantom sampling and full-wave data
+The entire batched preparation, including phantom sampling and full-wave data
 generation, peaked at **14.142 GB live JAX memory**, with a **30.065 GB allocator
 high-water mark**. Together with the Tucker application measurement, this
 demonstrates a compressed setup-to-solve path without the former 53.5 GB GPU
@@ -491,7 +494,7 @@ residual 4.11e-6; both pass the existing numerical gates. All images retain
 approximately 99.93% vessel-contrast error. No improved anatomical recovery or
 network-training memory claim follows from these timings.
 
-Streamed field preparation without Tucker took 624.61 s, including dense and
+Batched field preparation without Tucker took 624.61 s, including dense and
 spectral disk writes; compact coefficient selection/writes took 50.61 s. Setup
 again peaked at 14.142 GB live / 30.065 GB allocated-pool memory. These timings
 include different disk work from the earlier dense-cache-only setup and should
@@ -516,7 +519,7 @@ work budget. For a small test use `--n 48 --sources 4 --receivers 24
 
 Sixty-seven focused CPU tests pass, including both bases, complex64/128,
 rectangular grids, non-dividing source batches, real adjoints, gradients through
-applications and CG, minimal mode selection, and streamed/full-cache solver
+applications and CG, minimal mode selection, and batched/full-cache solver
 equivalence. The exact tail-threshold/zero-mode cases additionally pass after
 tightening mode selection. Small GPU comparisons and the full-resolution rows
 above pass their numerical checks. DCT explicitly transforms real and imaginary

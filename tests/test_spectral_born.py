@@ -135,7 +135,7 @@ def test_mode_selection_tail_and_minimality():
     assert spectral_indices(np.array([0, 0, 1, 3]), 0.5).size == 1
 
 
-def test_streamed_field_solver_matches_full_cache():
+def test_batched_field_solver_matches_full_cache():
     points, _, truth = crop(8)
     background = jnp.asarray(truth)
     directions, receivers = sphere(3), 0.36 * sphere(5)

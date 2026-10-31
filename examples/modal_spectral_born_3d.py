@@ -1,4 +1,4 @@
-"""Bounded streamed spectral-compression experiment on one A100."""
+"""Batched field preparation and spectral compression on one A100."""
 
 import json
 import os

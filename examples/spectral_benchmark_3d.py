@@ -1,8 +1,8 @@
-"""Stream fields to disk and benchmark a directly contracted spectral Born map.
+"""Generate fields in batches and benchmark a direct spectral Born map.
 
 The dense disk copy is retained only to measure an uncompressed reference in
 a separate process. No full source/receiver field cache is built on the GPU
-during streamed preparation or spectral application.
+during batched preparation or spectral application.
 """
 
 import argparse
@@ -202,7 +202,7 @@ def prepare(args: argparse.Namespace) -> None:
             max_relative_error=worst_error,
         )
         del dense
-        checkpoint(f"{name}_streamed")
+        checkpoint(f"{name}_prepared")
     spectral.flush()
     scaled_sources.flush()
     np.save(args.directory / "spectral-energy.npy", np.asarray(energy))
@@ -214,7 +214,7 @@ def prepare(args: argparse.Namespace) -> None:
         completed=True,
     )
     if args.tucker_rank:
-        (args.directory / "compression-streamed-tucker.json").write_text(
+        (args.directory / "compression-batched-tucker.json").write_text(
             json.dumps(
                 dict(
                     rank=args.tucker_rank,
@@ -350,10 +350,10 @@ def evaluate_tucker(args: argparse.Namespace) -> None:
         for name in ("sources", "reciprocal_fields")
     ]
     operator = SlabBorn(*fields, shape, np.dtype("float32"), 32)
-    args.method = "streamed-tucker"
+    args.method = "batched-tucker"
     args.rank = args.tucker_rank
     args.slab_size = 32
-    args.report_name = "evaluation-streamed-tucker.json"
+    args.report_name = "evaluation-batched-tucker.json"
     evaluate_operator(operator, args)
 
 
