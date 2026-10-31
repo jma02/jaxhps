@@ -152,6 +152,10 @@ class BackgroundBorn:
     shape: tuple[int, ...]
     dtype: np.dtype
 
+    @property
+    def nbytes(self) -> int:
+        return self.sources.nbytes + self.reciprocal_fields.nbytes
+
     @jax.jit
     def __call__(self, delta: jax.Array) -> jax.Array:
         return jnp.matmul(
@@ -175,34 +179,27 @@ class BackgroundBorn:
         )
 
 
-def make_background_born(
+def make_background_field_solver(
     points: np.ndarray,
     kappa: float,
-    directions: np.ndarray,
-    receivers: np.ndarray,
     background: jax.Array,
     tol: float = 1e-6,
-) -> BackgroundBorn:
-    """Cache source/reciprocal fields for a fixed-background Jacobian.
-
-    With A = I + K diag(b), reciprocity gives J[s,r,v] = u[s,v] w[r,v],
-    where A u[s] = incident[s] and A w[r] = receiver_row[r]. This avoids
-    wave solves in subsequent Jacobian and real-adjoint applications.
-    """
+) -> Callable[[np.ndarray, bool], tuple[jax.Array, jax.Array]]:
+    """Prepare a reusable solver for bounded batches of background fields."""
     n = points.shape[0]
     h = float(points[1, 0, 0, 0] - points[0, 0, 0, 0])
     dtype = jnp.complex128 if jax.config.x64_enabled else jnp.complex64
     kernel = green_kernel(n, n * h / 2, kappa).astype(dtype)
     xyz = jnp.asarray(points.reshape(-1, 3))
 
-    @jax.jit
+    @partial(jax.jit, static_argnames=("reciprocal",))
     def prepare(
         kernel: jax.Array,
         background: jax.Array,
         xyz: jax.Array,
-        directions: jax.Array,
-        receivers: jax.Array,
-    ) -> tuple[jax.Array, jax.Array, jax.Array]:
+        positions: jax.Array,
+        reciprocal: bool,
+    ) -> tuple[jax.Array, jax.Array]:
         def operator(u: jax.Array) -> jax.Array:
             charge = background * u.reshape(background.shape)
             padded = jnp.pad(charge, ((0, n),) * 3)
@@ -225,41 +222,47 @@ def make_background_born(
             ) / jnp.linalg.norm(rhs)
             return total, residual
 
-        sources, source_residuals = jax.lax.map(
-            lambda direction: solve(
-                jnp.exp(1j * kappa * (xyz @ direction)).astype(dtype)
-            ),
-            jnp.asarray(directions),
-        )
-
-        def reciprocal(target: jax.Array) -> tuple[jax.Array, jax.Array]:
-            distance = jnp.linalg.norm(target - xyz, axis=-1)
-            row = (
-                -(kappa**2)
-                * h**3
-                * jnp.exp(1j * kappa * distance)
-                / (4 * jnp.pi * distance)
-            ).astype(dtype)
+        def field(position: jax.Array) -> tuple[jax.Array, jax.Array]:
+            if reciprocal:
+                distance = jnp.linalg.norm(position - xyz, axis=-1)
+                row = (
+                    -(kappa**2)
+                    * h**3
+                    * jnp.exp(1j * kappa * distance)
+                    / (4 * jnp.pi * distance)
+                ).astype(dtype)
+            else:
+                row = jnp.exp(1j * kappa * (xyz @ position)).astype(dtype)
             return solve(row)
 
-        reciprocal_fields, receiver_residuals = jax.lax.map(
-            reciprocal, jnp.asarray(receivers)
-        )
-        return (
-            sources,
-            reciprocal_fields,
-            jnp.maximum(source_residuals.max(), receiver_residuals.max()),
-        )
+        return jax.lax.map(field, positions)
 
-    sources, reciprocal_fields, residual = prepare(
-        kernel,
-        background,
-        xyz,
-        jnp.asarray(directions),
-        jnp.asarray(receivers),
-    )
-    if not np.isfinite(float(residual)) or float(residual) > 5 * tol:
-        raise RuntimeError(f"Born background-field residual {float(residual)}")
+    def evaluate(
+        positions: np.ndarray, reciprocal: bool
+    ) -> tuple[jax.Array, jax.Array]:
+        fields, residuals = prepare(
+            kernel, background, xyz, jnp.asarray(positions), reciprocal
+        )
+        residual = float(jnp.max(residuals))
+        if not np.isfinite(residual) or residual > 5 * tol:
+            raise RuntimeError(f"Born background-field residual {residual}")
+        return fields, residuals
+
+    return evaluate
+
+
+def make_background_born(
+    points: np.ndarray,
+    kappa: float,
+    directions: np.ndarray,
+    receivers: np.ndarray,
+    background: jax.Array,
+    tol: float = 1e-6,
+) -> BackgroundBorn:
+    """Cache J[s,r,v] = u[s,v] w[r,v] for a fixed-background Jacobian."""
+    solve = make_background_field_solver(points, kappa, background, tol)
+    sources, _ = solve(directions, False)
+    reciprocal_fields, _ = solve(receivers, True)
 
     return BackgroundBorn(
         sources,

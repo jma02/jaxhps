@@ -196,9 +196,22 @@ def evaluate_operator(operator, args) -> None:
     row["random_image_signal_relative_error"] = relative_error(
         operator(reference["random_image"]), reference["random_data"]
     )
+    if "full_random_image" in reference:
+        row["full_grid_random_signal_relative_error"] = relative_error(
+            operator(reference["full_random_image"]),
+            reference["full_random_data"],
+        )
     row["adjoint_application_relative_error"] = relative_error(
         adjoint, reference["adjoint"]
     )
+    row["masked_adjoint_application_relative_error"] = relative_error(
+        window * adjoint, window * reference["adjoint"]
+    )
+    if "normal_random" in reference:
+        row["masked_normal_application_relative_error"] = relative_error(
+            window * operator.adjoint(operator(reference["random_image"])),
+            reference["normal_random"],
+        )
     lhs = float(jnp.real(jnp.vdot(vessel_data, reference["probe"])))
     right = float(jnp.vdot(delta, adjoint))
     row["adjoint_identity_relative_error"] = abs(lhs - right) / max(
@@ -208,6 +221,7 @@ def evaluate_operator(operator, args) -> None:
         not np.isfinite(row["adjoint_identity_relative_error"])
         or row["adjoint_identity_relative_error"] > 1e-4
     ):
+        checkpoint("operator_check_failed")
         raise RuntimeError("Real-adjoint identity failed")
     checkpoint("operator_checked")
     for name, call in (
