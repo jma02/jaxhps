@@ -44,7 +44,10 @@ def dense_signals(
     sources: jax.Array, receivers: jax.Array, images: jax.Array
 ) -> jax.Array:
     return jax.lax.map(
-        lambda source: (images * source) @ receivers.T, sources
+        lambda source: jnp.matmul(
+            images * source, receivers.T, precision=jax.lax.Precision.HIGHEST
+        ),
+        sources,
     ).transpose(1, 0, 2)
 
 
@@ -53,7 +56,12 @@ def dense_adjoint(
     sources: jax.Array, receivers: jax.Array, data: jax.Array
 ) -> jax.Array:
     def step(i: int, image: jax.Array) -> jax.Array:
-        return image + jnp.real(sources[i] * (data[i].conj() @ receivers))
+        return image + jnp.real(
+            sources[i]
+            * jnp.matmul(
+                data[i].conj(), receivers, precision=jax.lax.Precision.HIGHEST
+            )
+        )
 
     return jax.lax.fori_loop(
         0, len(sources), step, jnp.zeros(sources.shape[1], jnp.float32)

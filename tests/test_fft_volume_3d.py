@@ -7,6 +7,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from jax.experimental import disable_x64
 from scipy.integrate import quad_vec
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
@@ -40,6 +41,19 @@ def test_batched_kernel_matches_full_quadrature(n, batch_size, kappa):
         expected,
         rtol=1e-12,
         atol=1e-14,
+    )
+
+
+@pytest.mark.parametrize("n", [16, 24])
+def test_kernel_is_built_in_float64_with_x64_off(n):
+    """Built in float32 this kernel is 1.5e-5 off; rounded only at the end."""
+    kappa = 201.06192982974676
+    exact = green_kernel(n, 1.25, kappa)
+    with disable_x64():
+        kernel = green_kernel(n, 1.25, kappa)
+    assert kernel.dtype == jnp.complex64
+    np.testing.assert_allclose(
+        kernel, exact, rtol=0, atol=2e-7 * np.abs(exact).max()
     )
 
 
