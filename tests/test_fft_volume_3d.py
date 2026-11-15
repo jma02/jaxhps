@@ -7,7 +7,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from jax.experimental import disable_x64
 from scipy.integrate import quad_vec
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
@@ -49,8 +48,11 @@ def test_kernel_is_built_in_float64_with_x64_off(n):
     """Built in float32 this kernel is 1.5e-5 off; rounded only at the end."""
     kappa = 201.06192982974676
     exact = green_kernel(n, 1.25, kappa)
-    with disable_x64():
+    jax.config.update("jax_enable_x64", False)
+    try:
         kernel = green_kernel(n, 1.25, kappa)
+    finally:
+        jax.config.update("jax_enable_x64", True)
     assert kernel.dtype == jnp.complex64
     np.testing.assert_allclose(
         kernel, exact, rtol=0, atol=2e-7 * np.abs(exact).max()

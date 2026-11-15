@@ -11,7 +11,6 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax.experimental import enable_x64
 
 from jaxhps._krylov import fgmres
 
@@ -43,7 +42,9 @@ def green_kernel(n, a, kappa, batch_size=16):
     its peak. Only the result is rounded to the default complex type.
     """
     dtype = jax.dtypes.canonicalize_dtype(jnp.complex128)
-    with enable_x64():
+    x64 = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", True)
+    try:
         h = 2 * a / n
         freq = 2 * jnp.pi * jnp.fft.fftfreq(4 * n, d=h)
         indices = jnp.concatenate([jnp.arange(n), jnp.arange(3 * n, 4 * n)])
@@ -58,6 +59,8 @@ def green_kernel(n, a, kappa, batch_size=16):
         cropped = jnp.fft.ifft(planes, axis=0)[indices, :, :]
         del planes
         kernel = jnp.fft.fftn(cropped)
+    finally:
+        jax.config.update("jax_enable_x64", x64)
     return kernel.astype(dtype)
 
 
