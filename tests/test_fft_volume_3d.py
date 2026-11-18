@@ -43,6 +43,22 @@ def test_batched_kernel_matches_full_quadrature(n, batch_size, kappa):
     )
 
 
+@pytest.mark.parametrize("n", [16, 24])
+def test_kernel_is_built_in_float64_with_x64_off(n):
+    """Built in float32 this kernel is 1.5e-5 off; rounded only at the end."""
+    kappa = 201.06192982974676
+    exact = green_kernel(n, 1.25, kappa)
+    jax.config.update("jax_enable_x64", False)
+    try:
+        kernel = green_kernel(n, 1.25, kappa)
+    finally:
+        jax.config.update("jax_enable_x64", True)
+    assert kernel.dtype == jnp.complex64
+    np.testing.assert_allclose(
+        kernel, exact, rtol=0, atol=2e-7 * np.abs(exact).max()
+    )
+
+
 def test_matvec_uses_dynamic_coefficients_and_kernel():
     from fft_volume_3d import _volume_matvec
 

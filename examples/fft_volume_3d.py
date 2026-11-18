@@ -32,26 +32,36 @@ def truncated_green_transform(s, kappa, radius):
     )
 
 
-@partial(jax.jit, static_argnames=("n", "batch_size"))
 def green_kernel(n, a, kappa, batch_size=16):
     """Build the same 4n quadrature in bounded batches of frequency planes.
 
     Crop each spatial axis immediately after its inverse FFT. Only a
     (4n, 2n, 2n) intermediate is retained, not the full (4n)^3 cube.
+    The quadrature runs in float64 even with x64 off: built in float32, the
+    288³ kernel at kappa = 201 is 0.23 % off, with entries off by 24 % of
+    its peak. Only the result is rounded to the default complex type.
     """
-    h = 2 * a / n
-    freq = 2 * jnp.pi * jnp.fft.fftfreq(4 * n, d=h)
-    indices = jnp.concatenate([jnp.arange(n), jnp.arange(3 * n, 4 * n)])
+    dtype = jax.dtypes.canonicalize_dtype(jnp.complex128)
+    x64 = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", True)
+    try:
+        h = 2 * a / n
+        freq = 2 * jnp.pi * jnp.fft.fftfreq(4 * n, d=h)
+        indices = jnp.concatenate([jnp.arange(n), jnp.arange(3 * n, 4 * n)])
 
-    def plane(fx):
-        s = jnp.sqrt(fx**2 + freq[:, None] ** 2 + freq[None, :] ** 2)
-        weights = truncated_green_transform(s, kappa, 3.6 * a)
-        spatial_z = jnp.fft.ifft(weights, axis=-1)[:, indices]
-        return jnp.fft.ifft(spatial_z, axis=0)[indices, :]
+        def plane(fx):
+            s = jnp.sqrt(fx**2 + freq[:, None] ** 2 + freq[None, :] ** 2)
+            weights = truncated_green_transform(s, kappa, 3.6 * a)
+            spatial_z = jnp.fft.ifft(weights, axis=-1)[:, indices]
+            return jnp.fft.ifft(spatial_z, axis=0)[indices, :]
 
-    planes = jax.lax.map(plane, freq, batch_size=batch_size)
-    cropped = jnp.fft.ifft(planes, axis=0)[indices, :, :]
-    return jnp.fft.fftn(cropped)
+        planes = jax.lax.map(plane, freq, batch_size=batch_size)
+        cropped = jnp.fft.ifft(planes, axis=0)[indices, :, :]
+        del planes
+        kernel = jnp.fft.fftn(cropped)
+    finally:
+        jax.config.update("jax_enable_x64", x64)
+    return kernel.astype(dtype)
 
 
 @jax.jit

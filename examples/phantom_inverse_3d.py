@@ -72,7 +72,15 @@ def make_forward(
             return u + kappa**2 * potential.ravel()
 
         def solve(direction: jax.Array) -> tuple[jax.Array, jax.Array]:
-            inc = jnp.exp(1j * kappa * (xyz @ direction)).astype(dtype)
+            # Full float32: the default TF32 GPU product leaves these
+            # several-hundred-radian phases up to 0.16 rad off.
+            inc = jnp.exp(
+                1j
+                * kappa
+                * jnp.matmul(
+                    xyz, direction, precision=jax.lax.Precision.HIGHEST
+                )
+            ).astype(dtype)
 
             def krylov(matvec, rhs):
                 solution, _ = gmres(
@@ -232,7 +240,13 @@ def make_background_field_solver(
                     / (4 * jnp.pi * distance)
                 ).astype(dtype)
             else:
-                row = jnp.exp(1j * kappa * (xyz @ position)).astype(dtype)
+                row = jnp.exp(
+                    1j
+                    * kappa
+                    * jnp.matmul(
+                        xyz, position, precision=jax.lax.Precision.HIGHEST
+                    )
+                ).astype(dtype)
             return solve(row)
 
         return jax.lax.map(field, positions)
